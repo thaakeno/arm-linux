@@ -29,11 +29,11 @@ void ready(int fd, short events, Clock::time_point deadline) {
     if(p.revents & (POLLERR|POLLHUP|POLLNVAL)) throw std::runtime_error("Guest connection closed or failed");
 }
 
-void transfer(int fd, void* ptr, size_t len, bool write, Clock::time_point deadline) {
+void transfer(int fd, void* ptr, size_t len, bool writing, Clock::time_point deadline) {
     auto p=static_cast<char*>(ptr);
     while(len){
-        ready(fd,write?POLLOUT:POLLIN,deadline);
-        ssize_t n=write?::write(fd,p,len):::read(fd,p,len);
+        ready(fd,writing?POLLOUT:POLLIN,deadline);
+        ssize_t n = writing ? ::write(fd,p,len) : ::read(fd,p,len);
         if(n<0&&(errno==EINTR||errno==EAGAIN)) continue;
         if(n<=0) throw std::runtime_error("Guest connection closed or failed");
         p+=n; len-=static_cast<size_t>(n);
