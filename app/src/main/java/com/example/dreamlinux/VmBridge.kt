@@ -461,16 +461,16 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
             apt-get update
             apt-get install -y plasma-desktop plasma-workspace kwin-wayland konsole dolphin xwayland dbus-user-session mesa-utils vulkan-tools
             for f in /usr/local/bin/enable_display /usr/local/bin/enable_gfxstream; do
-              [ -f "$f" ] && sed -i '/systemctl --user start weston/d' "$f" || true
+              [ -f "${'$'}f" ] && sed -i '/systemctl --user start weston/d' "${'$'}f" || true
             done
         """.trimIndent()
 
         private val KDE_START = """
             set -eu
             pkill weston || true
-            uid=$(id -u droid 2>/dev/null || echo 1000)
-            install -d -m 700 -o droid -g droid /run/user/$uid
-            runuser -u droid -- env XDG_RUNTIME_DIR=/run/user/$uid dbus-run-session bash -lc '
+            uid=${'$'}(id -u droid 2>/dev/null || echo 1000)
+            install -d -m 700 -o droid -g droid /run/user/${'$'}uid
+            runuser -u droid -- env XDG_RUNTIME_DIR=/run/user/${'$'}uid dbus-run-session bash -lc '
               if [ -f /usr/local/bin/enable_gfxstream ]; then source /usr/local/bin/enable_gfxstream || true; elif [ -f /usr/local/bin/enable_display ]; then source /usr/local/bin/enable_display || true; fi
               export XDG_SESSION_TYPE=wayland QT_QPA_PLATFORM=wayland
               exec startplasma-wayland
