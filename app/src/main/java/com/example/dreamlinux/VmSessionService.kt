@@ -25,6 +25,7 @@ data class SessionState(
     val debianTerminal:String="",
     val message:String="Connect Shizuku to begin",
     val busy:Boolean=false,
+    val debianStarting:Boolean=false,
     val debianInstalled:Boolean=false,
     val debianInstalling:Boolean=false,
     val installProgress:Double=-1.0,
@@ -46,10 +47,10 @@ class VmSessionService : Service() {
     private var successfulGateACommands=0
     private var reconnectProbeArmed=false
 
-    // Bump this whenever the Shizuku-side bridge changes. Otherwise Shizuku may keep an old
-    // UserService process alive across APK updates and we end up testing stale VmBridge code.
-    private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,VmBridge::class.java))
-        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(BuildConfig.VERSION_CODE) }
+    // Use the async facade so a long Debian boot/provision transaction never monopolizes the
+    // UserService Binder and make the Android UI look frozen.
+    private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,AsyncVmBridge::class.java))
+        .daemon(false).processNameSuffix("vm_bridge_async").debuggable(true).version(BuildConfig.VERSION_CODE) }
 
     private val connection=object:ServiceConnection {
         override fun onServiceConnected(name:ComponentName,binder:IBinder) {
@@ -59,7 +60,7 @@ class VmSessionService : Service() {
         }
         override fun onServiceDisconnected(name:ComponentName) {
             bridge=null
-            state.value=state.value.copy(connected=false,running=false,message="Shizuku bridge disconnected; VM files retained")
+            state.value=state.value.copy(connected=false,running=false,debianStarting=false,message="Shizuku bridge disconnected; VM files retained")
         }
     }
 
@@ -77,13 +78,16 @@ class VmSessionService : Service() {
                 .put("commit",BuildConfig.GIT_COMMIT).put("branch",BuildConfig.GIT_BRANCH)
                 .put("running",current.running).put("name",current.name).put("mode",current.mode)
                 .put("stage",current.stage).put("api",current.api).put("vmRoot",current.vmRoot)
+                .put("debianStarting",current.debianStarting)
                 .put("debianInstalled",current.debianInstalled).put("debianInstalling",current.debianInstalling)
                 .put("kdeInstalled",current.kdeInstalled).put("kdeInstalling",current.kdeInstalling).put("kdeStage",current.kdeStage)
                 .put("graphics",current.graphics).put("capabilities",current.capabilities)
                 .put("message",current.message).put("reconnect",if(reconnectProbeArmed)"PENDING" else if(successfulGateACommands>1)"PASS" else "NOT TESTED")
                 .toString(2))
         } } }
-        scope.launch { while(isActive) { delay(1200); if(bridge!=null&&!state.value.busy) refresh() } }
+        // Always refresh. The async bridge's status() is deliberately non-blocking during Debian
+        // startup, so progress remains visible even while an operation owns the UI busy flag.
+        scope.launch { while(isActive) { delay(800); if(bridge!=null) refresh() } }
     }
 
     override fun onStartCommand(intent:Intent?,flags:Int,startId:Int):Int {
@@ -99,7 +103,9 @@ class VmSessionService : Service() {
         val error=obj.optString("error")
         val installError=obj.optString("installError")
         val kdeError=obj.optString("kdeError")
+        val debianStarting=obj.optBoolean("debianStarting")
         val msg=when {
+            debianStarting -> "Starting Debian in background · ${obj.optLong("startupElapsedSeconds",0L)}s · UI remains responsive"
             kdeError.isNotBlank() -> kdeError
             installError.isNotBlank() -> installError
             error.isNotBlank() -> error
@@ -114,6 +120,7 @@ class VmSessionService : Service() {
             running=obj.optBoolean("running"),cid=obj.optInt("cid",-1),name=obj.optString("name"),
             mode=obj.optString("mode","none"),stage=obj.optString("stage","unknown"),api=obj.optString("api"),
             vmRoot=obj.optString("vmRoot"),console=obj.optString("log"),message=msg,
+            debianStarting=debianStarting,
             debianInstalled=obj.optBoolean("debianInstalled"),debianInstalling=obj.optBoolean("debianInstalling"),
             installProgress=obj.optDouble("installProgress",-1.0),installBytes=obj.optLong("installBytes",0L),
             installTotal=obj.optLong("installTotal",-1L),kdeInstalled=obj.optBoolean("kdeInstalled"),
@@ -151,6 +158,24 @@ class VmSessionService : Service() {
         throw IllegalStateException("Timed out waiting for AVF VM to reach STATUS_RUNNING$suffix")
     }
 
+    private suspend fun waitForDebianStartup(b:IVmBridge, timeoutMs:Long=12L*60L*1000L) {
+        val deadline=SystemClock.elapsedRealtime()+timeoutMs
+        while(SystemClock.elapsedRealtime()<deadline) {
+            val raw=withContext(Dispatchers.IO){b.status()}
+            val obj=JSONObject(raw)
+            applyStatus(raw)
+            if(!obj.optBoolean("debianStarting")) {
+                val error=obj.optString("error")
+                if(error.isNotBlank() || obj.optString("stage").startsWith("blocked:")) {
+                    throw IllegalStateException(if(error.isNotBlank()) error else "Debian startup blocked at ${obj.optString("stage")}")
+                }
+                return
+            }
+            delay(500)
+        }
+        throw IllegalStateException("Debian startup exceeded 12 minutes; check diagnostics")
+    }
+
     fun startVm()=operation { b ->
         applyStatus(withContext(Dispatchers.IO){b.startVm()})
         waitForVmRunning(b,45_000L)
@@ -164,18 +189,20 @@ class VmSessionService : Service() {
     }
     fun installDebian()=operation("debian") { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
     fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation("debian") { b ->
-        displayRequested=true
+        displayRequested=false
+        pendingSurface=null
+        state.value=state.value.copy(message="Launching Debian…")
         applyStatus(withContext(Dispatchers.IO){b.startDebian(width,height,dpi,refreshRate)})
-        waitForVmRunning(b,60_000L)
-        pendingSurface?.let { surface -> if(surface.isValid) withContext(Dispatchers.IO){b.setDisplaySurface(surface)} }
+        waitForDebianStartup(b)
         refresh()
     }
     fun startDebianDiagnostic()=operation("debian") { b ->
         displayRequested=false
         pendingSurface=null
+        state.value=state.value.copy(message="Launching Debian diagnostic…")
         applyStatus(withContext(Dispatchers.IO){b.startDebianDiagnostic()})
-        waitForVmRunning(b,60_000L)
-        state.value=state.value.copy(message="Headless diagnostic: VMM started; Debian boot still unverified")
+        waitForDebianStartup(b)
+        refresh()
     }
     fun installKde()=operation("debian") { b ->
         applyStatus(withContext(Dispatchers.IO){b.installKde()})
