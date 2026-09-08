@@ -38,15 +38,15 @@ class VmSessionService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var bridge: IVmBridge? = null
-    private var successfulStarts = 0
     private var successfulCommands = 0
+    private var reconnectProbeArmed = false
 
     private val args by lazy {
         Shizuku.UserServiceArgs(ComponentName(this, VmBridge::class.java))
             .daemon(false)
             .processNameSuffix("vm_bridge")
             .debuggable(true)
-            .version(3)
+            .version(4)
     }
 
     private val connection = object : ServiceConnection {
@@ -79,7 +79,7 @@ class VmSessionService : Service() {
             1,
             Notification.Builder(this, "vm")
                 .setContentTitle("DEV 2 LINUX")
-                .setContentText("Gate A managed VM controller")
+                .setContentText("Managed AVF session")
                 .setSmallIcon(android.R.drawable.ic_menu_manage)
                 .setContentIntent(intent)
                 .build()
@@ -170,17 +170,23 @@ class VmSessionService : Service() {
 
     fun startVm() = operation { b ->
         applyStatus(bridgeString("vm_boot") { b.startVm() })
-        successfulStarts++
-        val reconnect = if (successfulStarts >= 2 && successfulCommands >= 1) "PASS" else state.value.reconnect
         state.value = state.value.copy(
-            reconnect = reconnect,
-            message = "Managed Microdroid is running. Test a guest command next."
+            reconnect = if (reconnectProbeArmed) "PENDING" else state.value.reconnect,
+            message = if (reconnectProbeArmed) {
+                "VM restarted. Run a guest command to complete reconnect verification."
+            } else {
+                "Managed Microdroid is running. Test a guest command next."
+            }
         )
     }
 
     fun stopVm() = operation { b ->
         applyStatus(bridgeString("vm_stop") { b.stopVm() })
-        state.value = state.value.copy(message = "Managed VM stopped; VM data retained")
+        if (successfulCommands > 0) reconnectProbeArmed = true
+        state.value = state.value.copy(
+            reconnect = if (reconnectProbeArmed) "PENDING" else state.value.reconnect,
+            message = "Managed VM stopped; VM data retained"
+        )
     }
 
     fun shell(command: String) = operation { b ->
@@ -190,9 +196,16 @@ class VmSessionService : Service() {
         val output = result.getString("output")
         successfulCommands++
         refresh()
+        val reconnectPassed = reconnectProbeArmed
+        if (reconnectPassed) reconnectProbeArmed = false
         state.value = state.value.copy(
             terminal = (state.value.terminal + "\n$ $command\n" + output).takeLast(60000),
-            message = "Guest command completed through sanctioned vsock FD"
+            reconnect = if (reconnectPassed) "PASS" else state.value.reconnect,
+            message = if (reconnectPassed) {
+                "Reconnect verified: guest command succeeded after VM restart."
+            } else {
+                "Guest command completed through sanctioned vsock FD"
+            }
         )
     }
 
