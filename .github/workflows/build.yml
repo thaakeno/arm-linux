@@ -40,6 +40,13 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon
 
+      - name: Verify AVF-compatible APK signing
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          OUT="$($ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner verify --verbose "$APK")"
+          echo "$OUT"
+          echo "$OUT" | grep -F "Verified using v3 scheme (APK Signature Scheme v3): true"
+
       - name: Prepare Verification Metadata
         run: |
           if [ -f verification.json ]; then
