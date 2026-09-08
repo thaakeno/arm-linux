@@ -30,7 +30,9 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
     private var guestCommand = "PENDING"
 
     private val lock = Any()
-    private val vmName = "dev2-gate-a"
+    // New instance name on purpose: protected Microdroid instance metadata is tied to its payload.
+    // This build changes the payload to correctly report ready, so do not reuse stale Gate-A state.
+    private val vmName = "dev2-gate-a-v4"
     private val vmRoot = File("/data/local/tmp/dev2-linux/${appContext.packageName}")
     private val scopedContext: Context by lazy { ShellVmContext(appContext, vmRoot) }
 
@@ -190,9 +192,8 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
 
     /**
      * STATUS_RUNNING means crosvm is running, not that Microdroid/adbd is already listening.
-     * AOSP explicitly recommends waiting for payload readiness or retrying vsock connections to
-     * avoid this race. We use a bounded retry because Gate A talks to Microdroid's adbd rather than
-     * a payload-owned server that can call AVmPayload_notifyPayloadReady().
+     * AOSP recommends waiting for payload readiness or retrying vsock connections to avoid this
+     * race. We use a bounded retry because Gate A talks to Microdroid's adbd.
      */
     private fun connectAdb(vm: Any): ParcelFileDescriptor {
         connectVsock = "PENDING"
