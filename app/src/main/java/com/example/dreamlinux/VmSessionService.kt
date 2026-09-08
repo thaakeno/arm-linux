@@ -46,7 +46,7 @@ class VmSessionService : Service() {
             .daemon(false)
             .processNameSuffix("vm_bridge")
             .debuggable(true)
-            .version(2)
+            .version(3)
     }
 
     private val connection = object : ServiceConnection {
@@ -154,17 +154,22 @@ class VmSessionService : Service() {
         )
     }
 
+    private suspend fun bridgeString(stage: String, call: () -> String?): String {
+        val raw: String? = withContext(Dispatchers.IO) { call() }
+        return raw ?: throw IllegalStateException("$stage: bridge returned null instead of a diagnostic result")
+    }
+
     private suspend fun refresh() {
         try {
             val b = bridge ?: return
-            applyStatus(withContext(Dispatchers.IO) { b.status() })
+            applyStatus(bridgeString("status") { b.status() })
         } catch (e: Exception) {
             state.value = state.value.copy(message = e.message ?: "Status unavailable")
         }
     }
 
     fun startVm() = operation { b ->
-        applyStatus(withContext(Dispatchers.IO) { b.startVm() })
+        applyStatus(bridgeString("vm_boot") { b.startVm() })
         successfulStarts++
         val reconnect = if (successfulStarts >= 2 && successfulCommands >= 1) "PASS" else state.value.reconnect
         state.value = state.value.copy(
@@ -174,13 +179,12 @@ class VmSessionService : Service() {
     }
 
     fun stopVm() = operation { b ->
-        applyStatus(withContext(Dispatchers.IO) { b.stopVm() })
+        applyStatus(bridgeString("vm_stop") { b.stopVm() })
         state.value = state.value.copy(message = "Managed VM stopped; VM data retained")
     }
 
     fun shell(command: String) = operation { b ->
-        val reply = withContext(Dispatchers.IO) { b.guestShell(command) }
-        check(reply != null) { "Bridge returned no result; guest execution is unverified" }
+        val reply = bridgeString("guest_command") { b.guestShell(command) }
         val result = JSONObject(reply)
         check(result.getBoolean("ok")) { result.optString("error", "Guest command failed") }
         val output = result.getString("output")
