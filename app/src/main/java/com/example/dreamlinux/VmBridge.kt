@@ -103,9 +103,7 @@ class VmBridge : IVmBridge.Stub() {
     @Synchronized override fun stopVm(): String {
         lastError=""
         try {
-            vm?.let { machine ->
-                if(vmStatus(machine)==runningStatus(machine)) invoke(machine,"stop")
-            }
+            vm?.let { machine -> if(vmStatus(machine)==runningStatus(machine)) invoke(machine,"stop") }
             stage="stopped"
             append("VM stopped")
         } catch(t:Throwable) {
