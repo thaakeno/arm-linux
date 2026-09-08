@@ -4,6 +4,7 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
@@ -44,7 +45,6 @@ internal class DebianImage(
         check(kernel.isFile) { "Official image archive did not contain vmlinuz" }
         check(initrd.isFile) { "Official image archive did not contain initrd.img" }
 
-        // crosvm disk backing files need page/block alignment. Never truncate data: only extend.
         listOf(rootPart, efiPart).forEach(::align4096)
         File(root, ".dev1-installed").writeText("source=$URL\n")
         onLog("official AVF Debian image installed at ${root.path}")
@@ -105,7 +105,12 @@ internal class DebianImage(
     }
 
     private fun align4096(file: File) {
-        val remainder = file.length() % 4096L
-        if (remainder != 0L) file.setLength(file.length() + (4096L - remainder))
+        val length = file.length()
+        val remainder = length % 4096L
+        if (remainder != 0L) {
+            val aligned = length + (4096L - remainder)
+            RandomAccessFile(file, "rw").use { it.setLength(aligned) }
+            onLog("aligned ${file.name}: $length -> $aligned bytes")
+        }
     }
 }
