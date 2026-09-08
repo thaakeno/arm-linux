@@ -46,7 +46,7 @@ class VmSessionService : Service() {
             .daemon(false)
             .processNameSuffix("vm_bridge")
             .debuggable(true)
-            .version(5)
+            .version(6)
     }
 
     private val connection = object : ServiceConnection {
