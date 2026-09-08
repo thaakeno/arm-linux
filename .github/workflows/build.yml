@@ -40,17 +40,26 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon
 
+      - name: Verify APK Signature Schemes
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee apk-signature.txt
+          grep -q 'Verified using v3 scheme (APK Signature Scheme v3): true' apk-signature.txt
+          echo 'AVF-required APK Signature Scheme v3: PASS'
+
       - name: Prepare Verification Metadata
         run: |
           if [ -f verification.json ]; then
-            python3 -c "import json; d=json.load(open('verification.json')); d['commit']='${{ github.sha }}'; json.dump(d, open('verification.json','w'), indent=2)"
+            python3 -c "import json; d=json.load(open('verification.json')); d['commit']='${{ github.sha }}'; d['apk_signature_v3']='PASS'; json.dump(d, open('verification.json','w'), indent=2)"
           else
             cat <<EOF > verification.json
           {
             "commit": "${{ github.sha }}",
+            "apk_signature_v3": "PASS",
             "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
-            "vm_creation": "PASS",
-            "vm_boot": "PASS",
+            "vm_creation": "PENDING DEVICE RETEST",
+            "vm_boot": "PENDING DEVICE RETEST",
             "connect_vsock": "PENDING",
             "guest_command": "PENDING",
             "debian": "NOT TESTED",
@@ -77,7 +86,7 @@ jobs:
 
           echo "Target release tag: $TAG"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TITLE" --notes "Rolling build from branch $BRANCH commit ${{ github.sha }}" --prerelease
-          gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json --clobber
+          gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json apk-signature.txt --clobber
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
@@ -86,4 +95,5 @@ jobs:
           path: |
             app/build/outputs/apk/debug/app-debug.apk
             verification.json
+            apk-signature.txt
           retention-days: 1
