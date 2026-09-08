@@ -1,10 +1,15 @@
-﻿{
-  "commit": "9475327",
-  "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
-  "vm_creation": "PASS",
-  "vm_boot": "PASS",
-  "connect_vsock": "BLOCKED",
-  "guest_command": "BLOCKED",
-  "debian": "NOT TESTED",
-  "gles": "NOT TESTED"
+{
+  "commit": "BUILD_INJECTED",
+  "branch": "dev-1",
+  "app": "DEV 1 LINUX",
+  "historical_microdroid_boot": "PASS",
+  "historical_direct_vsock": "BLOCKED_BY_SELINUX",
+  "managed_vm_creation": "DEVICE TEST REQUIRED",
+  "managed_vm_boot": "DEVICE TEST REQUIRED",
+  "connect_vsock": "DEVICE TEST REQUIRED",
+  "guest_command": "DEVICE TEST REQUIRED",
+  "debian_13": "NOT TESTED",
+  "custom_vm_api": "NOT TESTED",
+  "gfxstream": "NOT TESTED",
+  "kde_wayland": "NOT TESTED"
 }
