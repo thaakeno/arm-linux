@@ -1,0 +1,15 @@
+09-08 19:19:32.381 21355 21355 W app_process: type=1400 audit(0.0:137298): avc:  denied  { read } for  name="u:object_r:vendor_audio_prop:s0" dev="tmpfs" ino=457 scontext=u:r:shell:s0 tcontext=u:object_r:vendor_audio_prop:s0 tclass=file permissive=0
+09-08 19:19:32.505 21355 21355 W main    : type=1400 audit(0.0:137299): avc:  denied  { read } for  name="u:object_r:qemu_sf_lcd_density_prop:s0" dev="tmpfs" ino=365 scontext=u:r:shell:s0 tcontext=u:object_r:qemu_sf_lcd_density_prop:s0 tclass=file permissive=0
+09-08 19:19:32.505 21355 21355 W main    : type=1400 audit(0.0:137300): avc:  denied  { read } for  name="u:object_r:qemu_sf_lcd_density_prop:s0" dev="tmpfs" ino=365 scontext=u:r:shell:s0 tcontext=u:object_r:qemu_sf_lcd_density_prop:s0 tclass=file permissive=0
+09-08 19:19:32.585 21355 21355 W main    : type=1400 audit(0.0:137301): avc:  denied  { execute } for  name="idmap2" dev="dm-16" ino=8876225 scontext=u:r:shell:s0 tcontext=u:object_r:idmap_exec:s0 tclass=file permissive=0
+09-08 19:19:32.589 21355 21355 W main    : type=1400 audit(0.0:137302): avc:  denied  { execute } for  name="idmap2" dev="dm-16" ino=8876225 scontext=u:r:shell:s0 tcontext=u:object_r:idmap_exec:s0 tclass=file permissive=0
+09-08 19:20:01.593 21355 21355 W binder:21355_2: type=1400 audit(0.0:137327): avc:  denied  { create } for  scontext=u:r:shell:s0 tcontext=u:r:shell:s0 tclass=vsock_socket permissive=0
+09-08 19:20:01.597 21355 21368 E JavaBinder: *** Uncaught remote exception! Exceptions are not yet supported across processes. Client PID 32308 UID 10474.
+09-08 19:20:01.597 21355 21368 E JavaBinder: java.io.IOException: vsock socket: Permission denied
+09-08 19:20:01.597 21355 21368 E JavaBinder: 	at com.example.dreamlinux.NativeTransport.shell(Native Method)
+09-08 19:20:01.597 21355 21368 E JavaBinder: 	at com.example.dreamlinux.VmBridge.guestShell(VmBridge.kt:58)
+09-08 19:20:09.529 21355 21368 E JavaBinder: *** Uncaught remote exception! Exceptions are not yet supported across processes. Client PID 32308 UID 10474.
+09-08 19:20:09.529 21355 21368 E JavaBinder: java.io.IOException: vsock socket: Permission denied
+09-08 19:20:09.529 21355 21368 E JavaBinder: 	at com.example.dreamlinux.NativeTransport.shell(Native Method)
+09-08 19:20:09.529 21355 21368 E JavaBinder: 	at com.example.dreamlinux.VmBridge.guestShell(VmBridge.kt:58)
+09-08 19:20:09.525 21355 21355 W binder:21355_2: type=1400 audit(0.0:137328): avc:  denied  { create } for  scontext=u:r:shell:s0 tcontext=u:r:shell:s0 tclass=vsock_socket permissive=0

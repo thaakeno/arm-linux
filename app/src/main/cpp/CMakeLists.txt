@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(dream_transport)
+add_library(dream_transport SHARED transport.cpp)
+target_compile_features(dream_transport PRIVATE cxx_std_17)
+target_compile_options(dream_transport PRIVATE -Wall -Wextra -Werror)
