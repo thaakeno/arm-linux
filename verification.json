@@ -8,8 +8,12 @@
   "managed_vm_boot": "DEVICE TEST REQUIRED",
   "connect_vsock": "DEVICE TEST REQUIRED",
   "guest_command": "DEVICE TEST REQUIRED",
-  "debian_13": "NOT TESTED",
-  "custom_vm_api": "NOT TESTED",
-  "gfxstream": "NOT TESTED",
-  "kde_wayland": "NOT TESTED"
+  "debian_13_image_install": "IMPLEMENTED - DEVICE TEST REQUIRED",
+  "custom_vm_api": "IMPLEMENTED - DEVICE TEST REQUIRED",
+  "gfxstream_config": "IMPLEMENTED - DEVICE TEST REQUIRED",
+  "display_surface": "IMPLEMENTED - DEVICE TEST REQUIRED",
+  "touch_input": "IMPLEMENTED - DEVICE TEST REQUIRED",
+  "keyboard_input": "IMPLEMENTED - DEVICE TEST REQUIRED",
+  "kde_wayland": "NOT YET PROVISIONED",
+  "hardware_acceleration": "NOT PROVEN"
 }
