@@ -1,5 +1,6 @@
 package com.example.dreamlinux;
 
+import android.os.ParcelFileDescriptor;
 import android.view.Surface;
 
 interface IVmBridge {
@@ -17,5 +18,6 @@ interface IVmBridge {
     String installKde() = 11;
     String debianConsole(String command) = 12;
     String startDebianDiagnostic() = 13;
+    ParcelFileDescriptor openDebianVsock(int port) = 14;
     void destroy() = 16777114;
 }
