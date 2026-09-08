@@ -11,12 +11,26 @@ android {
         applicationId = "com.example.dreamlinux"
         minSdk = 29
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2-dev1-linux"
+        versionCode = 3
+        versionName = "0.3-dev1-linux"
         ndk { abiFilters += "arm64-v8a" }
     }
 
+    signingConfigs {
+        getByName("debug") {
+            // AVF's idsig path on this device requires an APK Signature Scheme v3 block.
+            // Do not rely on AGP defaults here: make every scheme explicit and CI-verified.
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+            enableV4Signing = true
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
