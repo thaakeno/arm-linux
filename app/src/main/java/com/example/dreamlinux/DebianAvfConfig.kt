@@ -40,7 +40,16 @@ internal object DebianAvfConfig {
             .forEach { AvfReflect.call(custom, "addParam", it) }
 
         addDisks(custom, json.optJSONArray("disks") ?: JSONArray(), imageDir)
-        addSharedPaths(custom, json.optJSONArray("sharedPath"), context, log)
+
+        // Do not add app-domain virtiofs shares from the Shizuku shell process. In AOSP's
+        // SharedPath API, appDomain=true means crosvm is spawned from the caller's app context.
+        // That is valid for the privileged Terminal app but SELinux denies executing
+        // /apex/com.android.virt/bin/crosvm from uid=2000 shell. Keep Debian launch entirely
+        // under VirtualizationService/virtmgr; shared folders can be added later through a
+        // non-app-domain path once basic Debian boot/display is proven.
+        if (json.optJSONArray("sharedPath") != null) {
+            log("Skipping host shared paths for shell bridge; keeping crosvm under virtualizationservice")
+        }
 
         val wantsNetwork = json.optBoolean("network", false)
         AvfReflect.callOptional(custom, "useNetwork", wantsNetwork)
@@ -148,6 +157,7 @@ internal object DebianAvfConfig {
         }
     }
 
+    @Suppress("unused")
     private fun addSharedPaths(custom: Any, paths: JSONArray?, context: Context, log: (String) -> Unit) {
         if (paths == null) return
         val sharedClass = Class.forName(BASE + "VirtualMachineCustomImageConfig\$SharedPath")
@@ -177,11 +187,11 @@ internal object DebianAvfConfig {
                 7,
                 "internal",
                 "internal",
-                true,
-                socket.path,
+                false,
+                "",
             )
             AvfReflect.call(custom, "addSharedPath", shared)
-            log("Added internal virtiofs share $path uid=$hostUid gid=$hostGid")
+            log("Added non-app-domain virtiofs share $path uid=$hostUid gid=$hostGid")
         }
     }
 }
