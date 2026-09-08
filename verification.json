@@ -1,6 +1,6 @@
 {
   "commit": "BUILD_TIME",
-  "source": "target-device-evidence-2026-09-08-plus-fix",
+  "source": "target-device-evidence-2026-09-08-plus-fix-ci",
   "device": "POCO F8 Ultra",
   "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
   "stock_cli_microdroid_boot": "PASS",
