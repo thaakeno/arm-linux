@@ -109,7 +109,6 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
         invoke(builder, "setPayloadBinaryName", "libdream_payload.so")
         invoke(builder, "setMemoryBytes", 256L * 1024L * 1024L)
 
-        // DEBUG_LEVEL_FULL is 1 on current AVF, but use the actual runtime constant.
         val configClass = Class.forName("android.system.virtualmachine.VirtualMachineConfig")
         val debugFull = configClass.getField("DEBUG_LEVEL_FULL").getInt(null)
         invoke(builder, "setDebugLevel", debugFull)
@@ -136,12 +135,15 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
 
     private fun statusValue(vm: Any): Int = (invoke(vm, "getStatus") as Number).toInt()
 
+    private fun runningValue(): Int = Class.forName("android.system.virtualmachine.VirtualMachine")
+        .getField("STATUS_RUNNING").getInt(null)
+
+    private fun isVmRunning(vm: Any): Boolean = statusValue(vm) == runningValue()
+
     private fun waitUntilRunning(vm: Any) {
-        val vmClass = Class.forName("android.system.virtualmachine.VirtualMachine")
-        val runningValue = vmClass.getField("STATUS_RUNNING").getInt(null)
         val deadline = System.nanoTime() + 45_000_000_000L
         while (System.nanoTime() < deadline) {
-            if (statusValue(vm) == runningValue) {
+            if (isVmRunning(vm)) {
                 running = true
                 vmBoot = "PASS"
                 failureStage = "none"
@@ -157,9 +159,7 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
     override fun startVm(): String {
         try {
             val vm = createOrGetVm()
-            val vmClass = Class.forName("android.system.virtualmachine.VirtualMachine")
-            val runningValue = vmClass.getField("STATUS_RUNNING").getInt(null)
-            if (statusValue(vm) != runningValue) {
+            if (!isVmRunning(vm)) {
                 append("[vm_boot] invoking VirtualMachine.run()")
                 invoke(vm, "run")
             }
@@ -188,19 +188,55 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
         return status()
     }
 
+    /**
+     * STATUS_RUNNING means crosvm is running, not that Microdroid/adbd is already listening.
+     * AOSP explicitly recommends waiting for payload readiness or retrying vsock connections to
+     * avoid this race. We use a bounded retry because Gate A talks to Microdroid's adbd rather than
+     * a payload-owned server that can call AVmPayload_notifyPayloadReady().
+     */
     private fun connectAdb(vm: Any): ParcelFileDescriptor {
-        try {
-            val pfd = invoke(vm, "connectVsock", 5555L) as? ParcelFileDescriptor
-                ?: error("VirtualMachine.connectVsock returned no ParcelFileDescriptor")
-            connectVsock = "PASS"
-            vsockFdReceived = "PASS"
-            failureStage = "none"
-            append("[connect_vsock] PASS port=5555 fd=${pfd.fd}")
-            return pfd
-        } catch (t: Throwable) {
-            vsockFdReceived = "BLOCKED"
-            fail("connect_vsock", t)
+        connectVsock = "PENDING"
+        vsockFdReceived = "PENDING"
+        if (failureStage == "connect_vsock") failureStage = "none"
+
+        val deadline = System.nanoTime() + 30_000_000_000L
+        var attempt = 0
+        var lastFailure: Throwable? = null
+
+        while (System.nanoTime() < deadline) {
+            attempt++
+            if (!isVmRunning(vm)) {
+                running = false
+                val stopped = IllegalStateException(
+                    "VM stopped while waiting for guest vsock endpoint (attempt=$attempt)"
+                )
+                vsockFdReceived = "BLOCKED"
+                fail("connect_vsock", stopped)
+            }
+
+            try {
+                val pfd = invoke(vm, "connectVsock", 5555L) as? ParcelFileDescriptor
+                    ?: error("VirtualMachine.connectVsock returned no ParcelFileDescriptor")
+                connectVsock = "PASS"
+                vsockFdReceived = "PASS"
+                failureStage = "none"
+                append("[connect_vsock] PASS port=5555 fd=${pfd.fd} attempt=$attempt")
+                return pfd
+            } catch (t: Throwable) {
+                lastFailure = rootCause(t)
+                val message = lastFailure.message ?: lastFailure.javaClass.simpleName
+                if (attempt == 1 || attempt % 5 == 0) {
+                    append("[connect_vsock] waiting for guest endpoint attempt=$attempt: $message")
+                }
+                Thread.sleep(if (attempt < 5) 300L else 750L)
+            }
         }
+
+        vsockFdReceived = "BLOCKED"
+        fail(
+            "connect_vsock",
+            lastFailure ?: IllegalStateException("Timed out waiting 30s for guest vsock endpoint")
+        )
     }
 
     @Synchronized
@@ -209,9 +245,7 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
         val vm = managedVm ?: return JSONObject()
             .put("ok", false).put("error", "Managed VM has not been created").toString()
         return try {
-            val vmClass = Class.forName("android.system.virtualmachine.VirtualMachine")
-            val runningValue = vmClass.getField("STATUS_RUNNING").getInt(null)
-            check(statusValue(vm) == runningValue) { "Managed VM is not running" }
+            check(isVmRunning(vm)) { "Managed VM is not running" }
             connectAdb(vm).use { pfd ->
                 val output = NativeTransport.shellFd(pfd.fd, command)
                 adbHandshake = "PASS"
@@ -238,9 +272,7 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
     override fun status(): String {
         managedVm?.let { vm ->
             try {
-                val vmClass = Class.forName("android.system.virtualmachine.VirtualMachine")
-                val runningValue = vmClass.getField("STATUS_RUNNING").getInt(null)
-                running = statusValue(vm) == runningValue
+                running = isVmRunning(vm)
             } catch (_: Throwable) { }
         }
         return JSONObject()
