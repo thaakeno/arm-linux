@@ -39,6 +39,7 @@ data class SessionState(
 
 class VmSessionService : Service() {
     companion object { val state=MutableStateFlow(SessionState()); var active:VmSessionService?=null }
+    private var displayRequested = true
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main)
     private var bridge:IVmBridge?=null
     private var pendingSurface:Surface?=null
@@ -48,7 +49,7 @@ class VmSessionService : Service() {
     // Bump this whenever the Shizuku-side bridge changes. Otherwise Shizuku may keep an old
     // UserService process alive across APK updates and we end up testing stale VmBridge code.
     private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,VmBridge::class.java))
-        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(9) }
+        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(BuildConfig.VERSION_CODE) }
 
     private val connection=object:ServiceConnection {
         override fun onServiceConnected(name:ComponentName,binder:IBinder) {
@@ -72,6 +73,8 @@ class VmSessionService : Service() {
             .setContentIntent(intent).build())
         scope.launch { state.collect { current -> withContext(Dispatchers.IO) {
             File(filesDir,"verification-runtime.json").writeText(JSONObject()
+                .put("versionName",BuildConfig.VERSION_NAME).put("versionCode",BuildConfig.VERSION_CODE)
+                .put("commit",BuildConfig.GIT_COMMIT).put("branch",BuildConfig.GIT_BRANCH)
                 .put("running",current.running).put("name",current.name).put("mode",current.mode)
                 .put("stage",current.stage).put("api",current.api).put("vmRoot",current.vmRoot)
                 .put("debianInstalled",current.debianInstalled).put("debianInstalling",current.debianInstalling)
@@ -159,18 +162,26 @@ class VmSessionService : Service() {
         if(successfulGateACommands>0) reconnectProbeArmed=true
         state.value=state.value.copy(message="Managed VM stopped; VM data retained")
     }
-    fun installDebian()=operation { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
-    fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation { b ->
+    fun installDebian()=operation("debian") { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
+    fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation("debian") { b ->
+        displayRequested=true
         applyStatus(withContext(Dispatchers.IO){b.startDebian(width,height,dpi,refreshRate)})
         waitForVmRunning(b,60_000L)
         pendingSurface?.let { surface -> if(surface.isValid) withContext(Dispatchers.IO){b.setDisplaySurface(surface)} }
         refresh()
     }
-    fun installKde()=operation { b ->
+    fun startDebianDiagnostic()=operation("debian") { b ->
+        displayRequested=false
+        pendingSurface=null
+        applyStatus(withContext(Dispatchers.IO){b.startDebianDiagnostic()})
+        waitForVmRunning(b,60_000L)
+        state.value=state.value.copy(message="Headless diagnostic: VMM started; Debian boot still unverified")
+    }
+    fun installKde()=operation("debian") { b ->
         applyStatus(withContext(Dispatchers.IO){b.installKde()})
         refresh()
     }
-    fun debianConsole(command:String)=operation { b ->
+    fun debianConsole(command:String)=operation("debian") { b ->
         waitForVmRunning(b,60_000L)
         val reply=withContext(Dispatchers.IO){b.debianConsole(command)}
         val result=JSONObject(reply)
@@ -191,7 +202,7 @@ class VmSessionService : Service() {
             append(" · custom=").append(obj.optBoolean("customImageApi"))
             append(" · GPU API=").append(obj.optBoolean("gpuConfigApi"))
             append(" · display API=").append(obj.optBoolean("displayConfigApi"))
-            append(" · crosvm display=").append(obj.optBoolean("displayServiceApi"))
+            append(" · display client class=").append(obj.optBoolean("displayServiceApi"))
         } else "Capability probe failed: ${obj.optString("error")}" 
         state.value=state.value.copy(capabilities=text,message=text)
         refresh()
@@ -217,7 +228,7 @@ class VmSessionService : Service() {
     fun attachSurface(surface:Surface) {
         pendingSurface=surface
         val b=bridge?:return
-        if(state.value.mode!="debian"||!state.value.running||!surface.isValid)return
+        if(!displayRequested||state.value.mode!="debian"||!state.value.running||!surface.isValid)return
         scope.launch { runCatching { withContext(Dispatchers.IO){b.setDisplaySurface(surface)} }
             .onFailure { state.value=state.value.copy(message="Display attach failed: ${it.message}") }
             refresh() }
@@ -234,14 +245,16 @@ class VmSessionService : Service() {
         bridge?.sendTouch(action,x,y,pointerId) ?: false
     }.getOrDefault(false)
 
-    private fun operation(block:suspend (IVmBridge)->Unit) {
+    private fun operation(failureChannel:String="microdroid",block:suspend (IVmBridge)->Unit) {
         if(state.value.busy) return
         val b=bridge?:return
         state.value=state.value.copy(busy=true)
         scope.launch { try { block(b) } catch(e:Exception) {
             val error=e.message?:e.javaClass.simpleName
-            state.value=state.value.copy(message=error,terminal=(state.value.terminal+"\nERROR: $error\n").takeLast(256000))
+            state.value=if(failureChannel=="debian") state.value.copy(message=error,debianTerminal=(state.value.debianTerminal+"\nERROR: $error\n").takeLast(120000))
+                else state.value.copy(message=error,terminal=(state.value.terminal+"\nERROR: $error\n").takeLast(120000))
             refresh()
+            state.value=state.value.copy(message=error)
         } finally { state.value=state.value.copy(busy=false) } }
     }
 

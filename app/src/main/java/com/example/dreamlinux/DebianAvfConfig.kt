@@ -20,6 +20,7 @@ internal object DebianAvfConfig {
         dpi: Int,
         refreshRate: Int,
         log: (String) -> Unit,
+        requestGraphics: Boolean = true,
     ): Any {
         val json = JSONObject(
             File(imageDir, "vm_config.json").readText()
@@ -51,10 +52,12 @@ internal object DebianAvfConfig {
             log("Skipping host shared paths for shell bridge; keeping crosvm under virtualizationservice")
         }
 
-        val wantsNetwork = json.optBoolean("network", false)
-        AvfReflect.callOptional(custom, "useNetwork", wantsNetwork)
+        val wantsNetwork = false // Standard network is rejected for protected VMs.
+        log("Protected VM probe: ordinary network disabled; host networking is not implemented")
+        AvfReflect.call(custom, "useNetwork", wantsNetwork)
         AvfReflect.callOptional(custom, "useAutoMemoryBalloon", json.optBoolean("auto_memory_balloon", true))
 
+        if (requestGraphics) {
         val gpuBuilder = Class.forName(BASE + "VirtualMachineCustomImageConfig\$GpuConfig\$Builder")
             .getConstructor().newInstance()
         AvfReflect.call(gpuBuilder, "setBackend", "gfxstream")
@@ -80,6 +83,8 @@ internal object DebianAvfConfig {
         AvfReflect.callOptional(custom, "useMouse", true)
         AvfReflect.callOptional(custom, "useTouch", true)
         AvfReflect.callOptional(custom, "useTrackpad", true)
+
+        }
 
         val customConfig = AvfReflect.call(custom, "build") ?: error("CustomImageConfig build returned null")
         val vmConfigClass = Class.forName(BASE + "VirtualMachineConfig")
@@ -110,7 +115,7 @@ internal object DebianAvfConfig {
         AvfReflect.callOptional(vmBuilder, "setVmConsoleInputSupported", consoleInput != null)
         AvfReflect.callOptional(vmBuilder, "setConnectVmConsole", json.optBoolean("connect_console", false))
 
-        log("Debian config: protected=true sourceProtected=${json.optBoolean("protected", false)} network=$wantsNetwork gfxstream=true display=${width}x$height@$refreshRate dpi=$dpi")
+        log("Debian config: protected=true sourceProtected=${json.optBoolean("protected", false)} network=$wantsNetwork gfxstream=$requestGraphics display=${width}x$height@$refreshRate dpi=$dpi")
         return AvfReflect.call(vmBuilder, "build") ?: error("VirtualMachineConfig build returned null")
     }
 

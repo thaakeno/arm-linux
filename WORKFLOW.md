@@ -71,3 +71,32 @@ Pushing commits to `dev-1`, `dev-2`, or `master` automatically starts the build.
 gh workflow run build.yml --ref dev-1 --repo thaakeno/arm-linux
 gh workflow run build.yml --ref dev-2 --repo thaakeno/arm-linux
 ```
+
+## Local dev-1 repair checkpoint
+
+Work stays on `dev-1`. Do not push or trigger publishing until the user requests it.
+Run `./gradlew stageDebugApk testDebugUnitTest lintDebug`. The named APK is under
+`build/deliverables/DreamLinux-0.4.0-dev1-<commit>[-dirty]-arm64.apk`.
+The About screen and exported diagnostics identify version name, monotonically
+increasing dev-1 commit-count-based version code, branch and source commit.
+Versions are development identifiers, not claims of a functioning Debian desktop.
+Commit-count codes assume this branch is not rebased or rewritten; use an explicit
+release version strategy before merging divergent branches.
+
+CI checks the build, unit tests, lint and APK v3 signature. Full checkout history is
+required for version codes. The fixed `app-debug.apk` download remains a compatibility
+alias; a versioned APK is also published. Add repository secret
+`DEBUG_KEYSTORE_BASE64` containing the existing trusted development debug keystore
+(alias `androiddebugkey`, standard Android debug passwords) to retain update identity.
+Never commit this key. Without that secret CI builds but does not publish a rolling
+release with a different signing identity. A key cannot be recovered from an APK;
+previous ephemeral CI keys may already prevent in-place updates. Do not uninstall
+or erase phone data to hide a signing mismatch.
+
+Runtime acceptance remains separate: managed guest command, stop/start reconnect,
+Debian serial boot, Wayland frame output and measured GPU rendering all need the
+phone. A successful build, API availability or STATUS_RUNNING is not a runtime PASS.
+Protected boot trust is not changed by setting `protectedVm=true`. The ordinary
+protected-VM network adapter is disabled; host-mediated networking is not implemented.
+The current code requests system GfxStream integration; no independent GfxStream
+renderer or cross-VM graphics transport has been implemented in this checkpoint.

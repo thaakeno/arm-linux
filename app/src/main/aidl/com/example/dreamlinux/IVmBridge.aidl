@@ -16,5 +16,6 @@ interface IVmBridge {
     boolean sendTouch(int action, float x, float y, int pointerId) = 10;
     String installKde() = 11;
     String debianConsole(String command) = 12;
+    String startDebianDiagnostic() = 13;
     void destroy() = 16777114;
 }

@@ -4,15 +4,26 @@ plugins {
   alias(libs.plugins.kotlin.serialization)
 }
 
+val localTest = providers.gradleProperty("localTest").map { it.toBoolean() }.getOrElse(false)
+val buildCommit = providers.exec { commandLine("git", "rev-parse", "--short=12", "HEAD") }.standardOutput.asText.map { it.trim() }.get()
+val buildBranch = providers.exec { commandLine("git", "branch", "--show-current") }.standardOutput.asText.map { it.trim() }.get()
+val buildRevision = providers.exec { commandLine("git", "rev-list", "--count", "HEAD") }.standardOutput.asText.map { it.trim().toInt() }.get()
+val buildDirty = providers.exec { commandLine("git", "status", "--porcelain", "--untracked-files=no") }.standardOutput.asText.map { it.isNotBlank() }.get()
+val displayRevision = buildCommit + if (buildDirty) "-dirty" else ""
+
 android {
     namespace = "com.example.dreamlinux"
     compileSdk = 36
     defaultConfig {
-        applicationId = "com.example.dreamlinux"
+        applicationId = if (localTest) "com.example.dreamlinux.localdev1" else "com.example.dreamlinux"
+        manifestPlaceholders["appLabel"] = if (localTest) "DEV 1 LINUX Local" else "DEV 1 LINUX"
+        buildConfigField("boolean", "LOCAL_TEST", localTest.toString())
         minSdk = 29
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3-dev1-linux"
+        versionCode = 1000 + buildRevision
+        versionName = "0.4.0-dev1"
+        buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
+        buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
         ndk { abiFilters += "arm64-v8a" }
     }
 
@@ -43,7 +54,7 @@ android {
     buildFeatures {
       compose = true
       aidl = true
-      buildConfig = false
+      buildConfig = true
       shaders = false
     }
 
@@ -89,4 +100,14 @@ dependencies {
   implementation(libs.androidx.navigation3.ui)
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
+}
+
+// Stage a traceable deliverable without relying on deprecated AGP output APIs.
+val testLabel = if (localTest) "localtest-" else ""
+val stagedApkName = "DreamLinux-${testLabel}${android.defaultConfig.versionName}-${displayRevision}-arm64.apk"
+tasks.register<Copy>("stageDebugApk") {
+    dependsOn("assembleDebug")
+    from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
+    into(rootProject.layout.buildDirectory.dir("deliverables"))
+    rename("app-debug.apk", stagedApkName)
 }

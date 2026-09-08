@@ -20,6 +20,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.*
@@ -57,6 +58,7 @@ class MainActivity : ComponentActivity() {
     private fun fullLogReport(state:SessionState)=buildString {
         appendLine("DEV 1 LINUX")
         appendLine("Managed AVF diagnostic report")
+        appendLine("Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) ${BuildConfig.GIT_BRANCH} ${BuildConfig.GIT_COMMIT}")
         appendLine()
         appendLine("Status: ${if(state.running)"VM RUNNING" else "VM OFFLINE"}")
         appendLine("Message: ${state.message}")
@@ -110,13 +112,24 @@ class MainActivity : ComponentActivity() {
                             NavigationBarItem(selected=page==0,onClick={page=0},icon={Icon(Icons.Default.Computer,null)},label={Text("Desktop")})
                             NavigationBarItem(selected=page==1,onClick={page=1},icon={Icon(Icons.Default.Terminal,null)},label={Text("Terminal")})
                             NavigationBarItem(selected=page==2,onClick={page=2},icon={Icon(Icons.Default.Memory,null)},label={Text("Diagnostics")})
+                            NavigationBarItem(selected=page==3,onClick={page=3},icon={Icon(Icons.Default.Info,null)},label={Text("About")})
                         }
                         Box(Modifier.weight(1f)) {
-                            when(page) { 0->DesktopPage(state); 1->TerminalPage(state); else->DiagnosticsPage(state) }
+                            when(page) { 0->DesktopPage(state); 1->TerminalPage(state); 2->DiagnosticsPage(state); else->AboutPage() }
                         }
                     }
                 }
             }
+        }
+    }
+
+    @Composable private fun AboutPage() {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+            Text("About Dream Linux",style=MaterialTheme.typography.headlineSmall)
+            SelectionContainer { Text("Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\nBranch ${BuildConfig.GIT_BRANCH}\nCommit ${BuildConfig.GIT_COMMIT}\nARM64 development build",fontFamily=FontFamily.Monospace) }
+            Text("Debian, Wayland display and GPU acceleration require verification on this phone. VMM running status alone is not evidence that Linux booted.")
+            Text("Display design: guest Wayland compositor ? virtual GPU / GfxStream ? Android SurfaceView. This build does not include a separately bundled GfxStream renderer.")
+            Text("Built with Android CLI / Gradle, Kotlin, Compose and Android NDK. Uses Shizuku API and Apache Commons Compress. Debian images are downloaded from Google's AVF image service.")
         }
     }
 
@@ -126,6 +139,7 @@ class MainActivity : ComponentActivity() {
                 Row(verticalAlignment=Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("DEV 1 LINUX",style=MaterialTheme.typography.headlineSmall)
+                        Text(BuildConfig.VERSION_NAME,style=MaterialTheme.typography.labelSmall)
                         Text("DEBIAN 13 · PLASMA 6 · AVF · NO ROOT",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary)
                     }
                     StatusPill(if(state.running) "RUNNING" else if(state.connected) "READY" else "OFFLINE",state.running)
@@ -156,7 +170,7 @@ class MainActivity : ComponentActivity() {
                     } else Button(onClick={VmSessionService.active?.installDebian()},enabled=!state.busy) { Text("Install Debian") }
                 }
                 !state.running || state.mode!="debian" -> {
-                    SetupCard("3","Start accelerated VM","Starts the app-owned Debian custom VM with the requested gfxstream backend, display, touch and keyboard devices.") {
+                    SetupCard("3","Test Debian boot","Tests the official image on this device. A protected-VM setting does not guarantee image compatibility or GPU support. Ordinary networking is disabled for this probe.") {
                         Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                             Button(onClick={startDebian()},enabled=!state.busy) { Text("Start Debian") }
                             OutlinedButton(onClick={VmSessionService.active?.probeCapabilities()},enabled=!state.busy) { Text("Probe AVF") }
@@ -186,7 +200,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startDebian() {
         val metrics=resources.displayMetrics
-        val refresh=(display?.refreshRate?:60f).toInt()
+        val refresh=(if(android.os.Build.VERSION.SDK_INT>=30) display?.refreshRate?:60f else windowManager.defaultDisplay.refreshRate).toInt()
         VmSessionService.active?.startDebian(metrics.widthPixels.coerceAtLeast(640),metrics.heightPixels.coerceAtLeast(480),metrics.densityDpi,refresh)
     }
 
@@ -276,6 +290,7 @@ class MainActivity : ComponentActivity() {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             Text("Diagnostics",style=MaterialTheme.typography.headlineSmall)
             Metric("Mode",state.mode); Metric("Stage",state.stage); Metric("API",state.api.ifBlank{"not connected"})
+            OutlinedButton(onClick={VmSessionService.active?.startDebianDiagnostic()},enabled=state.connected&&state.debianInstalled&&!state.busy) { Text("Test boot without GPU") }
             Metric("Debian",if(state.debianInstalled)"image installed" else "not installed")
             Metric("KDE",if(state.kdeInstalled)"provisioned" else state.kdeStage)
             Metric("Graphics",state.graphics)

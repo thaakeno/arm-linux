@@ -1,0 +1,5 @@
+ICrosvmAndroidDisplayService.aidl
+Copyright 2024 The Android Open Source Project
+Apache License 2.0
+Source: https://android.googlesource.com/platform/packages/modules/Virtualization/+/175a51b30123fa6b02b541f1969665708f7ec2c3/libs/android_display_backend/aidl/android/crosvm/ICrosvmAndroidDisplayService.aidl
+Unmodified AIDL client interface. This does not bundle the rendering service.

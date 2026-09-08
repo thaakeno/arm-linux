@@ -32,10 +32,11 @@ internal class DebianImage(
     }.getOrDefault(false)
 
     fun install() {
-        val root = directory.canonicalFile
-        if (root.exists()) root.deleteRecursively()
+        check(!installed()) { "An image is already installed; it has been preserved" }
+        val destination = directory.canonicalFile
+        val root = File(destination.parentFile, destination.name + ".staging-" + java.util.UUID.randomUUID())
         check(root.mkdirs()) { "Cannot create ${root.path}" }
-        val archive = File(root.parentFile, "images.tar.gz.part")
+        val archive = File(root, "images.tar.gz.part")
         onStage("debian_download")
         download(archive)
         onStage("debian_extract")
@@ -44,15 +45,24 @@ internal class DebianImage(
 
         normalizeKnownPayloadNames(root)
 
-        check(configFile.isFile) {
+        val stagedConfig = File(root, "vm_config.json")
+        check(stagedConfig.isFile) {
             "Official image archive did not contain vm_config.json. Extracted: ${extracted.joinToString(", ")}"
         }
-        validatePayload(configFile, root, throwOnMissing = true)
+        validatePayload(stagedConfig, root, throwOnMissing = true)
 
         // Only resize writable filesystem/disk images. EFI and kernel payloads must remain byte-exact.
-        if (rootPart.isFile) align4096(rootPart)
+        val stagedRoot = File(root, "root_part")
+        if (stagedRoot.isFile) align4096(stagedRoot)
         File(root, ".dev1-installed").writeText("source=$URL\n")
-        onLog("official AVF Debian image installed at ${root.path}")
+        val backup = File(destination.parentFile, destination.name + ".previous-" + java.util.UUID.randomUUID())
+        val hadPrevious = destination.exists()
+        if (hadPrevious) check(destination.renameTo(backup)) { "Cannot preserve previous image" }
+        if (!root.renameTo(destination)) {
+            if (hadPrevious) check(backup.renameTo(destination)) { "Promotion failed; previous image retained at $backup" }
+            error("Cannot promote verified staging image; previous image preserved")
+        }
+        onLog("official AVF image installed at ${destination.path}; OS version and boot remain unverified")
     }
 
     private fun download(destination: File) {
@@ -161,7 +171,7 @@ internal class DebianImage(
 
         val missing = required.filterNot { File(root, it).isFile }
         if (missing.isEmpty()) {
-            onLog("Debian payload verified from vm_config.json: ${required.joinToString(", ")}")
+            if (throwOnMissing) onLog("Image files present from vm_config.json: ${required.joinToString(", ")}; guest boot not verified")
             return true
         }
 

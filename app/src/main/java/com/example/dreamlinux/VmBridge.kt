@@ -20,10 +20,11 @@ import org.json.JSONObject
 class VmBridge : IVmBridge.Stub() {
     // Fresh instance name because the Gate-A payload now correctly reports payload-ready.
     // Protected Microdroid instance state must not be reused across payload changes.
-    private val microVmName = "dev1-gate-a-v2"
+    private val microVmName = "dev1-gate-a-v3"
     private val debianVmName = "dev1-debian13"
-    private val vmData = File("/data/local/tmp/dev1-linux-vmm")
-    private val debianDir = File("/data/local/tmp/dev1-linux/debian")
+    private val storageSuffix = if (BuildConfig.LOCAL_TEST) "-localtest" else ""
+    private val vmData = File("/data/local/tmp/dev1-linux-vmm$storageSuffix")
+    private val debianDir = File("/data/local/tmp/dev1-linux$storageSuffix/debian")
 
     private var manager: Any? = null
     private var vm: Any? = null
@@ -33,6 +34,7 @@ class VmBridge : IVmBridge.Stub() {
     private var lastError = ""
     private var consoleThread: Thread? = null
     private var consoleInput: OutputStream? = null
+    private var consoleOutput: InputStream? = null
     private var displayService: Any? = null
 
     private val installing = AtomicBoolean(false)
@@ -48,6 +50,7 @@ class VmBridge : IVmBridge.Stub() {
     private fun append(value: String) = synchronized(lock) {
         log = (log + value + "\n").takeLast(256000)
     }
+    private fun appendConsole(value: String) = synchronized(lock) { log = (log + value).takeLast(256000) }
     private fun logSnapshot(): String = synchronized(lock) { log }
 
     private class RedirectedDataContext(base: Context, private val root: File) : ContextWrapper(base) {
@@ -111,7 +114,7 @@ class VmBridge : IVmBridge.Stub() {
             }
             if (current == runningStatus(machine)) {
                 stage = "running:$mode"
-                append("[$mode] PASS status=RUNNING")
+                append("[$mode] VMM status=RUNNING; guest boot and display still require verification")
                 return
             }
             if (current == deletedStatus(machine)) error("$mode VM became deleted before reaching RUNNING")
@@ -156,27 +159,24 @@ class VmBridge : IVmBridge.Stub() {
         if (!isRunning(machine)) {
             stage = "vm_start:$mode"
             append("[$mode] invoking VirtualMachine.run()")
+            attachConsole(machine)
             AvfReflect.call(machine, "run")
             append("VirtualMachine.run() accepted for $mode")
         }
         waitUntilRunning(machine, mode, if (mode == "debian") 60_000L else 45_000L)
-        attachConsole(machine)
         stage = "running:$mode"
     }
 
     private fun attachConsole(machine: Any) {
         consoleThread?.interrupt()
+        runCatching { consoleOutput?.close() }
         consoleInput = runCatching { AvfReflect.callOptional(machine, "getConsoleInput") as? OutputStream }.getOrNull()
         val stream = runCatching { AvfReflect.callOptional(machine, "getConsoleOutput") as? InputStream }.getOrNull()
             ?: return
+        consoleOutput = stream
         consoleThread = Thread({
             try {
-                val buffer = ByteArray(4096)
-                while (!Thread.currentThread().isInterrupted) {
-                    val count = stream.read(buffer)
-                    if (count < 0) break
-                    if (count > 0) append(String(buffer, 0, count, Charsets.UTF_8).trimEnd())
-                }
+                ConsoleCapture.read(stream, ::appendConsole)
             } catch (t: Throwable) {
                 if (!Thread.currentThread().isInterrupted) append("console capture ended: ${t.message}")
             }
@@ -206,6 +206,8 @@ class VmBridge : IVmBridge.Stub() {
     private fun stopInternal() {
         clearDisplaySurfaceInternal()
         consoleInput = null
+        runCatching { consoleOutput?.close() }
+        consoleOutput = null
         vm?.let { machine -> if (isRunning(machine)) AvfReflect.call(machine, "stop") }
         consoleThread?.interrupt()
         consoleThread = null
@@ -276,14 +278,19 @@ class VmBridge : IVmBridge.Stub() {
         return status()
     }
 
-    @Synchronized override fun startDebian(width: Int, height: Int, dpi: Int, refreshRate: Int): String {
+    @Synchronized override fun startDebian(width: Int, height: Int, dpi: Int, refreshRate: Int): String =
+        startDebianMode(width, height, dpi, refreshRate, true)
+
+    @Synchronized override fun startDebianDiagnostic(): String = startDebianMode(640, 480, 160, 60, false)
+
+    private fun startDebianMode(width: Int, height: Int, dpi: Int, refreshRate: Int, graphics: Boolean): String {
         lastError = ""
         return try {
             check(debianImage().installed()) { "Debian image is not installed yet" }
-            if (vmMode == "microdroid" && isRunning(vm)) stopInternal()
+            if (isRunning(vm)) stopInternal()
             val context = redirectedContext()
             stage = "config:debian"
-            val config = DebianAvfConfig.build(context, debianDir, debianVmName, width, height, dpi, refreshRate, ::append)
+            val config = DebianAvfConfig.build(context, debianDir, debianVmName, width, height, dpi, refreshRate, ::append, graphics)
             startMachine(acquireVm(debianVmName, config, "debian"), "debian")
             status()
         } catch (t: Throwable) {
@@ -362,8 +369,12 @@ class VmBridge : IVmBridge.Stub() {
     private fun getDisplayService(): Any {
         displayService?.let { return it }
         stage = "display_service"
+        // Fail before waiting if framework-side glue is missing. Client class presence alone
+        // never proves that a renderer is registered on this phone.
+        Class.forName("android.crosvm.ICrosvmAndroidDisplayService\$Stub")
+        Class.forName("android.system.virtualizationservice_internal.IVirtualizationServiceInternal\$Stub")
         val serviceManager = Class.forName("android.os.ServiceManager")
-        val binder = serviceManager.getMethod("waitForService", String::class.java)
+        val binder = serviceManager.getMethod("checkService", String::class.java)
             .invoke(null, "android.system.virtualizationservice") as? IBinder
             ?: error("virtualizationservice binder unavailable")
         val internalStub = Class.forName("android.system.virtualizationservice_internal.IVirtualizationServiceInternal\$Stub")
@@ -449,6 +460,7 @@ class VmBridge : IVmBridge.Stub() {
         val deadline = android.os.SystemClock.elapsedRealtime() + 30_000L
         var attempt = 0
         var last: Throwable? = null
+        var commandSubmitted = false
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
             attempt++
             if (!isRunning(machine)) {
@@ -466,6 +478,7 @@ class VmBridge : IVmBridge.Stub() {
                 append("[connect_vsock] PASS port=5555 fd=${pfd.fd} attempt=$attempt")
                 pfd.use {
                     stage = "adb_shell"
+                    commandSubmitted = true
                     val output = NativeTransport.shellFd(it.fd, command)
                     stage = "guest_command_pass"
                     lastError = ""
@@ -474,6 +487,7 @@ class VmBridge : IVmBridge.Stub() {
                 }
             } catch (t: Throwable) {
                 last = AvfReflect.unwrap(t)
+                if (commandSubmitted) break // Never replay a possibly executed command.
                 if (attempt == 1 || attempt % 5 == 0) {
                     append("[connect_vsock] waiting attempt=$attempt: ${last.javaClass.name}: ${last.message}")
                 }
@@ -529,7 +543,7 @@ class VmBridge : IVmBridge.Stub() {
     }
 
     companion object {
-        private const val PACKAGE = "com.example.dreamlinux"
+        private const val PACKAGE = BuildConfig.APPLICATION_ID
 
         private val KDE_INSTALL_COMMAND = """
             set -eu
