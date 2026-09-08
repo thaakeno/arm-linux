@@ -116,7 +116,40 @@ class VmSessionService : Service() {
         catch(e:Exception) { state.value=state.value.copy(message=e.message?:"Status unavailable") }
     }
 
-    fun startVm()=operation { b -> applyStatus(withContext(Dispatchers.IO){b.startVm()}) }
+    /**
+     * VirtualMachine.run() being accepted is not the readiness signal for connectVsock().
+     * Always wait for the framework's real STATUS_RUNNING state before a guest connection.
+     */
+    private suspend fun waitForVmRunning(b:IVmBridge, timeoutMs:Long=30_000L):String {
+        val deadline=SystemClock.elapsedRealtime()+timeoutMs
+        var lastRaw=""
+        var lastStage="unknown"
+        while(SystemClock.elapsedRealtime()<deadline) {
+            val raw=withContext(Dispatchers.IO){b.status()}
+            lastRaw=raw
+            val obj=JSONObject(raw)
+            lastStage=obj.optString("stage","unknown")
+            applyStatus(raw)
+            if(obj.optBoolean("running")) return raw
+
+            val error=obj.optString("error")
+            if(error.isNotBlank() || lastStage.startsWith("blocked:")) {
+                throw IllegalStateException(if(error.isNotBlank()) error else "VM startup blocked at $lastStage")
+            }
+            if(lastStage.startsWith("stopped:") || lastStage.startsWith("deleted:")) {
+                throw IllegalStateException("VM stopped before becoming ready (stage=$lastStage)")
+            }
+            delay(200)
+        }
+        val suffix=if(lastRaw.isBlank()) "" else "; last status=$lastStage"
+        throw IllegalStateException("Timed out waiting for AVF VM to reach STATUS_RUNNING$suffix")
+    }
+
+    fun startVm()=operation { b ->
+        applyStatus(withContext(Dispatchers.IO){b.startVm()})
+        waitForVmRunning(b)
+        state.value=state.value.copy(message="Microdroid VM running; guest shell ready")
+    }
     fun stopVm()=operation { b ->
         pendingSurface=null
         applyStatus(withContext(Dispatchers.IO){b.stopVm()})
@@ -124,6 +157,7 @@ class VmSessionService : Service() {
     fun installDebian()=operation { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
     fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation { b ->
         applyStatus(withContext(Dispatchers.IO){b.startDebian(width,height,dpi,refreshRate)})
+        waitForVmRunning(b,60_000L)
         pendingSurface?.let { surface -> if(surface.isValid) withContext(Dispatchers.IO){b.setDisplaySurface(surface)} }
         refresh()
     }
@@ -132,6 +166,7 @@ class VmSessionService : Service() {
         refresh()
     }
     fun debianConsole(command:String)=operation { b ->
+        waitForVmRunning(b,60_000L)
         val reply=withContext(Dispatchers.IO){b.debianConsole(command)}
         val result=JSONObject(reply)
         check(result.optBoolean("ok")) { result.optString("error","Debian command failed") }
@@ -157,6 +192,7 @@ class VmSessionService : Service() {
         refresh()
     }
     fun shell(command:String)=operation { b ->
+        waitForVmRunning(b)
         val reply=withContext(Dispatchers.IO){b.guestShell(command)}
         val result=JSONObject(reply)
         check(result.optBoolean("ok")) { result.optString("error","Guest command failed") }
