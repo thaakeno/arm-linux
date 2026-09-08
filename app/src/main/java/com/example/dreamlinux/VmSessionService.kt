@@ -2,8 +2,9 @@ package com.example.dreamlinux
 
 import android.app.*
 import android.content.*
-import android.os.*
 import android.content.pm.PackageManager
+import android.os.*
+import android.view.Surface
 import java.io.File
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,25 +16,35 @@ data class SessionState(
     val running:Boolean=false,
     val cid:Int=-1,
     val name:String="",
+    val mode:String="none",
     val stage:String="idle",
     val api:String="",
     val vmRoot:String="",
     val console:String="",
     val terminal:String="",
     val message:String="Connect Shizuku to begin",
-    val busy:Boolean=false
+    val busy:Boolean=false,
+    val debianInstalled:Boolean=false,
+    val debianInstalling:Boolean=false,
+    val installProgress:Double=-1.0,
+    val installBytes:Long=0L,
+    val installTotal:Long=-1L,
+    val capabilities:String="Not checked",
+    val graphics:String="unproven"
 )
 
 class VmSessionService : Service() {
     companion object { val state=MutableStateFlow(SessionState()); var active:VmSessionService?=null }
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main)
     private var bridge:IVmBridge?=null
+    private var pendingSurface:Surface?=null
     private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,VmBridge::class.java))
-        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(2) }
+        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(3) }
     private val connection=object:ServiceConnection {
         override fun onServiceConnected(name:ComponentName,binder:IBinder) {
             bridge=IVmBridge.Stub.asInterface(binder)
-            state.value=state.value.copy(connected=true,message="Managed AVF bridge connected")
+            state.value=state.value.copy(connected=true,message="AVF bridge connected")
+            scope.launch { refresh(); probeCapabilities() }
         }
         override fun onServiceDisconnected(name:ComponentName) {
             bridge=null
@@ -47,15 +58,17 @@ class VmSessionService : Service() {
         manager.createNotificationChannel(NotificationChannel("vm","DEV 1 LINUX session",NotificationManager.IMPORTANCE_LOW))
         val intent=PendingIntent.getActivity(this,0,Intent(this,MainActivity::class.java),PendingIntent.FLAG_IMMUTABLE)
         startForeground(1,Notification.Builder(this,"vm").setContentTitle("DEV 1 LINUX")
-            .setContentText("Managed AVF session controller").setSmallIcon(android.R.drawable.ic_menu_manage)
+            .setContentText("Local AVF Linux session").setSmallIcon(android.R.drawable.ic_menu_manage)
             .setContentIntent(intent).build())
         scope.launch { state.collect { current -> withContext(Dispatchers.IO) {
             File(filesDir,"verification-runtime.json").writeText(JSONObject()
-                .put("running",current.running).put("name",current.name).put("stage",current.stage)
-                .put("api",current.api).put("vmRoot",current.vmRoot).put("message",current.message)
-                .put("guestGraphics","unproven").put("debian","not established").toString(2))
+                .put("running",current.running).put("name",current.name).put("mode",current.mode)
+                .put("stage",current.stage).put("api",current.api).put("vmRoot",current.vmRoot)
+                .put("debianInstalled",current.debianInstalled).put("debianInstalling",current.debianInstalling)
+                .put("graphics",current.graphics).put("capabilities",current.capabilities)
+                .put("message",current.message).toString(2))
         } } }
-        scope.launch { while(isActive) { delay(1500); if(bridge!=null&&!state.value.busy) refresh() } }
+        scope.launch { while(isActive) { delay(1200); if(bridge!=null&&!state.value.busy) refresh() } }
     }
 
     override fun onStartCommand(intent:Intent?,flags:Int,startId:Int):Int {
@@ -69,10 +82,23 @@ class VmSessionService : Service() {
     private fun applyStatus(raw:String) {
         val obj=JSONObject(raw)
         val error=obj.optString("error")
+        val installError=obj.optString("installError")
+        val msg=when {
+            installError.isNotBlank() -> installError
+            error.isNotBlank() -> error
+            obj.optBoolean("debianInstalling") -> {
+                val p=obj.optDouble("installProgress",-1.0)
+                if(p>=0) "Installing Debian ${(p*100).toInt()}%" else "Installing Debian"
+            }
+            else -> "Stage: ${obj.optString("stage","unknown")}"
+        }
         state.value=state.value.copy(
             running=obj.optBoolean("running"),cid=obj.optInt("cid",-1),name=obj.optString("name"),
-            stage=obj.optString("stage","unknown"),api=obj.optString("api"),vmRoot=obj.optString("vmRoot"),
-            console=obj.optString("log"),message=if(error.isNotBlank()) error else "Stage: ${obj.optString("stage","unknown")}" )
+            mode=obj.optString("mode","none"),stage=obj.optString("stage","unknown"),api=obj.optString("api"),
+            vmRoot=obj.optString("vmRoot"),console=obj.optString("log"),message=msg,
+            debianInstalled=obj.optBoolean("debianInstalled"),debianInstalling=obj.optBoolean("debianInstalling"),
+            installProgress=obj.optDouble("installProgress",-1.0),installBytes=obj.optLong("installBytes",0L),
+            installTotal=obj.optLong("installTotal",-1L),graphics=obj.optString("guestGraphics","unproven"))
     }
 
     private suspend fun refresh() {
@@ -81,7 +107,30 @@ class VmSessionService : Service() {
     }
 
     fun startVm()=operation { b -> applyStatus(withContext(Dispatchers.IO){b.startVm()}) }
-    fun stopVm()=operation { b -> applyStatus(withContext(Dispatchers.IO){b.stopVm()}) }
+    fun stopVm()=operation { b ->
+        pendingSurface=null
+        applyStatus(withContext(Dispatchers.IO){b.stopVm()})
+    }
+    fun installDebian()=operation { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
+    fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation { b ->
+        applyStatus(withContext(Dispatchers.IO){b.startDebian(width,height,dpi,refreshRate)})
+        pendingSurface?.let { surface -> if(surface.isValid) withContext(Dispatchers.IO){b.setDisplaySurface(surface)} }
+        refresh()
+    }
+    fun probeCapabilities()=operation { b ->
+        val raw=withContext(Dispatchers.IO){b.inspectCapabilities()}
+        val obj=JSONObject(raw)
+        val text=if(obj.optBoolean("ok")) buildString {
+            append("AVF caps=").append(obj.optInt("capabilities"))
+            append(" · pVM=").append(obj.optBoolean("protectedVm"))
+            append(" · non-pVM=").append(obj.optBoolean("nonProtectedVm"))
+            append(" · custom=").append(obj.optBoolean("customImageApi"))
+            append(" · GPU API=").append(obj.optBoolean("gpuConfigApi"))
+            append(" · display API=").append(obj.optBoolean("displayConfigApi"))
+        } else "Capability probe failed: ${obj.optString("error")}" 
+        state.value=state.value.copy(capabilities=text,message=text)
+        refresh()
+    }
     fun shell(command:String)=operation { b ->
         val reply=withContext(Dispatchers.IO){b.guestShell(command)}
         val result=JSONObject(reply)
@@ -90,6 +139,26 @@ class VmSessionService : Service() {
         state.value=state.value.copy(terminal=(state.value.terminal+"\n$ $command\n$output").takeLast(256000),message="Guest command completed")
         refresh()
     }
+
+    fun attachSurface(surface:Surface) {
+        pendingSurface=surface
+        val b=bridge?:return
+        if(state.value.mode!="debian"||!state.value.running||!surface.isValid)return
+        scope.launch { runCatching { withContext(Dispatchers.IO){b.setDisplaySurface(surface)} }
+            .onFailure { state.value=state.value.copy(message="Display attach failed: ${it.message}") }
+            refresh() }
+    }
+    fun detachSurface(surface:Surface?=null) {
+        if(surface==null||pendingSurface===surface) pendingSurface=null
+        val b=bridge?:return
+        scope.launch { runCatching { withContext(Dispatchers.IO){b.clearDisplaySurface()} }; refresh() }
+    }
+    fun sendKey(action:Int,keyCode:Int,metaState:Int):Boolean = runCatching {
+        bridge?.sendKey(action,keyCode,metaState) ?: false
+    }.getOrDefault(false)
+    fun sendTouch(action:Int,x:Float,y:Float,pointerId:Int):Boolean = runCatching {
+        bridge?.sendTouch(action,x,y,pointerId) ?: false
+    }.getOrDefault(false)
 
     private fun operation(block:suspend (IVmBridge)->Unit) {
         if(state.value.busy) return
@@ -102,7 +171,7 @@ class VmSessionService : Service() {
     }
 
     override fun onDestroy() {
-        active=null; scope.cancel()
+        active=null; scope.cancel(); pendingSurface=null
         if(bridge!=null) try { Shizuku.unbindUserService(args,connection,true) } catch(_:Exception) {}
         bridge=null; super.onDestroy()
     }
