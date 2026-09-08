@@ -4,6 +4,7 @@ import android.app.*
 import android.content.*
 import android.os.*
 import android.content.pm.PackageManager
+import java.io.File
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONObject
@@ -79,12 +80,8 @@ class VmSessionService : Service() {
         catch(e:Exception) { state.value=state.value.copy(message=e.message?:"Status unavailable") }
     }
 
-    fun startVm()=operation { b ->
-        applyStatus(withContext(Dispatchers.IO){b.startVm()})
-    }
-    fun stopVm()=operation { b ->
-        applyStatus(withContext(Dispatchers.IO){b.stopVm()})
-    }
+    fun startVm()=operation { b -> applyStatus(withContext(Dispatchers.IO){b.startVm()}) }
+    fun stopVm()=operation { b -> applyStatus(withContext(Dispatchers.IO){b.stopVm()}) }
     fun shell(command:String)=operation { b ->
         val reply=withContext(Dispatchers.IO){b.guestShell(command)}
         val result=JSONObject(reply)
