@@ -14,6 +14,9 @@
   "display_surface": "IMPLEMENTED - DEVICE TEST REQUIRED",
   "touch_input": "IMPLEMENTED - DEVICE TEST REQUIRED",
   "keyboard_input": "IMPLEMENTED - DEVICE TEST REQUIRED",
-  "kde_wayland": "NOT YET PROVISIONED",
-  "hardware_acceleration": "NOT PROVEN"
+  "debian_serial_console": "IMPLEMENTED - DEVICE TEST REQUIRED",
+  "kde_plasma_wayland_provisioning": "IMPLEMENTED - DEVICE TEST REQUIRED",
+  "xwayland": "PACKAGE PROVISIONING IMPLEMENTED - DEVICE TEST REQUIRED",
+  "hardware_acceleration": "NOT PROVEN",
+  "release_complete": false
 }
