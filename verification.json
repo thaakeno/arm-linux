@@ -1,10 +1,18 @@
-﻿{
-  "commit": "9475327",
+{
+  "commit": "BUILD_TIME",
+  "source": "repository-baseline",
   "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
-  "vm_creation": "PASS",
-  "vm_boot": "PASS",
-  "connect_vsock": "BLOCKED",
-  "guest_command": "BLOCKED",
+  "stock_cli_microdroid_boot": "PASS",
+  "managed_vm_api_init": "PENDING",
+  "vm_data_dir_redirect": "PENDING",
+  "vm_creation": "PENDING",
+  "vm_boot": "PENDING",
+  "connect_vsock": "PENDING",
+  "vsock_fd_received": "PENDING",
+  "adb_handshake": "PENDING",
+  "guest_command": "PENDING",
+  "reconnect": "NOT TESTED",
   "debian": "NOT TESTED",
-  "gles": "NOT TESTED"
+  "gles": "NOT TESTED",
+  "note": "PASS is reserved for target-device evidence. Runtime app diagnostics write a separate device verification.json."
 }
