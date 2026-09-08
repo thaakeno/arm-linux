@@ -155,7 +155,7 @@ class MainActivity : ComponentActivity() {
         Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             when {
                 !s.connected -> StepCard("1","Connect AVF","Shizuku gives DEV 2 LINUX the shell-level bridge needed for Android's virtualization APIs. No root or bootloader unlock.") {
-                    Button(onClick={connect}) { Text("Connect Shizuku") }
+                    Button(onClick={connect()}) { Text("Connect Shizuku") }
                 }
                 !s.debianInstalled -> {
                     StepCard("2","Install Debian 13","Downloads Google's official ARM64 AVF Linux image into isolated DEV 2 LINUX storage. Existing Termux and other VMs stay untouched.") {
