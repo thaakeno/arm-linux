@@ -42,8 +42,14 @@ class VmSessionService : Service() {
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main)
     private var bridge:IVmBridge?=null
     private var pendingSurface:Surface?=null
+    private var successfulGateACommands=0
+    private var reconnectProbeArmed=false
+
+    // Bump this whenever the Shizuku-side bridge changes. Otherwise Shizuku may keep an old
+    // UserService process alive across APK updates and we end up testing stale VmBridge code.
     private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,VmBridge::class.java))
-        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(4) }
+        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(7) }
+
     private val connection=object:ServiceConnection {
         override fun onServiceConnected(name:ComponentName,binder:IBinder) {
             bridge=IVmBridge.Stub.asInterface(binder)
@@ -71,7 +77,8 @@ class VmSessionService : Service() {
                 .put("debianInstalled",current.debianInstalled).put("debianInstalling",current.debianInstalling)
                 .put("kdeInstalled",current.kdeInstalled).put("kdeInstalling",current.kdeInstalling).put("kdeStage",current.kdeStage)
                 .put("graphics",current.graphics).put("capabilities",current.capabilities)
-                .put("message",current.message).toString(2))
+                .put("message",current.message).put("reconnect",if(reconnectProbeArmed)"PENDING" else if(successfulGateACommands>1)"PASS" else "NOT TESTED")
+                .toString(2))
         } } }
         scope.launch { while(isActive) { delay(1200); if(bridge!=null&&!state.value.busy) refresh() } }
     }
@@ -111,60 +118,78 @@ class VmSessionService : Service() {
             graphics=obj.optString("guestGraphics","unproven"))
     }
 
+    private suspend fun bridgeStatus(b:IVmBridge):JSONObject {
+        val raw=withContext(Dispatchers.IO){b.status()}
+        applyStatus(raw)
+        return JSONObject(raw)
+    }
+
     private suspend fun refresh() {
-        try { val b=bridge?:return; applyStatus(withContext(Dispatchers.IO){b.status()}) }
+        try { val b=bridge?:return; bridgeStatus(b) }
         catch(e:Exception) { state.value=state.value.copy(message=e.message?:"Status unavailable") }
     }
 
     /**
-     * VirtualMachine.run() being accepted is not the readiness signal for connectVsock().
-     * Always wait for the framework's real STATUS_RUNNING state before a guest connection.
+     * AOSP's managed VM object only allows connectVsock() after the VM has reached the real
+     * STATUS_RUNNING state. run() returning is not used as a readiness signal here.
      */
-    private suspend fun waitForVmRunning(b:IVmBridge, timeoutMs:Long=30_000L):String {
+    private suspend fun waitForVmRunning(b:IVmBridge, timeoutMs:Long):JSONObject {
         val deadline=SystemClock.elapsedRealtime()+timeoutMs
-        var lastRaw=""
         var lastStage="unknown"
         while(SystemClock.elapsedRealtime()<deadline) {
-            val raw=withContext(Dispatchers.IO){b.status()}
-            lastRaw=raw
-            val obj=JSONObject(raw)
+            val obj=bridgeStatus(b)
             lastStage=obj.optString("stage","unknown")
-            applyStatus(raw)
-            if(obj.optBoolean("running")) return raw
+            if(obj.optBoolean("running")) return obj
 
             val error=obj.optString("error")
             if(error.isNotBlank() || lastStage.startsWith("blocked:")) {
                 throw IllegalStateException(if(error.isNotBlank()) error else "VM startup blocked at $lastStage")
             }
-            if(lastStage.startsWith("stopped:") || lastStage.startsWith("deleted:")) {
-                throw IllegalStateException("VM stopped before becoming ready (stage=$lastStage)")
-            }
-            delay(200)
+            delay(250)
         }
-        val suffix=if(lastRaw.isBlank()) "" else "; last status=$lastStage"
-        throw IllegalStateException("Timed out waiting for AVF VM to reach STATUS_RUNNING$suffix")
+        throw IllegalStateException("Timed out waiting ${timeoutMs/1000}s for AVF STATUS_RUNNING (last stage=$lastStage)")
+    }
+
+    /**
+     * Make Gate A self-healing. If the UI/service state was stale or the VM stopped between
+     * interactions, start it again and wait for the framework's actual running state.
+     */
+    private suspend fun ensureMicrodroidRunning(b:IVmBridge) {
+        var obj=bridgeStatus(b)
+        if(obj.optBoolean("running") && obj.optString("mode") == "microdroid") return
+        applyStatus(withContext(Dispatchers.IO){b.startVm()})
+        obj=waitForVmRunning(b,45_000L)
+        check(obj.optBoolean("running")) { "Managed Microdroid did not reach STATUS_RUNNING" }
     }
 
     fun startVm()=operation { b ->
         applyStatus(withContext(Dispatchers.IO){b.startVm()})
-        waitForVmRunning(b)
-        state.value=state.value.copy(message="Microdroid VM running; guest shell ready")
+        waitForVmRunning(b,45_000L)
+        state.value=state.value.copy(
+            message=if(reconnectProbeArmed) "VM restarted; run a guest command to verify reconnect" else "Managed Microdroid is RUNNING; guest endpoint can now initialize")
     }
+
     fun stopVm()=operation { b ->
         pendingSurface=null
         applyStatus(withContext(Dispatchers.IO){b.stopVm()})
+        if(successfulGateACommands>0) reconnectProbeArmed=true
+        state.value=state.value.copy(message="Managed VM stopped; VM data retained")
     }
+
     fun installDebian()=operation { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
+
     fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation { b ->
         applyStatus(withContext(Dispatchers.IO){b.startDebian(width,height,dpi,refreshRate)})
         waitForVmRunning(b,60_000L)
         pendingSurface?.let { surface -> if(surface.isValid) withContext(Dispatchers.IO){b.setDisplaySurface(surface)} }
         refresh()
     }
+
     fun installKde()=operation { b ->
         applyStatus(withContext(Dispatchers.IO){b.installKde()})
         refresh()
     }
+
     fun debianConsole(command:String)=operation { b ->
         waitForVmRunning(b,60_000L)
         val reply=withContext(Dispatchers.IO){b.debianConsole(command)}
@@ -176,6 +201,7 @@ class VmSessionService : Service() {
             message="Debian command completed")
         refresh()
     }
+
     fun probeCapabilities()=operation { b ->
         val raw=withContext(Dispatchers.IO){b.inspectCapabilities()}
         val obj=JSONObject(raw)
@@ -191,14 +217,50 @@ class VmSessionService : Service() {
         state.value=state.value.copy(capabilities=text,message=text)
         refresh()
     }
+
+    /**
+     * The bridge already has a bounded connectVsock retry for the guest endpoint. This outer
+     * recovery loop handles the separate VM-lifecycle race: if the object briefly reports not
+     * running, recover/start it and retry rather than surfacing a useless one-shot exception.
+     */
     fun shell(command:String)=operation { b ->
-        waitForVmRunning(b)
-        val reply=withContext(Dispatchers.IO){b.guestShell(command)}
-        val result=JSONObject(reply)
-        check(result.optBoolean("ok")) { result.optString("error","Guest command failed") }
-        val output=result.optString("output")
-        state.value=state.value.copy(terminal=(state.value.terminal+"\n$ $command\n$output").takeLast(256000),message="Guest command completed")
-        refresh()
+        require(command.isNotBlank()) { "Command is empty" }
+        val deadline=SystemClock.elapsedRealtime()+45_000L
+        var lastError="Guest command failed"
+        var attempt=0
+        while(SystemClock.elapsedRealtime()<deadline) {
+            attempt++
+            try {
+                ensureMicrodroidRunning(b)
+                val reply=withContext(Dispatchers.IO){b.guestShell(command)}
+                val result=JSONObject(reply)
+                if(result.optBoolean("ok")) {
+                    val output=result.optString("output")
+                    successfulGateACommands++
+                    val reconnectPassed=reconnectProbeArmed
+                    if(reconnectPassed) reconnectProbeArmed=false
+                    state.value=state.value.copy(
+                        terminal=(state.value.terminal+"\n$ $command\n$output").takeLast(256000),
+                        message=if(reconnectPassed) "Reconnect PASS: command succeeded after VM restart" else "Guest command completed through sanctioned vsock FD")
+                    refresh()
+                    return@operation
+                }
+                lastError=result.optString("error","Guest command failed")
+            } catch(e:Exception) {
+                lastError=e.message?:e.javaClass.simpleName
+            }
+
+            // Expected transient cases while crosvm/adbd are settling. Dev-2 proved these happen
+            // on the target POCO (including a first-attempt connection reset).
+            val transient=lastError.contains("not running",true) ||
+                lastError.contains("Failed to connect",true) ||
+                lastError.contains("Connection reset",true) ||
+                lastError.contains("Connection refused",true) ||
+                lastError.contains("connect_vsock",true)
+            if(!transient) throw IllegalStateException(lastError)
+            delay(if(attempt<5)300L else 750L)
+        }
+        throw IllegalStateException("Gate A timed out after 45s: $lastError")
     }
 
     fun attachSurface(surface:Surface) {
@@ -228,6 +290,7 @@ class VmSessionService : Service() {
         scope.launch { try { block(b) } catch(e:Exception) {
             val error=e.message?:e.javaClass.simpleName
             state.value=state.value.copy(message=error,terminal=(state.value.terminal+"\nERROR: $error\n").takeLast(256000))
+            refresh()
         } finally { state.value=state.value.copy(busy=false) } }
     }
 
