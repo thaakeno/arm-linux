@@ -48,7 +48,7 @@ class VmSessionService : Service() {
     // Bump this whenever the Shizuku-side bridge changes. Otherwise Shizuku may keep an old
     // UserService process alive across APK updates and we end up testing stale VmBridge code.
     private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,VmBridge::class.java))
-        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(8) }
+        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(9) }
 
     private val connection=object:ServiceConnection {
         override fun onServiceConnected(name:ComponentName,binder:IBinder) {
