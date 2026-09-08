@@ -1,8 +1,6 @@
 package com.example.dreamlinux
 
 import android.content.Context
-import android.os.Process
-import android.system.Os
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
@@ -42,48 +40,44 @@ internal object DebianAvfConfig {
 
         addDisks(custom, json.optJSONArray("disks") ?: JSONArray(), imageDir)
 
-        // Do not add app-domain virtiofs shares from the Shizuku shell process. In AOSP's
-        // SharedPath API, appDomain=true means crosvm is spawned from the caller's app context.
-        // That is valid for the privileged Terminal app but SELinux denies executing
-        // /apex/com.android.virt/bin/crosvm from uid=2000 shell. Keep Debian launch entirely
-        // under VirtualizationService/virtmgr; shared folders can be added later through a
-        // non-app-domain path once basic Debian boot/display is proven.
+        // The Shizuku bridge runs as uid=2000. App-domain SharedPath asks AVF to spawn crosvm
+        // from the caller domain, which SELinux rejects on production builds. Keep crosvm under
+        // virtualizationservice/virtmgr until the guest itself is proven stable.
         if (json.optJSONArray("sharedPath") != null) {
-            log("Skipping host shared paths for shell bridge; keeping crosvm under virtualizationservice")
+            log("Skipping host shared paths for shell bridge; crosvm stays under virtualizationservice")
         }
 
-        val wantsNetwork = false // Standard network is rejected for protected VMs.
-        log("Protected VM probe: ordinary network disabled; host networking is not implemented")
-        AvfReflect.call(custom, "useNetwork", wantsNetwork)
+        // This target reports CAPABILITY_PROTECTED_VM only. AVF explicitly rejects the ordinary
+        // TAP/network feature for pVMs, so never inherit network=true from Google's non-pVM image.
+        AvfReflect.call(custom, "useNetwork", false)
+        log("Protected Debian: ordinary AVF network disabled (pVM limitation)")
         AvfReflect.callOptional(custom, "useAutoMemoryBalloon", json.optBoolean("auto_memory_balloon", true))
 
+        // Google's current Debian image defaults to the 2D backend. Use that as the safe desktop
+        // path on this Snapdragon device: gfxstream/Vulkan has already crashed crosvm in
+        // libgfxstream_backend during VkEmulation initialization. Hardware acceleration remains an
+        // explicit future/experimental path and is never reported as proven here.
+        val graphicsMode = if (requestGraphics) "2d" else "none"
         if (requestGraphics) {
-        val gpuBuilder = Class.forName(BASE + "VirtualMachineCustomImageConfig\$GpuConfig\$Builder")
-            .getConstructor().newInstance()
-        AvfReflect.call(gpuBuilder, "setBackend", "gfxstream")
-        AvfReflect.callOptional(gpuBuilder, "setRendererUseEgl", false)
-        AvfReflect.callOptional(gpuBuilder, "setRendererUseGles", false)
-        AvfReflect.callOptional(gpuBuilder, "setRendererUseGlx", false)
-        AvfReflect.callOptional(gpuBuilder, "setRendererUseSurfaceless", true)
-        AvfReflect.callOptional(gpuBuilder, "setRendererUseVulkan", true)
-        AvfReflect.callOptional(gpuBuilder, "setContextTypes", arrayOf("gfxstream-vulkan", "gfxstream-composer"))
-        val gpu = AvfReflect.call(gpuBuilder, "build") ?: error("GpuConfig build returned null")
-        AvfReflect.call(custom, "setGpuConfig", gpu)
+            val gpuBuilder = Class.forName(BASE + "VirtualMachineCustomImageConfig\$GpuConfig\$Builder")
+                .getConstructor().newInstance()
+            AvfReflect.call(gpuBuilder, "setBackend", "2d")
+            val gpu = AvfReflect.call(gpuBuilder, "build") ?: error("GpuConfig build returned null")
+            AvfReflect.call(custom, "setGpuConfig", gpu)
 
-        val displayBuilder = Class.forName(BASE + "VirtualMachineCustomImageConfig\$DisplayConfig\$Builder")
-            .getConstructor().newInstance()
-        AvfReflect.call(displayBuilder, "setWidth", width.coerceAtLeast(640))
-        AvfReflect.call(displayBuilder, "setHeight", height.coerceAtLeast(480))
-        AvfReflect.call(displayBuilder, "setHorizontalDpi", dpi.coerceIn(120, 640))
-        AvfReflect.call(displayBuilder, "setVerticalDpi", dpi.coerceIn(120, 640))
-        AvfReflect.call(displayBuilder, "setRefreshRate", refreshRate.coerceIn(30, 240))
-        val display = AvfReflect.call(displayBuilder, "build") ?: error("DisplayConfig build returned null")
-        AvfReflect.call(custom, "setDisplayConfig", display)
-        AvfReflect.callOptional(custom, "useKeyboard", true)
-        AvfReflect.callOptional(custom, "useMouse", true)
-        AvfReflect.callOptional(custom, "useTouch", true)
-        AvfReflect.callOptional(custom, "useTrackpad", true)
-
+            val displayBuilder = Class.forName(BASE + "VirtualMachineCustomImageConfig\$DisplayConfig\$Builder")
+                .getConstructor().newInstance()
+            AvfReflect.call(displayBuilder, "setWidth", width.coerceAtLeast(640))
+            AvfReflect.call(displayBuilder, "setHeight", height.coerceAtLeast(480))
+            AvfReflect.call(displayBuilder, "setHorizontalDpi", dpi.coerceIn(120, 640))
+            AvfReflect.call(displayBuilder, "setVerticalDpi", dpi.coerceIn(120, 640))
+            AvfReflect.call(displayBuilder, "setRefreshRate", refreshRate.coerceIn(30, 120))
+            val display = AvfReflect.call(displayBuilder, "build") ?: error("DisplayConfig build returned null")
+            AvfReflect.call(custom, "setDisplayConfig", display)
+            AvfReflect.callOptional(custom, "useKeyboard", true)
+            AvfReflect.callOptional(custom, "useMouse", true)
+            AvfReflect.callOptional(custom, "useTouch", true)
+            AvfReflect.callOptional(custom, "useTrackpad", true)
         }
 
         val customConfig = AvfReflect.call(custom, "build") ?: error("CustomImageConfig build returned null")
@@ -91,11 +85,14 @@ internal object DebianAvfConfig {
         val vmBuilder = Class.forName(BASE + "VirtualMachineConfig\$Builder")
             .getConstructor(Context::class.java).newInstance(context)
 
-        // This POCO exposes only CAPABILITY_PROTECTED_VM. Google's downloadable Debian config
-        // currently defaults to non-protected, which the device rejects before crosvm starts.
-        // Force the custom Debian VM through the same protected AVF/Gunyah path proven by Gate A.
+        // Qualcomm exposes protected AVF but not non-protected AVF on this target. Force the guest
+        // through pVM/Gunyah and let the runtime tell us if the Debian kernel itself is pVM-safe.
         AvfReflect.call(vmBuilder, "setProtectedVm", true)
-        AvfReflect.call(vmBuilder, "setMemoryBytes", json.optLong("memory_mib", 4096L).coerceIn(1024L, 12288L) * 1024L * 1024L)
+        AvfReflect.call(
+            vmBuilder,
+            "setMemoryBytes",
+            json.optLong("memory_mib", 4096L).coerceIn(1024L, 12288L) * 1024L * 1024L,
+        )
 
         val cpu = json.optString("cpu_topology", "match_host")
         val cpuValue = when (cpu) {
@@ -115,7 +112,10 @@ internal object DebianAvfConfig {
         AvfReflect.callOptional(vmBuilder, "setVmConsoleInputSupported", consoleInput != null)
         AvfReflect.callOptional(vmBuilder, "setConnectVmConsole", json.optBoolean("connect_console", false))
 
-        log("Debian config: protected=true sourceProtected=${json.optBoolean("protected", false)} network=$wantsNetwork gfxstream=$requestGraphics display=${width}x$height@$refreshRate dpi=$dpi")
+        log(
+            "Debian config: protected=true sourceProtected=${json.optBoolean("protected", false)} " +
+                "network=false graphics=$graphicsMode display=${width}x$height@$refreshRate dpi=$dpi"
+        )
         return AvfReflect.call(vmBuilder, "build") ?: error("VirtualMachineConfig build returned null")
     }
 
@@ -159,44 +159,6 @@ internal object DebianAvfConfig {
                 }
             }
             AvfReflect.call(custom, "addDisk", disk)
-        }
-    }
-
-    @Suppress("unused")
-    private fun addSharedPaths(custom: Any, paths: JSONArray?, context: Context, log: (String) -> Unit) {
-        if (paths == null) return
-        val sharedClass = Class.forName(BASE + "VirtualMachineCustomImageConfig\$SharedPath")
-        val constructor = sharedClass.constructors.firstOrNull { it.parameterCount == 10 }
-            ?: run {
-                log("SharedPath API shape unavailable; continuing without virtiofs")
-                return
-            }
-        for (i in 0 until paths.length()) {
-            val raw = paths.getJSONObject(i).optString("sharedPath", "")
-            if (raw.isBlank()) continue
-            if (raw.contains("/storage/emulated")) {
-                log("Skipping optional shared storage mount; all-files access not requested")
-                continue
-            }
-            val path = raw.replace("\$APP_DATA_DIR", context.dataDir.path)
-            val socket = File(context.filesDir, "internal.virtiofs")
-            if (socket.exists()) socket.delete()
-            val hostUid = Process.myUid()
-            val hostGid = Os.getgid()
-            val shared = constructor.newInstance(
-                path,
-                hostUid,
-                hostGid,
-                0,
-                0,
-                7,
-                "internal",
-                "internal",
-                false,
-                "",
-            )
-            AvfReflect.call(custom, "addSharedPath", shared)
-            log("Added non-app-domain virtiofs share $path uid=$hostUid gid=$hostGid")
         }
     }
 }
