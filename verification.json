@@ -13,8 +13,17 @@
   "adb_handshake": "PASS",
   "guest_command": "PASS",
   "reconnect": "PASS",
-  "debian": "NOT TESTED",
+  "debian_image_installer": "IMPLEMENTED_NOT_DEVICE_TESTED",
+  "non_protected_vm_capability": "NOT TESTED",
+  "custom_image_vm": "NOT TESTED",
+  "debian_boot": "NOT TESTED",
+  "debian_identity": "NOT TESTED",
+  "display_surface": "NOT TESTED",
+  "input": "NOT TESTED",
+  "kde_plasma": "NOT TESTED",
   "gles": "NOT TESTED",
-  "evidence": "Managed VM booted on target POCO; connectVsock(5555) returned a working descriptor; native ADB transport executed id/uname/proc-version; VM was stopped, started again, reconnected with a new descriptor, and guest command execution succeeded again.",
-  "note": "Gate A is device-verified. Debian and graphics remain gated and must not be inferred from Gate A."
+  "vulkan": "NOT TESTED",
+  "hardware_acceleration": "NOT TESTED",
+  "evidence": "Gate A is proven on the target POCO: managed VM boot, sanctioned connectVsock(5555) descriptor, native ADB guest commands, stop/start and reconnect all passed. The 1.0 Debian/custom-image/display/KDE code is build-time implementation only until the target device demonstrates each new stage.",
+  "note": "Never infer Debian, display, KDE, GLES, Vulkan or hardware acceleration PASS from code presence or Gate A. Runtime diagnostics are authoritative for the new gates."
 }
