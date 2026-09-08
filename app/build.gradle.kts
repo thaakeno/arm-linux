@@ -21,7 +21,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = 1000 + buildRevision
-        versionName = "0.6.0-dev1"
+        versionName = "0.6.1-dev1"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
         ndk { abiFilters += "arm64-v8a" }
