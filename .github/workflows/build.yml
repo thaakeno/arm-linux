@@ -49,7 +49,8 @@ jobs:
             chmod 600 "$HOME/.android/debug.keystore"
             echo "STABLE_SIGNING=true" >> "$GITHUB_ENV"
           else
-            echo "::warning::Persistent signing key missing; build will run but rolling release publication is disabled."
+            echo "STABLE_SIGNING=false" >> "$GITHUB_ENV"
+            echo "::warning::Persistent signing key missing; publishing a test-signed APK. Android may require uninstalling an older differently-signed APK before installation. Files in /data/local/tmp/dev1-linux* are not app-private package data and are not deleted by uninstall."
           fi
 
       - name: Build and check APK
@@ -66,25 +67,25 @@ jobs:
       - name: Prepare Verification Metadata
         run: |
           if [ -f verification.json ]; then
-            python3 -c "import json; d=json.load(open('verification.json')); d['commit']='${{ github.sha }}'; d['apk_signature_v3']='PASS'; json.dump(d, open('verification.json','w'), indent=2)"
+            python3 -c "import json; d=json.load(open('verification.json')); d['commit']='${{ github.sha }}'; d['version']='0.5.0-dev1'; d['apk_signature_v3']='PASS'; d['stable_signing']='${{ env.STABLE_SIGNING }}'; json.dump(d, open('verification.json','w'), indent=2)"
           else
             cat <<EOF > verification.json
           {
             "commit": "${{ github.sha }}",
+            "version": "0.5.0-dev1",
             "apk_signature_v3": "PASS",
+            "stable_signing": "${{ env.STABLE_SIGNING }}",
             "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
-            "vm_creation": "PENDING DEVICE RETEST",
-            "vm_boot": "PENDING DEVICE RETEST",
-            "connect_vsock": "PENDING",
-            "guest_command": "PENDING",
-            "debian": "NOT TESTED",
-            "gles": "NOT TESTED"
+            "microdroid_gate_a": "PASS ON TARGET FROM PRIOR DEVICE TEST",
+            "debian_pvm": "PENDING DEVICE RETEST",
+            "debian_2d_display": "PENDING DEVICE RETEST",
+            "plasma": "PENDING",
+            "hardware_acceleration": "NOT PROVEN"
           }
           EOF
           fi
 
       - name: Deploy to Branch-Isolated Rolling Release
-        if: env.STABLE_SIGNING == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -102,14 +103,12 @@ jobs:
 
           echo "Target release tag: $TAG"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TITLE" --notes "Rolling build from branch $BRANCH commit ${{ github.sha }}" --prerelease
-          # Keep the fixed download URL as an alias, and publish the identifiable APK.
           gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json apk-signature.txt --clobber
-          # Remove only older versioned APKs from this branch's rolling release.
           gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("DreamLinux-") and endswith(".apk"))' | while IFS= read -r asset; do
             gh release delete-asset "$TAG" "$asset" --yes
           done
           gh release upload "$TAG" build/deliverables/DreamLinux-*.apk --clobber
-          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}. Runtime verification requires the target phone."
+          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.5.0-dev1. Stable signing: $STABLE_SIGNING. Runtime Debian/display verification still requires the target phone."
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
