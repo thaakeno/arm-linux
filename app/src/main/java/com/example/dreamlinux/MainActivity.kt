@@ -6,8 +6,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.KeyEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -127,9 +125,9 @@ class MainActivity : ComponentActivity() {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
             Text("About Dream Linux",style=MaterialTheme.typography.headlineSmall)
             SelectionContainer { Text("Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\nBranch ${BuildConfig.GIT_BRANCH}\nCommit ${BuildConfig.GIT_COMMIT}\nARM64 development build",fontFamily=FontFamily.Monospace) }
-            Text("Debian, Wayland display and GPU acceleration require verification on this phone. VMM running status alone is not evidence that Linux booted.")
-            Text("Display design: guest Wayland compositor ? virtual GPU / GfxStream ? Android SurfaceView. This build does not include a separately bundled GfxStream renderer.")
-            Text("Built with Android CLI / Gradle, Kotlin, Compose and Android NDK. Uses Shizuku API and Apache Commons Compress. Debian images are downloaded from Google's AVF image service.")
+            Text("This build no longer depends on the privileged AOSP Terminal display Binder. Debian runs headless in AVF and the Plasma desktop is carried to Android through TigerVNC over an AVF-owned vsock channel.")
+            Text("Internet uses a host-mediated reverse HTTP/SOCKS proxy over vsock because this phone's AVF rejects ordinary TAP networking for protected VMs. Debian apt and proxy-aware applications use the phone's connection through that bridge.")
+            Text("Hardware GPU acceleration is still unproven. The VNC fallback is deliberately software-rendered so the app never labels acceleration as working without renderer evidence.")
         }
     }
 
@@ -170,7 +168,7 @@ class MainActivity : ComponentActivity() {
                     } else Button(onClick={VmSessionService.active?.installDebian()},enabled=!state.busy) { Text("Install Debian") }
                 }
                 !state.running || state.mode!="debian" -> {
-                    SetupCard("3","Test Debian boot","Tests the official image on this device. A protected-VM setting does not guarantee image compatibility or GPU support. Ordinary networking is disabled for this probe.") {
+                    SetupCard("3","Start Debian","Boots Debian headless, proves actual Debian userspace through the serial console, provisions the guest vsock bridge, then verifies Internet through the phone before reporting ready.") {
                         Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                             Button(onClick={startDebian()},enabled=!state.busy) { Text("Start Debian") }
                             OutlinedButton(onClick={VmSessionService.active?.probeCapabilities()},enabled=!state.busy) { Text("Probe AVF") }
@@ -180,7 +178,7 @@ class MainActivity : ComponentActivity() {
                 }
                 else -> {
                     if(!state.kdeInstalled) {
-                        SetupCard("4","Install KDE Plasma 6","Installs Plasma, KWin Wayland, Konsole, Dolphin and XWayland inside Debian, disables the default Weston launch, then starts Plasma on the AVF display.") {
+                        SetupCard("4","Install KDE Plasma 6","Uses the new vsock Internet bridge to install Plasma 6, KWin X11, Konsole, Dolphin and TigerVNC inside the real Debian guest, then starts the desktop on an isolated local VNC display.") {
                             if(state.kdeInstalling) {
                                 LinearProgressIndicator(Modifier.fillMaxWidth())
                                 Text(state.kdeStage,style=MaterialTheme.typography.bodySmall)
@@ -191,7 +189,7 @@ class MainActivity : ComponentActivity() {
                     KeyToolbar()
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
                         TextButton(onClick={VmSessionService.active?.stopVm()},enabled=!state.busy) { Text("Stop Linux") }
-                        Text(if(state.kdeInstalled) "Plasma provisioned · ${state.graphics}" else "${state.kdeStage} · ${state.graphics}",Modifier.weight(1f),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(if(state.kdeInstalled) "Plasma via VNC · ${state.graphics}" else "${state.kdeStage} · ${state.graphics}",Modifier.weight(1f),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -229,35 +227,28 @@ class MainActivity : ComponentActivity() {
 
     @Composable private fun LinuxDisplay(modifier:Modifier=Modifier) {
         Surface(modifier,shape=RoundedCornerShape(16.dp),color=Color.Black) {
-            AndroidView(modifier=Modifier.fillMaxSize(),factory={ context -> SurfaceView(context).apply {
-                setBackgroundColor(android.graphics.Color.BLACK); isFocusable=true; isFocusableInTouchMode=true; keepScreenOn=true
-                holder.addCallback(object:SurfaceHolder.Callback {
-                    override fun surfaceCreated(holder:SurfaceHolder) { requestFocus(); VmSessionService.active?.attachSurface(holder.surface) }
-                    override fun surfaceChanged(holder:SurfaceHolder,format:Int,width:Int,height:Int) { VmSessionService.active?.attachSurface(holder.surface) }
-                    override fun surfaceDestroyed(holder:SurfaceHolder) { VmSessionService.active?.detachSurface(holder.surface) }
-                })
-                setOnKeyListener { _,keyCode,event -> VmSessionService.active?.sendKey(event.action,keyCode,event.metaState) ?: false }
-                setOnTouchListener { view,event ->
-                    view.requestFocus()
-                    val pointer=event.actionIndex.coerceIn(0,event.pointerCount-1)
-                    VmSessionService.active?.sendTouch(event.actionMasked,event.getX(pointer),event.getY(pointer),event.getPointerId(pointer))
-                    true
-                }
-            }},update={if(!it.hasFocus())it.requestFocus()})
+            AndroidView(
+                modifier=Modifier.fillMaxSize(),
+                factory={ context -> VncFramebufferView(context).apply { requestFocus() } },
+                update={ if(!it.hasFocus()) it.requestFocus() },
+            )
         }
     }
 
     @Composable private fun KeyToolbar() {
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
             listOf("Esc" to KeyEvent.KEYCODE_ESCAPE,"Ctrl" to KeyEvent.KEYCODE_CTRL_LEFT,"Alt" to KeyEvent.KEYCODE_ALT_LEFT,"Tab" to KeyEvent.KEYCODE_TAB).forEach { (label,key) ->
-                OutlinedButton(onClick={VmSessionService.active?.sendKey(KeyEvent.ACTION_DOWN,key,0);VmSessionService.active?.sendKey(KeyEvent.ACTION_UP,key,0)},contentPadding=PaddingValues(horizontal=12.dp,vertical=8.dp)) { Text(label) }
+                OutlinedButton(onClick={
+                    VncFramebufferView.active?.sendAndroidKey(true,key)
+                    VncFramebufferView.active?.sendAndroidKey(false,key)
+                },contentPadding=PaddingValues(horizontal=12.dp,vertical=8.dp)) { Text(label) }
             }
         }
     }
 
     @Composable private fun TerminalPage(state:SessionState) {
         var gateCommand by remember { mutableStateOf("id; uname -a; cat /proc/version") }
-        var debianCommand by remember { mutableStateOf("cat /etc/os-release; uname -a; id; vulkaninfo --summary 2>/dev/null | head -60") }
+        var debianCommand by remember { mutableStateOf("cat /etc/os-release; uname -a; id; env | grep -i proxy; python3 -c \"import urllib.request; print(urllib.request.urlopen('https://deb.debian.org/',timeout=15).status)\"") }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             Text("Linux consoles",style=MaterialTheme.typography.headlineSmall)
             if(state.running&&state.mode=="debian") {
@@ -290,7 +281,7 @@ class MainActivity : ComponentActivity() {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             Text("Diagnostics",style=MaterialTheme.typography.headlineSmall)
             Metric("Mode",state.mode); Metric("Stage",state.stage); Metric("API",state.api.ifBlank{"not connected"})
-            OutlinedButton(onClick={VmSessionService.active?.startDebianDiagnostic()},enabled=state.connected&&state.debianInstalled&&!state.busy) { Text("Test boot without GPU") }
+            OutlinedButton(onClick={VmSessionService.active?.startDebianDiagnostic()},enabled=state.connected&&state.debianInstalled&&!state.busy) { Text("Test headless Debian + Internet") }
             Metric("Debian",if(state.debianInstalled)"image installed" else "not installed")
             Metric("KDE",if(state.kdeInstalled)"provisioned" else state.kdeStage)
             Metric("Graphics",state.graphics)
