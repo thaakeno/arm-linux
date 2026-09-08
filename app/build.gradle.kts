@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.dreamlinux"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1-gate-a"
+        versionCode = 2
+        versionName = "0.2-gate-a-pass"
         ndk { abiFilters += "arm64-v8a" }
     }
 
