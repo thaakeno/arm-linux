@@ -22,6 +22,7 @@ data class SessionState(
     val vmRoot:String="",
     val console:String="",
     val terminal:String="",
+    val debianTerminal:String="",
     val message:String="Connect Shizuku to begin",
     val busy:Boolean=false,
     val debianInstalled:Boolean=false,
@@ -29,6 +30,9 @@ data class SessionState(
     val installProgress:Double=-1.0,
     val installBytes:Long=0L,
     val installTotal:Long=-1L,
+    val kdeInstalled:Boolean=false,
+    val kdeInstalling:Boolean=false,
+    val kdeStage:String="not installed",
     val capabilities:String="Not checked",
     val graphics:String="unproven"
 )
@@ -39,7 +43,7 @@ class VmSessionService : Service() {
     private var bridge:IVmBridge?=null
     private var pendingSurface:Surface?=null
     private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,VmBridge::class.java))
-        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(3) }
+        .daemon(false).processNameSuffix("vm_bridge").debuggable(true).version(4) }
     private val connection=object:ServiceConnection {
         override fun onServiceConnected(name:ComponentName,binder:IBinder) {
             bridge=IVmBridge.Stub.asInterface(binder)
@@ -65,6 +69,7 @@ class VmSessionService : Service() {
                 .put("running",current.running).put("name",current.name).put("mode",current.mode)
                 .put("stage",current.stage).put("api",current.api).put("vmRoot",current.vmRoot)
                 .put("debianInstalled",current.debianInstalled).put("debianInstalling",current.debianInstalling)
+                .put("kdeInstalled",current.kdeInstalled).put("kdeInstalling",current.kdeInstalling).put("kdeStage",current.kdeStage)
                 .put("graphics",current.graphics).put("capabilities",current.capabilities)
                 .put("message",current.message).toString(2))
         } } }
@@ -83,9 +88,12 @@ class VmSessionService : Service() {
         val obj=JSONObject(raw)
         val error=obj.optString("error")
         val installError=obj.optString("installError")
+        val kdeError=obj.optString("kdeError")
         val msg=when {
+            kdeError.isNotBlank() -> kdeError
             installError.isNotBlank() -> installError
             error.isNotBlank() -> error
+            obj.optBoolean("kdeInstalling") -> "KDE: ${obj.optString("kdeStage","working")}"
             obj.optBoolean("debianInstalling") -> {
                 val p=obj.optDouble("installProgress",-1.0)
                 if(p>=0) "Installing Debian ${(p*100).toInt()}%" else "Installing Debian"
@@ -98,7 +106,9 @@ class VmSessionService : Service() {
             vmRoot=obj.optString("vmRoot"),console=obj.optString("log"),message=msg,
             debianInstalled=obj.optBoolean("debianInstalled"),debianInstalling=obj.optBoolean("debianInstalling"),
             installProgress=obj.optDouble("installProgress",-1.0),installBytes=obj.optLong("installBytes",0L),
-            installTotal=obj.optLong("installTotal",-1L),graphics=obj.optString("guestGraphics","unproven"))
+            installTotal=obj.optLong("installTotal",-1L),kdeInstalled=obj.optBoolean("kdeInstalled"),
+            kdeInstalling=obj.optBoolean("kdeInstalling"),kdeStage=obj.optString("kdeStage","not installed"),
+            graphics=obj.optString("guestGraphics","unproven"))
     }
 
     private suspend fun refresh() {
@@ -117,6 +127,20 @@ class VmSessionService : Service() {
         pendingSurface?.let { surface -> if(surface.isValid) withContext(Dispatchers.IO){b.setDisplaySurface(surface)} }
         refresh()
     }
+    fun installKde()=operation { b ->
+        applyStatus(withContext(Dispatchers.IO){b.installKde()})
+        refresh()
+    }
+    fun debianConsole(command:String)=operation { b ->
+        val reply=withContext(Dispatchers.IO){b.debianConsole(command)}
+        val result=JSONObject(reply)
+        check(result.optBoolean("ok")) { result.optString("error","Debian command failed") }
+        val output=result.optString("output")
+        state.value=state.value.copy(
+            debianTerminal=(state.value.debianTerminal+"\n# $command\n$output").takeLast(256000),
+            message="Debian command completed")
+        refresh()
+    }
     fun probeCapabilities()=operation { b ->
         val raw=withContext(Dispatchers.IO){b.inspectCapabilities()}
         val obj=JSONObject(raw)
@@ -127,6 +151,7 @@ class VmSessionService : Service() {
             append(" · custom=").append(obj.optBoolean("customImageApi"))
             append(" · GPU API=").append(obj.optBoolean("gpuConfigApi"))
             append(" · display API=").append(obj.optBoolean("displayConfigApi"))
+            append(" · crosvm display=").append(obj.optBoolean("displayServiceApi"))
         } else "Capability probe failed: ${obj.optString("error")}" 
         state.value=state.value.copy(capabilities=text,message=text)
         refresh()
