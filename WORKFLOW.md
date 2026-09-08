@@ -1,25 +1,46 @@
 ﻿# Agent Build & Artifact Workflow
 
-This document provides exact instructions for autonomous agents (e.g. ChatGPT, Claude, Antigravity) to trigger builds, retrieve artifacts, inspect verification status, and preserve repository storage.
+This document provides exact instructions for autonomous agents (e.g. ChatGPT, Claude, Antigravity) working on `arm-linux`.
+
+## Multi-Agent Branch & Release Isolation
+
+Two agents work simultaneously on separate development tracks:
+- **Agent 1**: Works strictly on branch `dev-1`. Pushes trigger the `latest-dev-1` release.
+- **Agent 2**: Works strictly on branch `dev-2`. Pushes trigger the `latest-dev-2` release.
+- **Master**: Neither agent pushes directly to `master`. After verification, the winning implementation is merged into `master`, triggering the production `latest` release.
 
 ## Zero-Quota Storage Architecture
 
 Standard GitHub Actions artifacts accumulate across builds and consume account storage quotas. This pipeline bypasses artifact storage bloat using a two-tier strategy:
 
-1. **Rolling GitHub Release (`latest`)**: The build publishes `app-debug.apk` and `verification.json` directly to a pre-release tagged `latest` using `gh release upload latest ... --clobber`. Release assets do not count against the GitHub Actions storage quota, and `--clobber` overwrites the files on every build, maintaining exactly one set of assets in storage at all times.
-2. **Static Direct Download URLs**: Because release assets have predictable endpoints, agents do not need to parse GitHub Actions run logs, extract `.zip` bundles, or authenticate with personal access tokens to fetch the APK or diagnostics.
-3. **1-Day Auto-Expiry Fallback**: Any auxiliary artifact uploaded to the Actions run is capped with `retention-days: 1` so that it automatically expires within 24 hours.
-4. **Concurrency Control**: Rapid successive commits automatically cancel earlier queued or in-progress runs, preventing unnecessary runner minute consumption.
+1. **Branch-Isolated Rolling Releases**: Every push to `dev-1`, `dev-2`, or `master` publishes `app-debug.apk` and `verification.json` to a dedicated rolling pre-release tag (`latest-dev-1`, `latest-dev-2`, or `latest`) using `gh release upload ... --clobber`. Release assets do not count against the GitHub Actions storage quota, and `--clobber` overwrites the files in place, ensuring each branch never stores more than one single APK.
+2. **Static Direct Download URLs**: Endpoints are deterministic and unauthenticated. Agents do not need to parse run logs, extract `.zip` archives, or supply tokens.
+3. **1-Day Auto-Expiry Fallback**: Run artifacts are capped with `retention-days: 1` so they vanish within 24 hours.
+4. **Concurrency Control**: Rapid commits on the same branch automatically cancel earlier queued or running jobs.
 
 ## Direct Download Endpoints
 
-Agents or curl scripts can fetch the latest compiled debug APK and verification metadata directly:
-
+### Branch `dev-1`
 ```bash
-# Latest compiled APK
-curl -L -o app-debug.apk "https://github.com/thaakeno/arm-linux/releases/download/latest/app-debug.apk"
+# APK
+curl -L -o app-debug-dev1.apk "https://github.com/thaakeno/arm-linux/releases/download/latest-dev-1/app-debug.apk"
+# Verification status
+curl -L -o verification-dev1.json "https://github.com/thaakeno/arm-linux/releases/download/latest-dev-1/verification.json"
+```
 
-# Latest verification status JSON
+### Branch `dev-2`
+```bash
+# APK
+curl -L -o app-debug-dev2.apk "https://github.com/thaakeno/arm-linux/releases/download/latest-dev-2/app-debug.apk"
+# Verification status
+curl -L -o verification-dev2.json "https://github.com/thaakeno/arm-linux/releases/download/latest-dev-2/verification.json"
+```
+
+### Branch `master`
+```bash
+# APK
+curl -L -o app-debug.apk "https://github.com/thaakeno/arm-linux/releases/download/latest/app-debug.apk"
+# Verification status
 curl -L -o verification.json "https://github.com/thaakeno/arm-linux/releases/download/latest/verification.json"
 ```
 
@@ -43,27 +64,10 @@ The published `verification.json` records what each build actually verified:
 ## Triggering Builds
 
 ### Automatic Trigger
-Pushing commits to the `master` or `main` branch automatically starts the `Build APK` workflow.
+Pushing commits to `dev-1`, `dev-2`, or `master` automatically starts the build.
 
 ### Manual Dispatch (CLI / API)
-To trigger a build without modifying code:
-
 ```bash
-gh workflow run build.yml --repo thaakeno/arm-linux
-```
-
-To monitor the run:
-
-```bash
-gh run list --workflow=build.yml --repo thaakeno/arm-linux
-gh run watch --repo thaakeno/arm-linux
-```
-
-## On-Device Deployment
-
-Once the workflow finishes and the APK is downloaded:
-
-```bash
-adb install -r app-debug.apk
-adb shell am start -n com.example.dreamlinux/.MainActivity
+gh workflow run build.yml --ref dev-1 --repo thaakeno/arm-linux
+gh workflow run build.yml --ref dev-2 --repo thaakeno/arm-linux
 ```

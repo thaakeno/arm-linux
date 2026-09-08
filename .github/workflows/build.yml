@@ -2,7 +2,7 @@
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [ master, main, dev-1, dev-2 ]
   workflow_dispatch:
 
 concurrency:
@@ -59,17 +59,30 @@ jobs:
           EOF
           fi
 
-      - name: Deploy to Rolling Release (Zero Actions Storage)
+      - name: Deploy to Branch-Isolated Rolling Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view latest >/dev/null 2>&1 || gh release create latest --title "Latest Build" --notes "Rolling build from commit ${{ github.sha }}" --prerelease
-          gh release upload latest app/build/outputs/apk/debug/app-debug.apk verification.json --clobber
+          BRANCH="${GITHUB_REF_NAME}"
+          if [ "$BRANCH" = "dev-1" ]; then
+            TAG="latest-dev-1"
+            TITLE="Latest Build (dev-1)"
+          elif [ "$BRANCH" = "dev-2" ]; then
+            TAG="latest-dev-2"
+            TITLE="Latest Build (dev-2)"
+          else
+            TAG="latest"
+            TITLE="Latest Build (master)"
+          fi
+
+          echo "Target release tag: $TAG"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TITLE" --notes "Rolling build from branch $BRANCH commit ${{ github.sha }}" --prerelease
+          gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json --clobber
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
+          name: app-debug-${{ github.ref_name }}
           path: |
             app/build/outputs/apk/debug/app-debug.apk
             verification.json
