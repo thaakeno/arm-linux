@@ -7,6 +7,7 @@ import android.os.ParcelFileDescriptor
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
+import dalvik.system.PathClassLoader
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -14,12 +15,13 @@ import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 
-/** Shell-UID AVF controller. Gate A remains the proven protected Microdroid path. */
+/** Shell-UID AVF controller. Gate A remains the known-good protected Microdroid path. */
 class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
     constructor() : this(resolveApplicationContext())
 
-    private val gateVmName = "dev2-gate-a-v4"
-    private val debianVmName = "dev2-debian13-v1"
+    private val gateVmName = "dev2-gate-a-v5"
+    private val debianPvmName = "dev2-debian13-pvm-v2"
+    private val debianNonPvmName = "dev2-debian13-v2"
     private val vmRoot = File("/data/local/tmp/dev2-linux/${appContext.packageName}")
     private val debianDir = File("/data/local/tmp/dev2-linux/debian13")
     private val scopedContext: Context by lazy { ShellVmContext(appContext, vmRoot) }
@@ -43,6 +45,7 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
     private var displayState = "NOT TESTED"
     private var kdeState = "NOT TESTED"
     private var capabilitiesText = "NOT TESTED"
+    private var debianProtected = false
 
     private val installing = AtomicBoolean(false)
     @Volatile private var installDone = 0L
@@ -57,9 +60,15 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
     private var displayService: Any? = null
     private val lock = Any()
 
-    private fun append(value: String) = synchronized(lock) {
-        log = (log + value + if (value.endsWith('\n')) "" else "\n").takeLast(256000)
+    private fun appendLine(value: String) = synchronized(lock) {
+        val clean = value.trimEnd('\r', '\n')
+        log = (log + clean + "\n").takeLast(256000)
     }
+
+    private fun appendRaw(value: String) = synchronized(lock) {
+        log = (log + value.replace("\r\n", "\n").replace('\r', '\n')).takeLast(256000)
+    }
+
     private fun logSnapshot(): String = synchronized(lock) { log }
 
     private fun rootCause(t: Throwable): Throwable {
@@ -72,7 +81,7 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
         val cause = rootCause(throwable)
         failureStage = stage
         val detail = "${cause.javaClass.name}: ${cause.message ?: "no message"}"
-        append("[$stage] $detail")
+        appendLine("[$stage] $detail")
         when (stage) {
             "vm_api_init" -> vmApiInit = "BLOCKED"
             "vm_creation" -> vmCreation = "BLOCKED"
@@ -89,29 +98,48 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
         throw IllegalStateException("$stage: $detail", cause)
     }
 
+    private val virtLoader: ClassLoader by lazy {
+        val dir = File("/apex/com.android.virt/javalib")
+        val jars = dir.listFiles()
+            ?.filter { it.isFile && it.extension == "jar" }
+            ?.sortedBy { it.name }
+            ?.joinToString(File.pathSeparator) { it.absolutePath }
+            .orEmpty()
+        if (jars.isBlank()) appContext.classLoader else PathClassLoader(jars, appContext.classLoader)
+    }
+
+    private fun virtClass(name: String): Class<*> {
+        return runCatching { Class.forName(name) }
+            .getOrElse { Class.forName(name, true, virtLoader) }
+    }
+
+    private fun classExists(name: String): Boolean = runCatching { virtClass(name) }.isSuccess
+
     private fun initializeManager(): Any {
         manager?.let { return it }
         try {
             vmRoot.mkdirs()
             check(vmRoot.isDirectory && vmRoot.canWrite()) { "Shell VM root is not writable: ${vmRoot.absolutePath}" }
-            val cls = Class.forName("android.system.virtualmachine.VirtualMachineManager")
+            val cls = virtClass("android.system.virtualmachine.VirtualMachineManager")
             val instance = cls.getConstructor(Context::class.java).newInstance(scopedContext)
             manager = instance
             vmApiInit = "PASS"
             failureStage = "none"
-            append("[vm_api_init] PASS ${cls.name}")
-            append("[vm_data_dir] ${scopedContext.dataDir.absolutePath}")
+            appendLine("[vm_api_init] PASS ${cls.name}")
+            appendLine("[vm_data_dir] ${scopedContext.dataDir.absolutePath}")
             return instance
-        } catch (t: Throwable) { fail("vm_api_init", t) }
+        } catch (t: Throwable) {
+            fail("vm_api_init", t)
+        }
     }
 
     private fun buildGateConfig(): Any {
-        val builder = Class.forName("android.system.virtualmachine.VirtualMachineConfig\$Builder")
+        val builder = virtClass("android.system.virtualmachine.VirtualMachineConfig\$Builder")
             .getConstructor(Context::class.java).newInstance(scopedContext)
         AvfReflect.call(builder, "setProtectedVm", true)
         AvfReflect.call(builder, "setPayloadBinaryName", "libdream_payload.so")
         AvfReflect.call(builder, "setMemoryBytes", 256L * 1024L * 1024L)
-        val cls = Class.forName("android.system.virtualmachine.VirtualMachineConfig")
+        val cls = virtClass("android.system.virtualmachine.VirtualMachineConfig")
         AvfReflect.call(builder, "setDebugLevel", cls.getField("DEBUG_LEVEL_FULL").getInt(null))
         AvfReflect.callOptional(builder, "setVmOutputCaptured", true)
         return AvfReflect.call(builder, "build") ?: error("VirtualMachineConfig build returned null")
@@ -119,80 +147,113 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
 
     private fun acquire(name: String, config: Any, newMode: String): Any {
         val mgr = initializeManager()
-        val configClass = Class.forName("android.system.virtualmachine.VirtualMachineConfig")
-        try {
-            var vm = mgr.javaClass.getMethod("getOrCreate", String::class.java, configClass).invoke(mgr, name, config)
-                ?: error("getOrCreate returned null")
-            runCatching { AvfReflect.call(vm, "setConfig", config) }.onFailure { first ->
-                append("[vm_config] setConfig rejected for $name: ${rootCause(first).message}; recreating only DEV 2 instance")
-                runCatching { if (isVmRunning(vm)) AvfReflect.call(vm, "stop") }
-                AvfReflect.call(mgr, "delete", name)
-                vm = AvfReflect.call(mgr, "create", name, config) ?: error("VirtualMachineManager.create returned null")
-            }
-            managedVm = vm
-            mode = newMode
-            vmCreation = "PASS"
-            failureStage = "none"
-            append("[vm_creation] PASS name=$name mode=$newMode")
-            attachConsole(vm)
-            return vm
-        } catch (t: Throwable) { fail(if (newMode == "debian") "debian_boot" else "vm_creation", t) }
+        val configClass = virtClass("android.system.virtualmachine.VirtualMachineConfig")
+        var vm = mgr.javaClass.getMethod("getOrCreate", String::class.java, configClass)
+            .invoke(mgr, name, config) ?: error("getOrCreate returned null")
+
+        runCatching { AvfReflect.call(vm, "setConfig", config) }.onFailure { first ->
+            appendLine("[vm_config] setConfig rejected for $name: ${rootCause(first).message}; recreating DEV 2 instance")
+            runCatching { if (isVmRunning(vm)) AvfReflect.call(vm, "stop") }
+            runCatching { AvfReflect.call(mgr, "delete", name) }
+            vm = AvfReflect.call(mgr, "create", name, config)
+                ?: error("VirtualMachineManager.create returned null")
+        }
+
+        managedVm = vm
+        mode = newMode
+        vmCreation = "PASS"
+        failureStage = "none"
+        appendLine("[vm_creation] PASS name=$name mode=$newMode")
+        attachConsole(vm)
+        return vm
     }
 
     private fun statusValue(vm: Any): Int = (AvfReflect.call(vm, "getStatus") as Number).toInt()
-    private fun runningValue(): Int = Class.forName("android.system.virtualmachine.VirtualMachine").getField("STATUS_RUNNING").getInt(null)
-    private fun isVmRunning(vm: Any?): Boolean = vm != null && runCatching { statusValue(vm) == runningValue() }.getOrDefault(false)
 
-    private fun waitUntilRunning(vm: Any, timeoutMs: Long, stageName: String) {
+    private fun runningValue(): Int =
+        virtClass("android.system.virtualmachine.VirtualMachine").getField("STATUS_RUNNING").getInt(null)
+
+    private fun isVmRunning(vm: Any?): Boolean =
+        vm != null && runCatching { statusValue(vm) == runningValue() }.getOrDefault(false)
+
+    private fun waitUntilRunning(vm: Any, timeoutMs: Long, stageName: String, settleMs: Long = 800L) {
         val deadline = System.nanoTime() + timeoutMs * 1_000_000L
         while (System.nanoTime() < deadline) {
             if (isVmRunning(vm)) {
+                if (settleMs > 0) Thread.sleep(settleMs)
+                if (!isVmRunning(vm)) {
+                    appendLine("[$stageName] VM entered RUNNING then exited; continuing wait")
+                    Thread.sleep(200)
+                    continue
+                }
                 running = true
                 if (mode == "microdroid") vmBoot = "PASS" else debianBoot = "PASS"
                 failureStage = "none"
-                append("[$stageName] PASS status=RUNNING mode=$mode")
+                appendLine("[$stageName] PASS status=RUNNING mode=$mode")
                 return
             }
             Thread.sleep(250)
         }
-        error("Timed out waiting ${timeoutMs}ms for VirtualMachine STATUS_RUNNING")
+        error("Timed out waiting ${timeoutMs}ms for stable VirtualMachine STATUS_RUNNING")
     }
 
     private fun attachConsole(vm: Any) {
         consoleThread?.interrupt()
         consoleInput = runCatching { AvfReflect.callOptional(vm, "getConsoleInput") as? OutputStream }.getOrNull()
         val output = runCatching { AvfReflect.callOptional(vm, "getConsoleOutput") as? InputStream }.getOrNull() ?: return
+
         consoleThread = Thread({
             try {
                 val buffer = ByteArray(4096)
                 while (!Thread.currentThread().isInterrupted) {
                     val n = output.read(buffer)
                     if (n < 0) break
-                    if (n > 0) append(String(buffer, 0, n, Charsets.UTF_8).trimEnd())
+                    if (n > 0) appendRaw(String(buffer, 0, n, Charsets.UTF_8))
                 }
             } catch (t: Throwable) {
-                if (!Thread.currentThread().isInterrupted) append("[console] ended: ${t.message}")
+                if (!Thread.currentThread().isInterrupted) appendLine("[console] ended: ${t.message}")
             }
-        }, "dev2-vm-console").also { it.isDaemon = true; it.start() }
+        }, "dev2-vm-console").also {
+            it.isDaemon = true
+            it.start()
+        }
     }
 
-    @Synchronized override fun startVm(): String {
+    private fun ensureGateVmRunning(): Any {
+        val existing = managedVm
+        if (mode == "microdroid" && existing != null && isVmRunning(existing)) return existing
+
+        if (mode == "debian" && isVmRunning(existing)) stopInternal()
+
+        val vm = if (mode == "microdroid" && existing != null) existing
+        else acquire(gateVmName, buildGateConfig(), "microdroid")
+
+        if (!isVmRunning(vm)) {
+            attachConsole(vm)
+            appendLine("[vm_boot] invoking VirtualMachine.run()")
+            AvfReflect.call(vm, "run")
+            waitUntilRunning(vm, 45_000L, "vm_boot", settleMs = 1200L)
+        }
+        return vm
+    }
+
+    @Synchronized
+    override fun startVm(): String {
         try {
-            if (mode == "debian" && isVmRunning(managedVm)) stopInternal()
-            val vm = acquire(gateVmName, buildGateConfig(), "microdroid")
-            if (!isVmRunning(vm)) {
-                append("[vm_boot] invoking VirtualMachine.run()")
-                AvfReflect.call(vm, "run")
-            }
-            waitUntilRunning(vm, 45_000L, "vm_boot")
+            ensureGateVmRunning()
             return status()
         } catch (t: Throwable) {
             if (failureStage == "none") fail("vm_boot", t) else throw t
         }
     }
 
-    @Synchronized override fun stopVm(): String {
-        try { stopInternal() } catch (t: Throwable) { fail("vm_stop", t) }
+    @Synchronized
+    override fun stopVm(): String {
+        try {
+            stopInternal()
+        } catch (t: Throwable) {
+            fail("vm_stop", t)
+        }
         return status()
     }
 
@@ -200,47 +261,60 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
         clearDisplaySurfaceInternal()
         managedVm?.let { if (isVmRunning(it)) AvfReflect.call(it, "stop") }
         running = false
-        consoleThread?.interrupt(); consoleThread = null; consoleInput = null
-        append("[vm_lifecycle] stopped managed VM mode=$mode")
+        consoleThread?.interrupt()
+        consoleThread = null
+        consoleInput = null
+        appendLine("[vm_lifecycle] stopped managed VM mode=$mode")
     }
 
     private fun connectAdb(vm: Any): ParcelFileDescriptor {
-        connectVsock = "PENDING"; vsockFdReceived = "PENDING"
+        connectVsock = "PENDING"
+        vsockFdReceived = "PENDING"
         val deadline = System.nanoTime() + 30_000_000_000L
         var attempt = 0
         var last: Throwable? = null
+
         while (System.nanoTime() < deadline) {
             attempt++
-            if (!isVmRunning(vm)) fail("connect_vsock", IllegalStateException("VM stopped while waiting for guest vsock endpoint"))
+            if (!isVmRunning(vm)) error("VM stopped while waiting for guest vsock endpoint")
             try {
                 val pfd = AvfReflect.call(vm, "connectVsock", 5555L) as? ParcelFileDescriptor
                     ?: error("VirtualMachine.connectVsock returned no ParcelFileDescriptor")
-                connectVsock = "PASS"; vsockFdReceived = "PASS"; failureStage = "none"
-                append("[connect_vsock] PASS port=5555 fd=${pfd.fd} attempt=$attempt")
+                connectVsock = "PASS"
+                vsockFdReceived = "PASS"
+                failureStage = "none"
+                appendLine("[connect_vsock] PASS port=5555 fd=${pfd.fd} attempt=$attempt")
                 return pfd
             } catch (t: Throwable) {
                 last = rootCause(t)
-                if (attempt == 1 || attempt % 5 == 0) append("[connect_vsock] waiting attempt=$attempt: ${last.message}")
+                if (attempt == 1 || attempt % 5 == 0) {
+                    appendLine("[connect_vsock] waiting attempt=$attempt: ${last.message}")
+                }
                 Thread.sleep(if (attempt < 5) 300L else 750L)
             }
         }
-        fail("connect_vsock", last ?: IllegalStateException("Timed out waiting for guest vsock endpoint"))
+        throw last ?: IllegalStateException("Timed out waiting for guest vsock endpoint")
     }
 
-    @Synchronized override fun guestShell(command: String): String {
+    @Synchronized
+    override fun guestShell(command: String): String {
         require(command.isNotBlank() && command.length <= 4096)
-        val vm = managedVm ?: return JSONObject().put("ok", false).put("error", "Managed VM not created").toString()
-        check(mode == "microdroid") { "Gate A shell is only for Microdroid" }
         return try {
-            check(isVmRunning(vm)) { "Managed VM is not running" }
+            val vm = ensureGateVmRunning()
             connectAdb(vm).use { pfd ->
                 val output = NativeTransport.shellFd(pfd.fd, command)
-                adbHandshake = "PASS"; guestCommand = "PASS"; failureStage = "none"
-                append("[guest_command] PASS command=${command.take(96)}")
+                adbHandshake = "PASS"
+                guestCommand = "PASS"
+                failureStage = "none"
+                appendLine("[guest_command] PASS command=${command.take(96)}")
                 JSONObject().put("ok", true).put("output", output).toString()
             }
         } catch (t: Throwable) {
             val e = rootCause(t)
+            connectVsock = if (connectVsock == "PASS") connectVsock else "BLOCKED"
+            guestCommand = "BLOCKED"
+            failureStage = "guest_command"
+            appendLine("[guest_command] BLOCKED ${e.javaClass.name}: ${e.message}")
             JSONObject().put("ok", false).put("error", e.message ?: e.javaClass.name).toString()
         }
     }
@@ -255,61 +329,119 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
         val gpu = classExists("android.system.virtualmachine.VirtualMachineCustomImageConfig\$GpuConfig\$Builder")
         val display = classExists("android.system.virtualmachine.VirtualMachineCustomImageConfig\$DisplayConfig\$Builder")
         val displaySvc = classExists("android.crosvm.ICrosvmAndroidDisplayService\$Stub")
-        capabilitiesText = "caps=$caps pVM=${caps >= 0 && caps and pBit != 0} nonPVM=${caps >= 0 && caps and nBit != 0} custom=$custom gpuApi=$gpu displayApi=$display displaySvc=$displaySvc"
-        append("[capabilities] $capabilitiesText")
-        JSONObject().put("ok", true).put("capabilities", caps)
+        val internalSvc = classExists("android.system.virtualizationservice_internal.IVirtualizationServiceInternal\$Stub")
+        val jarCount = File("/apex/com.android.virt/javalib").listFiles()?.count { it.extension == "jar" } ?: 0
+
+        capabilitiesText =
+            "caps=$caps pVM=${caps >= 0 && caps and pBit != 0} nonPVM=${caps >= 0 && caps and nBit != 0} " +
+                "custom=$custom gpuApi=$gpu displayApi=$display displaySvc=$displaySvc internalSvc=$internalSvc virtJars=$jarCount"
+
+        appendLine("[capabilities] $capabilitiesText")
+        JSONObject()
+            .put("ok", true)
+            .put("capabilities", caps)
             .put("protectedVm", caps >= 0 && caps and pBit != 0)
             .put("nonProtectedVm", caps >= 0 && caps and nBit != 0)
-            .put("customImageApi", custom).put("gpuConfigApi", gpu).put("displayConfigApi", display)
-            .put("displayServiceApi", displaySvc).put("text", capabilitiesText).toString()
+            .put("customImageApi", custom)
+            .put("gpuConfigApi", gpu)
+            .put("displayConfigApi", display)
+            .put("displayServiceApi", displaySvc)
+            .put("internalServiceApi", internalSvc)
+            .put("text", capabilitiesText)
+            .toString()
     } catch (t: Throwable) {
-        val e = rootCause(t); JSONObject().put("ok", false).put("error", "${e.javaClass.name}: ${e.message}").toString()
+        val e = rootCause(t)
+        JSONObject().put("ok", false).put("error", "${e.javaClass.name}: ${e.message}").toString()
     }
 
-    private fun classExists(name: String): Boolean = runCatching { Class.forName(name) }.isSuccess
-
-    private fun debianImage() = DebianImage(debianDir,
-        onProgress = { done, total -> installDone = done; installTotal = total },
-        onStage = { append("[$it]") }, onLog = ::append)
+    private fun debianImage() = DebianImage(
+        debianDir,
+        onProgress = { done, total ->
+            installDone = done
+            installTotal = total
+        },
+        onStage = { appendLine("[$it]") },
+        onLog = ::appendLine,
+    )
 
     override fun installDebian(): String {
         if (debianImage().installed()) return status()
         if (!installing.compareAndSet(false, true)) return status()
-        installError = ""; installDone = 0; installTotal = -1
+
+        installError = ""
+        installDone = 0
+        installTotal = -1
+
         Thread({
-            try { debianImage().install() }
-            catch (t: Throwable) { val e = rootCause(t); installError = "${e.javaClass.name}: ${e.message}"; append("[debian_install] BLOCKED $installError") }
-            finally { installing.set(false) }
-        }, "dev2-debian-installer").also { it.isDaemon = true; it.start() }
+            try {
+                debianImage().install()
+            } catch (t: Throwable) {
+                val e = rootCause(t)
+                installError = "${e.javaClass.name}: ${e.message}"
+                appendLine("[debian_install] BLOCKED $installError")
+            } finally {
+                installing.set(false)
+            }
+        }, "dev2-debian-installer").also {
+            it.isDaemon = true
+            it.start()
+        }
         return status()
     }
 
-    @Synchronized override fun startDebian(width: Int, height: Int, dpi: Int, refreshRate: Int): String {
+    @Synchronized
+    override fun startDebian(width: Int, height: Int, dpi: Int, refreshRate: Int): String {
         try {
             check(debianImage().installed()) { "Install Debian first" }
             val caps = JSONObject(inspectCapabilities())
             check(caps.optBoolean("ok")) { caps.optString("error") }
-            check(caps.optBoolean("nonProtectedVm")) {
-                "Gate A.5 blocked: this AVF reports no CAPABILITY_NON_PROTECTED_VM; Google's official Debian custom VM requires non-protected mode"
-            }
-            check(caps.optBoolean("customImageApi")) { "Gate A.5 blocked: VirtualMachineCustomImageConfig API missing" }
-            check(caps.optBoolean("gpuConfigApi") && caps.optBoolean("displayConfigApi") && caps.optBoolean("displayServiceApi")) {
-                "Gate B blocked: AVF graphics/display APIs are not exposed on this build"
-            }
+            check(caps.optBoolean("customImageApi")) { "VirtualMachineCustomImageConfig API is missing" }
+
+            val supportsPvm = caps.optBoolean("protectedVm")
+            val supportsNonPvm = caps.optBoolean("nonProtectedVm")
+            check(supportsPvm || supportsNonPvm) { "AVF reports neither protected nor non-protected VM support" }
+
+            // Use Google's intended non-protected mode where available. On this POCO only pVM is
+            // available, so explicitly probe whether the official custom image can boot as a pVM.
+            debianProtected = !supportsNonPvm && supportsPvm
+            val requestGraphics = caps.optBoolean("gpuConfigApi") && caps.optBoolean("displayConfigApi")
+            val vmName = if (debianProtected) debianPvmName else debianNonPvmName
+
             if (mode == "microdroid" && isVmRunning(managedVm)) stopInternal()
-            val config = DebianAvfConfig.build(scopedContext, debianDir, debianVmName, width, height, dpi, refreshRate, true, ::append)
-            val vm = acquire(debianVmName, config, "debian")
-            debianBoot = "PENDING"; graphicsState = "CONFIGURED_UNPROVEN"; displayState = "PENDING"
+
+            val config = DebianAvfConfig.build(
+                scopedContext,
+                debianDir,
+                vmName,
+                width,
+                height,
+                dpi,
+                refreshRate,
+                protectedVm = debianProtected,
+                requestGraphics = requestGraphics,
+                log = ::appendLine,
+            )
+
+            val vm = acquire(vmName, config, "debian")
+            debianBoot = "PENDING"
+            graphicsState = if (requestGraphics) "CONFIGURED_UNPROVEN" else "API_UNAVAILABLE"
+            displayState = if (requestGraphics) "PENDING" else "API_UNAVAILABLE"
+
             if (!isVmRunning(vm)) {
-                append("[debian_boot] invoking VirtualMachine.run()")
+                attachConsole(vm)
+                appendLine("[debian_boot] invoking VirtualMachine.run() protected=$debianProtected")
                 AvfReflect.call(vm, "run")
             }
-            waitUntilRunning(vm, 60_000L, "debian_boot")
+
+            waitUntilRunning(vm, 75_000L, "debian_boot", settleMs = 1500L)
+            appendLine("[debian_boot] stable protected=$debianProtected")
             return status()
-        } catch (t: Throwable) { fail("debian_boot", t) }
+        } catch (t: Throwable) {
+            fail("debian_boot", t)
+        }
     }
 
-    private fun console() = DebianConsole({ consoleInput }, ::logSnapshot, ::append)
+    private fun console() = DebianConsole({ consoleInput }, ::logSnapshot, ::appendLine)
 
     override fun debianConsole(command: String): String {
         require(command.isNotBlank() && command.length <= 16384)
@@ -319,25 +451,36 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
             if (command.contains("os-release")) debianIdentity = "PASS"
             JSONObject().put("ok", true).put("output", output).toString()
         } catch (t: Throwable) {
-            val e = rootCause(t); failureStage = "debian_console"; append("[debian_console] ${e.javaClass.name}: ${e.message}")
+            val e = rootCause(t)
+            failureStage = "debian_console"
+            appendLine("[debian_console] ${e.javaClass.name}: ${e.message}")
             JSONObject().put("ok", false).put("error", "${e.javaClass.name}: ${e.message}").toString()
         }
     }
 
     private fun getDisplayService(): Any {
         displayService?.let { return it }
-        val sm = Class.forName("android.os.ServiceManager")
-        val binder = sm.getMethod("waitForService", String::class.java).invoke(null, "android.system.virtualizationservice") as? IBinder
+
+        val sm = virtClass("android.os.ServiceManager")
+        val binder = sm.getMethod("waitForService", String::class.java)
+            .invoke(null, "android.system.virtualizationservice") as? IBinder
             ?: error("virtualizationservice binder unavailable")
-        val internalStub = Class.forName("android.system.virtualizationservice_internal.IVirtualizationServiceInternal\$Stub")
+
+        val internalStub = virtClass(
+            "android.system.virtualizationservice_internal.IVirtualizationServiceInternal\$Stub"
+        )
         val internal = internalStub.getMethod("asInterface", IBinder::class.java).invoke(null, binder)
             ?: error("IVirtualizationServiceInternal unavailable")
+
         runCatching { AvfReflect.callOptional(internal, "clearDisplayService") }
         val displayBinder = AvfReflect.call(internal, "waitDisplayService") as? IBinder
             ?: error("crosvm display service unavailable")
-        val displayStub = Class.forName("android.crosvm.ICrosvmAndroidDisplayService\$Stub")
-        return displayStub.getMethod("asInterface", IBinder::class.java).invoke(null, displayBinder)
-            ?.also { displayService = it } ?: error("ICrosvmAndroidDisplayService unavailable")
+
+        val displayStub = virtClass("android.crosvm.ICrosvmAndroidDisplayService\$Stub")
+        return displayStub.getMethod("asInterface", IBinder::class.java)
+            .invoke(null, displayBinder)
+            ?.also { displayService = it }
+            ?: error("ICrosvmAndroidDisplayService unavailable")
     }
 
     override fun setDisplaySurface(surface: Surface) {
@@ -346,12 +489,23 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
             val service = getDisplayService()
             AvfReflect.call(service, "setSurface", surface, false)
             AvfReflect.callOptional(service, "drawSavedFrameForSurface", false)
-            displayState = "PASS"; failureStage = "none"
-            append("[display] PASS Android Surface attached to crosvm")
-        } catch (t: Throwable) { fail("display", t) }
+            displayState = "PASS"
+            failureStage = "none"
+            appendLine("[display] PASS Android Surface attached to crosvm")
+        } catch (t: Throwable) {
+            val cause = rootCause(t)
+            displayState = "BLOCKED"
+            graphicsState = if (graphicsState == "CONFIGURED_UNPROVEN") "UNPROVEN" else graphicsState
+            failureStage = "display"
+            appendLine("[display] BLOCKED ${cause.javaClass.name}: ${cause.message}")
+            throw IllegalStateException("display: ${cause.message}", cause)
+        }
     }
 
-    override fun clearDisplaySurface() { runCatching { clearDisplaySurfaceInternal() } }
+    override fun clearDisplaySurface() {
+        runCatching { clearDisplaySurfaceInternal() }
+    }
+
     private fun clearDisplaySurfaceInternal() {
         val service = displayService ?: return
         runCatching { AvfReflect.callOptional(service, "saveFrameForSurface", false) }
@@ -359,72 +513,162 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
         displayService = null
     }
 
-    override fun sendKey(action: Int, keyCode: Int, metaState: Int): Boolean {
+    override fun sendKey(action: Int, keyCode: Int, scanCode: Int, metaState: Int): Boolean {
         val vm = managedVm ?: return false
         if (mode != "debian" || !isVmRunning(vm)) return false
+
+        val effectiveScanCode = if (scanCode != 0) scanCode else when (keyCode) {
+            KeyEvent.KEYCODE_ESCAPE -> 1
+            KeyEvent.KEYCODE_TAB -> 15
+            KeyEvent.KEYCODE_CTRL_LEFT -> 29
+            KeyEvent.KEYCODE_ALT_LEFT -> 56
+            else -> 0
+        }
+
         return runCatching {
             val now = android.os.SystemClock.uptimeMillis()
-            AvfReflect.call(vm, "sendKeyEvent", KeyEvent(now, now, action, keyCode, 0, metaState)); true
+            val event = KeyEvent(
+                now,
+                now,
+                action,
+                keyCode,
+                0,
+                metaState,
+                KeyEvent.KEYCODE_UNKNOWN,
+                effectiveScanCode,
+                0,
+                android.view.InputDevice.SOURCE_KEYBOARD,
+            )
+            AvfReflect.call(vm, "sendKeyEvent", event)
+            true
         }.getOrDefault(false)
     }
 
     override fun sendTouch(action: Int, x: Float, y: Float, pointerId: Int): Boolean {
         val vm = managedVm ?: return false
         if (mode != "debian" || !isVmRunning(vm)) return false
+
         return runCatching {
             val now = android.os.SystemClock.uptimeMillis()
-            val event = MotionEvent.obtain(now, now, action, x, y, 0).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
-            try { AvfReflect.call(vm, "sendMultiTouchEvent", event) } finally { event.recycle() }
+            val event = MotionEvent.obtain(now, now, action, x, y, 0).apply {
+                source = android.view.InputDevice.SOURCE_TOUCHSCREEN
+            }
+            try {
+                AvfReflect.call(vm, "sendMultiTouchEvent", event)
+            } finally {
+                event.recycle()
+            }
             true
         }.getOrDefault(false)
     }
 
     override fun installKde(): String {
         check(mode == "debian" && isVmRunning(managedVm)) { "Start Debian first" }
-        if (kdeMarker().isFile) { kdeState = "PASS"; return status() }
+        if (kdeMarker().isFile) {
+            kdeState = "PASS"
+            return status()
+        }
         if (!kdeInstalling.compareAndSet(false, true)) return status()
-        kdeStage = "starting"; kdeError = ""; kdeState = "PENDING"
+
+        kdeStage = "starting"
+        kdeError = ""
+        kdeState = "PENDING"
+
         Thread({
             try {
                 Thread.sleep(3000)
                 debianIdentity = "PENDING"
                 console().command("cat /etc/os-release; id; command -v apt-get", 120_000).getOrThrow()
                 debianIdentity = "PASS"
-                kdeStage = "installing Plasma 6"
-                console().command(KDE_INSTALL, 30L * 60L * 1000L).getOrThrow()
+
+                if (debianProtected) {
+                    appendLine("[kde] pVM networking is disabled; checking whether Plasma is already present")
+                    val existing = console().command(
+                        "command -v startplasma-wayland || command -v kwin_wayland || true",
+                        60_000
+                    ).getOrThrow()
+                    check(existing.contains("startplasma-wayland") || existing.contains("kwin_wayland")) {
+                        "Protected Debian booted, but Plasma is not preinstalled and standard pVM networking is unavailable. Host-mediated networking is required before apt installation."
+                    }
+                } else {
+                    kdeStage = "installing Plasma 6"
+                    console().command(KDE_INSTALL, 30L * 60L * 1000L).getOrThrow()
+                }
+
                 kdeStage = "starting Plasma Wayland"
                 console().command(KDE_START, 240_000).getOrThrow()
                 kdeMarker().writeText("DEV-2-LINUX\n")
-                kdeStage = "ready"; kdeState = "PASS"
+                kdeStage = "ready"
+                kdeState = "PASS"
+
                 val probe = console().command(GPU_PROBE, 120_000).getOrThrow()
-                graphicsState = if (probe.contains("llvmpipe", true) || probe.contains("softpipe", true)) "SOFTWARE_FALLBACK" else "GUEST_RENDERER_REPORTED"
-                append("[kde] PASS Plasma launched; graphics=$graphicsState")
+                graphicsState = when {
+                    probe.contains("llvmpipe", true) || probe.contains("softpipe", true) -> "SOFTWARE_FALLBACK"
+                    probe.contains("venus", true) || probe.contains("virtio", true) ||
+                        probe.contains("gfxstream", true) -> "GUEST_RENDERER_REPORTED"
+                    else -> "UNPROVEN"
+                }
+                appendLine("[kde] PASS Plasma launched; graphics=$graphicsState")
             } catch (t: Throwable) {
-                val e = rootCause(t); kdeError = "${e.javaClass.name}: ${e.message}"; kdeStage = "blocked"; kdeState = "BLOCKED"; append("[kde] BLOCKED $kdeError")
-            } finally { kdeInstalling.set(false) }
-        }, "dev2-kde-installer").also { it.isDaemon = true; it.start() }
+                val e = rootCause(t)
+                kdeError = "${e.javaClass.name}: ${e.message}"
+                kdeStage = "blocked"
+                kdeState = "BLOCKED"
+                appendLine("[kde] BLOCKED $kdeError")
+            } finally {
+                kdeInstalling.set(false)
+            }
+        }, "dev2-kde-installer").also {
+            it.isDaemon = true
+            it.start()
+        }
         return status()
     }
 
     private fun kdeMarker() = File(debianDir, ".dev2-kde-installed")
 
-    @Synchronized override fun status(): String {
+    @Synchronized
+    override fun status(): String {
         running = isVmRunning(managedVm)
         val total = installTotal
-        val progress = if (total > 0) (installDone.toDouble() / total).coerceIn(0.0, 1.0) else -1.0
+        val progress =
+            if (total > 0) (installDone.toDouble() / total).coerceIn(0.0, 1.0) else -1.0
+
         return JSONObject()
-            .put("name", if (mode == "debian") debianVmName else gateVmName)
-            .put("mode", mode).put("running", running).put("cid", -1).put("log", logSnapshot())
+            .put("name", when (mode) {
+                "debian" -> if (debianProtected) debianPvmName else debianNonPvmName
+                else -> gateVmName
+            })
+            .put("mode", mode)
+            .put("running", running)
+            .put("cid", -1)
+            .put("log", logSnapshot())
             .put("avfApiPath", "android.system.virtualmachine.VirtualMachineManager")
-            .put("vmApiInit", vmApiInit).put("vmDataDir", scopedContext.dataDir.absolutePath)
-            .put("vmCreation", vmCreation).put("vmBoot", vmBoot).put("connectVsock", connectVsock)
-            .put("vsockFdReceived", vsockFdReceived).put("adbHandshake", adbHandshake).put("guestCommand", guestCommand)
-            .put("failureStage", failureStage).put("capabilities", capabilitiesText)
-            .put("debianInstalled", debianImage().installed()).put("debianInstalling", installing.get())
-            .put("installBytes", installDone).put("installTotal", installTotal).put("installProgress", progress).put("installError", installError)
-            .put("debianBoot", debianBoot).put("debianIdentity", debianIdentity)
-            .put("display", displayState).put("guestGraphics", graphicsState)
-            .put("kdeInstalled", kdeMarker().isFile).put("kdeInstalling", kdeInstalling.get()).put("kdeStage", kdeStage).put("kdeError", kdeError)
+            .put("vmApiInit", vmApiInit)
+            .put("vmDataDir", scopedContext.dataDir.absolutePath)
+            .put("vmCreation", vmCreation)
+            .put("vmBoot", vmBoot)
+            .put("connectVsock", connectVsock)
+            .put("vsockFdReceived", vsockFdReceived)
+            .put("adbHandshake", adbHandshake)
+            .put("guestCommand", guestCommand)
+            .put("failureStage", failureStage)
+            .put("capabilities", capabilitiesText)
+            .put("debianInstalled", debianImage().installed())
+            .put("debianInstalling", installing.get())
+            .put("installBytes", installDone)
+            .put("installTotal", installTotal)
+            .put("installProgress", progress)
+            .put("installError", installError)
+            .put("debianBoot", debianBoot)
+            .put("debianIdentity", debianIdentity)
+            .put("debianProtected", debianProtected)
+            .put("display", displayState)
+            .put("guestGraphics", graphicsState)
+            .put("kdeInstalled", kdeMarker().isFile)
+            .put("kdeInstalling", kdeInstalling.get())
+            .put("kdeStage", kdeStage)
+            .put("kdeError", kdeError)
             .toString()
     }
 
@@ -440,6 +684,7 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
         private val cache = File(data, "cache").apply { mkdirs() }
         private val noBackup = File(data, "no_backup").apply { mkdirs() }
         private val codeCache = File(data, "code_cache").apply { mkdirs() }
+
         override fun getDataDir(): File = data
         override fun getFilesDir(): File = files
         override fun getCacheDir(): File = cache
@@ -489,6 +734,9 @@ class VmBridge(private val appContext: Context) : IVmBridge.Stub() {
 }
 
 object NativeTransport {
-    init { System.loadLibrary("dream_transport") }
+    init {
+        System.loadLibrary("dream_transport")
+    }
+
     external fun shellFd(fd: Int, command: String): String
 }

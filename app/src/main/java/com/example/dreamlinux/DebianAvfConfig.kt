@@ -5,7 +5,7 @@ import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Builds the official Ferrochrome/Debian custom-image config through hidden AVF APIs. */
+/** Converts Google's official Ferrochrome image config into the hidden AVF custom-image API. */
 internal object DebianAvfConfig {
     private const val BASE = "android.system.virtualmachine."
 
@@ -17,6 +17,7 @@ internal object DebianAvfConfig {
         height: Int,
         dpi: Int,
         refreshRate: Int,
+        protectedVm: Boolean,
         requestGraphics: Boolean,
         log: (String) -> Unit,
     ): Any {
@@ -25,10 +26,8 @@ internal object DebianAvfConfig {
                 .replace("\$PAYLOAD_DIR", imageDir.path)
                 .replace("\$APP_DATA_DIR", context.dataDir.path)
         )
-
-        check(!json.optBoolean("protected", false)) {
-            "Official Debian config unexpectedly requests a protected VM; refusing to rewrite its trust model"
-        }
+        val sourceProtected = json.optBoolean("protected", false)
+        log("[debian_config] sourceProtected=$sourceProtected requestedProtected=$protectedVm")
 
         val customBuilderClass = Class.forName(BASE + "VirtualMachineCustomImageConfig\$Builder")
         val custom = customBuilderClass.getConstructor().newInstance()
@@ -41,7 +40,12 @@ internal object DebianAvfConfig {
             .forEach { AvfReflect.call(custom, "addParam", it) }
 
         addDisks(custom, json.optJSONArray("disks") ?: JSONArray(), imageDir)
-        AvfReflect.callOptional(custom, "useNetwork", json.optBoolean("network", true))
+
+        // Android's protected-VM path currently rejects the standard network device. Keep the
+        // official image's setting on non-pVMs, but force networking off for the pVM probe.
+        val requestedNetwork = json.optBoolean("network", true)
+        val effectiveNetwork = requestedNetwork && !protectedVm
+        AvfReflect.callOptional(custom, "useNetwork", effectiveNetwork)
         AvfReflect.callOptional(custom, "useAutoMemoryBalloon", json.optBoolean("auto_memory_balloon", true))
 
         if (requestGraphics) {
@@ -77,7 +81,7 @@ internal object DebianAvfConfig {
         val vmBuilder = Class.forName(BASE + "VirtualMachineConfig\$Builder")
             .getConstructor(Context::class.java).newInstance(context)
 
-        AvfReflect.call(vmBuilder, "setProtectedVm", false)
+        AvfReflect.call(vmBuilder, "setProtectedVm", protectedVm)
         val memoryMiB = json.optLong("memory_mib", 4096L).coerceIn(2048L, 8192L)
         AvfReflect.call(vmBuilder, "setMemoryBytes", memoryMiB * 1024L * 1024L)
         runCatching {
@@ -92,7 +96,10 @@ internal object DebianAvfConfig {
         AvfReflect.callOptional(vmBuilder, "setVmConsoleInputSupported", true)
         AvfReflect.callOptional(vmBuilder, "setConnectVmConsole", false)
 
-        log("[debian_config] nonProtected=true memoryMiB=$memoryMiB network=${json.optBoolean("network", true)} graphics=$requestGraphics display=${width}x$height@$refreshRate dpi=$dpi")
+        log(
+            "[debian_config] protected=$protectedVm memoryMiB=$memoryMiB " +
+                "network=$effectiveNetwork graphics=$requestGraphics display=${width}x$height@$refreshRate dpi=$dpi"
+        )
         return AvfReflect.call(vmBuilder, "build") ?: error("VirtualMachineConfig build returned null")
     }
 

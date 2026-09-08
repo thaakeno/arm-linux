@@ -1,6 +1,6 @@
 {
   "commit": "BUILD_TIME",
-  "source": "target-device-evidence-2026-09-08",
+  "source": "target-device-evidence-2026-09-08-plus-fix",
   "device": "POCO F8 Ultra",
   "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
   "stock_cli_microdroid_boot": "PASS",
@@ -13,8 +13,10 @@
   "adb_handshake": "PASS",
   "guest_command": "PASS",
   "reconnect": "PASS",
+  "gate_a_payload_regression": "FIXED_IN_CODE_NOT_RETESTED",
   "debian_image_installer": "IMPLEMENTED_NOT_DEVICE_TESTED",
-  "non_protected_vm_capability": "NOT TESTED",
+  "protected_custom_image_probe": "IMPLEMENTED_NOT_DEVICE_TESTED",
+  "non_protected_vm_capability": "FAIL_DEVICE_REPORTS_PVM_ONLY",
   "custom_image_vm": "NOT TESTED",
   "debian_boot": "NOT TESTED",
   "debian_identity": "NOT TESTED",
@@ -24,6 +26,6 @@
   "gles": "NOT TESTED",
   "vulkan": "NOT TESTED",
   "hardware_acceleration": "NOT TESTED",
-  "evidence": "Gate A is proven on the target POCO: managed VM boot, sanctioned connectVsock(5555) descriptor, native ADB guest commands, stop/start and reconnect all passed. The 1.0 Debian/custom-image/display/KDE code is build-time implementation only until the target device demonstrates each new stage.",
-  "note": "Never infer Debian, display, KDE, GLES, Vulkan or hardware acceleration PASS from code presence or Gate A. Runtime diagnostics are authoritative for the new gates."
+  "evidence": "Target-device capability probe reports caps=1, pVM=true, nonPVM=false, custom=true, gpuApi=true, displayApi=true. The previous major build regressed Gate A by dynamically loading libvm_payload from the payload namespace; Microdroid then powered off. This build restores the previously proven self-contained infinite payload and auto-restarts Gate A before guest commands. Debian now attempts the official custom image as a protected VM on pVM-only devices with standard pVM networking disabled.",
+  "note": "AOSP allows the custom-image config and protectedVm flag to coexist at the API level, but pvmfw may still reject an image that does not satisfy protected-boot trust requirements. Runtime device logs are authoritative. Do not infer Debian, display, KDE, GLES, Vulkan or hardware acceleration PASS from code presence."
 }
