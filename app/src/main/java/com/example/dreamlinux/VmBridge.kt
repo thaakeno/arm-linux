@@ -38,10 +38,15 @@ class VmBridge : IVmBridge.Stub() {
     @Volatile private var installTotalBytes = -1L
     @Volatile private var installError = ""
 
+    private val kdeInstalling = AtomicBoolean(false)
+    @Volatile private var kdeStage = "not installed"
+    @Volatile private var kdeError = ""
+
     private val lock = Any()
     private fun append(value: String) = synchronized(lock) {
         log = (log + value + "\n").takeLast(256000)
     }
+    private fun logSnapshot(): String = synchronized(lock) { log }
 
     private class RedirectedDataContext(base: Context, private val root: File) : ContextWrapper(base) {
         override fun getDataDir(): File = root
@@ -201,6 +206,7 @@ class VmBridge : IVmBridge.Stub() {
             .put("displayConfigApi", classExists("android.system.virtualmachine.VirtualMachineCustomImageConfig\$DisplayConfig\$Builder"))
             .put("displayServiceApi", classExists("android.crosvm.ICrosvmAndroidDisplayService\$Stub"))
             .put("debianInstalled", debianImage().installed())
+            .put("kdeInstalled", kdeMarker().isFile)
             .toString()
     } catch (t: Throwable) {
         val e = AvfReflect.unwrap(t)
@@ -255,6 +261,73 @@ class VmBridge : IVmBridge.Stub() {
             status()
         }
     }
+
+    private fun console(): DebianConsole = DebianConsole(
+        input = { consoleInput },
+        log = ::logSnapshot,
+        onLog = ::append,
+    )
+
+    override fun debianConsole(command: String): String {
+        require(command.length <= 16384) { "Command too long" }
+        check(vmMode == "debian" && isRunning(vm)) { "Debian VM is not running" }
+        stage = "debian_console"
+        val result = console().command(command)
+        return result.fold(
+            onSuccess = { output ->
+                stage = "debian_console_pass"
+                JSONObject().put("ok", true).put("output", output).toString()
+            },
+            onFailure = { error ->
+                val e = AvfReflect.unwrap(error)
+                lastError = "${e.javaClass.name}: ${e.message}"
+                stage = "blocked:debian_console"
+                append(lastError)
+                JSONObject().put("ok", false).put("error", lastError).toString()
+            },
+        )
+    }
+
+    override fun installKde(): String {
+        check(vmMode == "debian" && isRunning(vm)) { "Start Debian before installing KDE" }
+        if (kdeMarker().isFile) return status()
+        if (!kdeInstalling.compareAndSet(false, true)) return status()
+        kdeError = ""
+        kdeStage = "waiting for Debian console"
+        Thread({
+            try {
+                Thread.sleep(4_000)
+                stage = "kde_probe"
+                console().command("cat /etc/os-release; id; command -v apt-get", 90_000).getOrThrow()
+
+                kdeStage = "installing Plasma 6 packages"
+                stage = "kde_packages"
+                console().command(KDE_INSTALL_COMMAND, 30L * 60L * 1000L).getOrThrow()
+
+                kdeStage = "starting Plasma Wayland"
+                stage = "kde_start"
+                console().command(KDE_START_COMMAND, 180_000).getOrThrow()
+
+                kdeMarker().parentFile?.mkdirs()
+                kdeMarker().writeText("installed-by=DEV-1-LINUX\n")
+                kdeStage = "ready"
+                stage = "kde_ready"
+                append("KDE Plasma provisioning completed; Plasma Wayland service enabled for droid")
+            } catch (t: Throwable) {
+                val e = AvfReflect.unwrap(t)
+                kdeError = "${e.javaClass.name}: ${e.message}"
+                kdeStage = "blocked"
+                lastError = kdeError
+                stage = "blocked:kde_install"
+                append(kdeError)
+            } finally {
+                kdeInstalling.set(false)
+            }
+        }, "dev1-kde-installer").also { it.isDaemon = true; it.start() }
+        return status()
+    }
+
+    private fun kdeMarker() = File(debianDir, ".dev1-kde-installed")
 
     private fun getDisplayService(): Any {
         displayService?.let { return it }
@@ -381,14 +454,18 @@ class VmBridge : IVmBridge.Stub() {
             .put("vmRoot", root)
             .put("dataDir", vmData.path)
             .put("error", lastError)
-            .put("log", synchronized(lock) { log })
+            .put("log", logSnapshot())
             .put("debianInstalled", debianImage().installed())
             .put("debianInstalling", installing.get())
             .put("installBytes", installDoneBytes)
             .put("installTotal", installTotalBytes)
             .put("installProgress", progress)
             .put("installError", installError)
-            .put("guestGraphics", if (stage == "display_attached") "gfxstream surface attached; hardware proof pending" else "unproven")
+            .put("kdeInstalled", kdeMarker().isFile)
+            .put("kdeInstalling", kdeInstalling.get())
+            .put("kdeStage", kdeStage)
+            .put("kdeError", kdeError)
+            .put("guestGraphics", if (stage == "display_attached" || stage == "kde_ready") "gfxstream configured; hardware proof pending" else "unproven")
             .put("debian", if (debianImage().installed()) "official AVF Debian image installed" else "not installed")
             .toString()
     }
@@ -398,7 +475,50 @@ class VmBridge : IVmBridge.Stub() {
         kotlin.system.exitProcess(0)
     }
 
-    companion object { private const val PACKAGE = "com.example.dreamlinux" }
+    companion object {
+        private const val PACKAGE = "com.example.dreamlinux"
+
+        private val KDE_INSTALL_COMMAND = """
+            set -eu
+            export DEBIAN_FRONTEND=noninteractive
+            . /etc/os-release
+            echo "DEV1 Debian: ${'$'}PRETTY_NAME"
+            apt-get update
+            apt-get install -y plasma-desktop plasma-workspace plasma-workspace-wayland kwin-wayland konsole dolphin xwayland dbus-user-session mesa-utils vulkan-tools
+            for f in /usr/local/bin/enable_display /usr/local/bin/enable_gfxstream; do
+              if [ -f "${'$'}f" ]; then sed -i '/systemctl --user start weston/d' "${'$'}f"; fi
+            done
+            loginctl enable-linger droid || true
+            install -d -m 700 -o droid -g droid /home/droid/.config/systemd/user
+            cat >/home/droid/.config/systemd/user/dev1-plasma.service <<'EOF'
+            [Unit]
+            Description=DEV 1 LINUX Plasma Wayland
+            After=default.target
+            [Service]
+            Type=simple
+            Environment=XDG_SESSION_TYPE=wayland
+            Environment=QT_QPA_PLATFORM=wayland
+            Environment=KWIN_DRM_NO_AMS=1
+            ExecStart=/bin/bash -lc 'if [ -f /usr/local/bin/enable_gfxstream ]; then source /usr/local/bin/enable_gfxstream || true; elif [ -f /usr/local/bin/enable_display ]; then source /usr/local/bin/enable_display || true; fi; exec /usr/bin/startplasma-wayland'
+            Restart=on-failure
+            RestartSec=3
+            [Install]
+            WantedBy=default.target
+            EOF
+            chown -R droid:droid /home/droid/.config
+        """.trimIndent()
+
+        private val KDE_START_COMMAND = """
+            set -eu
+            uid=$(id -u droid)
+            install -d -m 700 -o droid -g droid /run/user/${'$'}uid
+            runuser -u droid -- env XDG_RUNTIME_DIR=/run/user/${'$'}uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${'$'}uid/bus systemctl --user daemon-reload || true
+            runuser -u droid -- env XDG_RUNTIME_DIR=/run/user/${'$'}uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${'$'}uid/bus systemctl --user enable --now dev1-plasma.service || true
+            sleep 3
+            pgrep -a kwin_wayland || pgrep -a plasmashell || systemctl --user --machine=droid@ status dev1-plasma.service --no-pager || true
+            vulkaninfo --summary 2>/dev/null | head -80 || true
+        """.trimIndent()
+    }
 }
 
 object NativeTransport {
