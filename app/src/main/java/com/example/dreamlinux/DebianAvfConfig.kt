@@ -2,6 +2,7 @@ package com.example.dreamlinux
 
 import android.content.Context
 import android.os.Process
+import android.system.Os
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
@@ -45,8 +46,6 @@ internal object DebianAvfConfig {
         AvfReflect.callOptional(custom, "useNetwork", wantsNetwork)
         AvfReflect.callOptional(custom, "useAutoMemoryBalloon", json.optBoolean("auto_memory_balloon", true))
 
-        // Use Android Terminal's current gfxstream settings. This is a hard request, not a
-        // software fallback: unsupported devices must throw and be reported by diagnostics.
         val gpuBuilder = Class.forName(BASE + "VirtualMachineCustomImageConfig\$GpuConfig\$Builder")
             .getConstructor().newInstance()
         AvfReflect.call(gpuBuilder, "setBackend", "gfxstream")
@@ -156,8 +155,6 @@ internal object DebianAvfConfig {
         for (i in 0 until paths.length()) {
             val raw = paths.getJSONObject(i).optString("sharedPath", "")
             if (raw.isBlank()) continue
-            // External /storage/emulated sharing requires MANAGE_EXTERNAL_STORAGE in Terminal.
-            // DEV 1 LINUX does not ask for that invasive permission; keep the private internal share.
             if (raw.contains("/storage/emulated")) {
                 log("Skipping optional shared storage mount; all-files access not requested")
                 continue
@@ -166,7 +163,7 @@ internal object DebianAvfConfig {
             val socket = File(context.filesDir, "internal.virtiofs")
             if (socket.exists()) socket.delete()
             val hostUid = Process.myUid()
-            val hostGid = Process.myGid()
+            val hostGid = Os.getgid()
             val shared = constructor.newInstance(
                 path,
                 hostUid,
@@ -180,7 +177,7 @@ internal object DebianAvfConfig {
                 socket.path,
             )
             AvfReflect.call(custom, "addSharedPath", shared)
-            log("Added internal virtiofs share $path")
+            log("Added internal virtiofs share $path uid=$hostUid gid=$hostGid")
         }
     }
 }
