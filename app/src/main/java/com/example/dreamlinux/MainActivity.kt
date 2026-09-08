@@ -1,11 +1,14 @@
 package com.example.dreamlinux
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -49,6 +52,44 @@ class MainActivity : ComponentActivity() {
         } catch(e:Exception) {
             VmSessionService.state.value=VmSessionService.state.value.copy(message=e.message?:"Connection failed")
         }
+    }
+
+    private fun fullLogReport(state:SessionState)=buildString {
+        appendLine("DEV 1 LINUX")
+        appendLine("Managed AVF diagnostic report")
+        appendLine()
+        appendLine("Status: ${if(state.running)"VM RUNNING" else "VM OFFLINE"}")
+        appendLine("Message: ${state.message}")
+        appendLine("VM: ${state.name.ifBlank{"not created"}}")
+        appendLine("Mode: ${state.mode}")
+        appendLine("Stage: ${state.stage}")
+        appendLine("API: ${state.api}")
+        appendLine("VM root: ${state.vmRoot}")
+        appendLine("Capabilities: ${state.capabilities}")
+        appendLine("Debian installed: ${state.debianInstalled}")
+        appendLine("KDE: ${state.kdeInstalled} / ${state.kdeStage}")
+        appendLine("Graphics: ${state.graphics}")
+        appendLine()
+        appendLine("=== MANAGED VM LOG ===")
+        appendLine(state.console.ifBlank{"No managed VM diagnostics yet."})
+        appendLine()
+        appendLine("=== MICRODROID TERMINAL ===")
+        appendLine(state.terminal.ifBlank{"No Microdroid commands executed."})
+        appendLine()
+        appendLine("=== DEBIAN TERMINAL ===")
+        appendLine(state.debianTerminal.ifBlank{"No Debian commands executed."})
+    }
+
+    private fun copyAllLogs(state:SessionState) {
+        getSystemService(ClipboardManager::class.java)
+            .setPrimaryClip(ClipData.newPlainText("DEV 1 LINUX logs",fullLogReport(state)))
+        Toast.makeText(this,"All DEV 1 LINUX logs copied",Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareLogs(state:SessionState) {
+        startActivity(Intent.createChooser(
+            Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,fullLogReport(state)),
+            "Export diagnostics"))
     }
 
     override fun onCreate(savedInstanceState:Bundle?) {
@@ -218,9 +259,10 @@ class MainActivity : ComponentActivity() {
                     if(!state.connected) Button(onClick={connect()}) { Text("Connect") }
                     else if(!(state.running&&state.mode=="microdroid")) Button(onClick={VmSessionService.active?.startVm()},enabled=!state.busy) { Text("Start test VM") }
                     if(state.running) OutlinedButton(onClick={VmSessionService.active?.stopVm()},enabled=!state.busy) { Text("Stop") }
+                    OutlinedButton(onClick={copyAllLogs(state)}) { Text("Copy logs") }
                 }
                 OutlinedTextField(value=gateCommand,onValueChange={gateCommand=it},label={Text("Guest command")},modifier=Modifier.fillMaxWidth(),minLines=2)
-                Button(onClick={VmSessionService.active?.shell(gateCommand)},enabled=state.running&&state.mode=="microdroid"&&!state.busy&&gateCommand.isNotBlank()) { Text("Run in guest") }
+                Button(onClick={VmSessionService.active?.shell(gateCommand)},enabled=state.connected&&!state.busy&&gateCommand.isNotBlank()) { Text("Run in guest") }
                 SelectionContainer { ConsoleBox(state.terminal.ifBlank{"No commands executed yet."}) }
             }
         }
@@ -240,10 +282,8 @@ class MainActivity : ComponentActivity() {
             CapabilityCard(state)
             Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 Button(onClick={VmSessionService.active?.probeCapabilities()},enabled=state.connected&&!state.busy) { Text("Probe AVF") }
-                OutlinedButton(onClick={
-                    val report="DEV 1 LINUX\nmode=${state.mode}\nstage=${state.stage}\napi=${state.api}\ncapabilities=${state.capabilities}\ndebian=${state.debianInstalled}\nkde=${state.kdeInstalled}/${state.kdeStage}\ngraphics=${state.graphics}\nmessage=${state.message}\n\n${state.console}\n\nMicrodroid:\n${state.terminal}\n\nDebian:\n${state.debianTerminal}"
-                    startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,report),"Export diagnostics"))
-                }) { Text("Export") }
+                OutlinedButton(onClick={copyAllLogs(state)}) { Text("Copy all logs") }
+                OutlinedButton(onClick={shareLogs(state)}) { Text("Share") }
             }
             SelectionContainer { ConsoleBox(state.console.ifBlank{"No VM output yet."}) }
         }
