@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.dreamlinux"
         minSdk = 29
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3-vsock-readiness"
+        versionCode = 4
+        versionName = "0.4-payload-ready"
         ndk { abiFilters += "arm64-v8a" }
     }
 
