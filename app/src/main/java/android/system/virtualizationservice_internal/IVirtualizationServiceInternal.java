@@ -23,6 +23,27 @@ public interface IVirtualizationServiceInternal extends IInterface {
         private static final int TRANSACTION_waitDisplayService =
                 IBinder.FIRST_CALL_TRANSACTION + 20;
 
+        /*
+         * AOSP Terminal's DisplayProvider uses ServiceManager.waitForService(), not checkService().
+         * virtualizationservice is a lazy Binder service on some builds, so checkService() can
+         * legitimately return null until something asks ServiceManager to wait/start it. VmBridge
+         * loads this Stub immediately before its compatibility checkService() call, therefore this
+         * initializer reproduces AOSP's waitForService behavior without making the rest of the
+         * Shizuku bridge depend directly on hidden SDK classes.
+         */
+        static {
+            try {
+                Class<?> serviceManager = Class.forName("android.os.ServiceManager");
+                serviceManager
+                        .getMethod("waitForService", String.class)
+                        .invoke(null, "android.system.virtualizationservice");
+            } catch (Throwable ignored) {
+                // VmBridge will report the concrete Binder/display failure if the service really
+                // is unavailable. Never crash class loading just because this compatibility nudge
+                // is unsupported on an OEM build.
+            }
+        }
+
         public static IVirtualizationServiceInternal asInterface(IBinder binder) {
             if (binder == null) return null;
             return new Proxy(binder);
