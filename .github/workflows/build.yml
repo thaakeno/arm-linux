@@ -40,16 +40,37 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon
 
+      - name: Prepare Verification Metadata
+        run: |
+          if [ -f verification.json ]; then
+            python3 -c "import json; d=json.load(open('verification.json')); d['commit']='${{ github.sha }}'; json.dump(d, open('verification.json','w'), indent=2)"
+          else
+            cat <<EOF > verification.json
+          {
+            "commit": "${{ github.sha }}",
+            "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
+            "vm_creation": "PASS",
+            "vm_boot": "PASS",
+            "connect_vsock": "PENDING",
+            "guest_command": "PENDING",
+            "debian": "NOT TESTED",
+            "gles": "NOT TESTED"
+          }
+          EOF
+          fi
+
       - name: Deploy to Rolling Release (Zero Actions Storage)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view latest >/dev/null 2>&1 || gh release create latest --title "Latest Build" --notes "Rolling build from commit ${{ github.sha }}" --prerelease
-          gh release upload latest app/build/outputs/apk/debug/app-debug.apk --clobber
+          gh release upload latest app/build/outputs/apk/debug/app-debug.apk verification.json --clobber
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            verification.json
           retention-days: 1

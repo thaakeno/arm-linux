@@ -1,0 +1,10 @@
+﻿{
+  "commit": "9475327",
+  "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
+  "vm_creation": "PASS",
+  "vm_boot": "PASS",
+  "connect_vsock": "BLOCKED",
+  "guest_command": "BLOCKED",
+  "debian": "NOT TESTED",
+  "gles": "NOT TESTED"
+}
