@@ -76,7 +76,11 @@ internal object DebianAvfConfig {
         val vmConfigClass = Class.forName(BASE + "VirtualMachineConfig")
         val vmBuilder = Class.forName(BASE + "VirtualMachineConfig\$Builder")
             .getConstructor(Context::class.java).newInstance(context)
-        AvfReflect.call(vmBuilder, "setProtectedVm", json.optBoolean("protected", false))
+
+        // This POCO exposes only CAPABILITY_PROTECTED_VM. Google's downloadable Debian config
+        // currently defaults to non-protected, which the device rejects before crosvm starts.
+        // Force the custom Debian VM through the same protected AVF/Gunyah path proven by Gate A.
+        AvfReflect.call(vmBuilder, "setProtectedVm", true)
         AvfReflect.call(vmBuilder, "setMemoryBytes", json.optLong("memory_mib", 4096L).coerceIn(1024L, 12288L) * 1024L * 1024L)
 
         val cpu = json.optString("cpu_topology", "match_host")
@@ -97,7 +101,7 @@ internal object DebianAvfConfig {
         AvfReflect.callOptional(vmBuilder, "setVmConsoleInputSupported", consoleInput != null)
         AvfReflect.callOptional(vmBuilder, "setConnectVmConsole", json.optBoolean("connect_console", false))
 
-        log("Debian config: nonProtected=${!json.optBoolean("protected", false)} network=$wantsNetwork gfxstream=true display=${width}x$height@$refreshRate dpi=$dpi")
+        log("Debian config: protected=true sourceProtected=${json.optBoolean("protected", false)} network=$wantsNetwork gfxstream=true display=${width}x$height@$refreshRate dpi=$dpi")
         return AvfReflect.call(vmBuilder, "build") ?: error("VirtualMachineConfig build returned null")
     }
 
