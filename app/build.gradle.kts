@@ -21,7 +21,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = 1000 + buildRevision
-        versionName = "0.5.1-dev1"
+        versionName = "0.6.0-dev1"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
         ndk { abiFilters += "arm64-v8a" }
@@ -29,8 +29,6 @@ android {
 
     signingConfigs {
         getByName("debug") {
-            // AVF's idsig path on this device requires an APK Signature Scheme v3 block.
-            // Do not rely on AGP defaults here: make every scheme explicit and CI-verified.
             enableV1Signing = true
             enableV2Signing = true
             enableV3Signing = true
@@ -102,7 +100,6 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
 }
 
-// Stage a traceable deliverable without relying on deprecated AGP output APIs.
 val testLabel = if (localTest) "localtest-" else ""
 val stagedApkName = "DreamLinux-${testLabel}${android.defaultConfig.versionName}-${displayRevision}-arm64.apk"
 tasks.register<Copy>("stageDebugApk") {
