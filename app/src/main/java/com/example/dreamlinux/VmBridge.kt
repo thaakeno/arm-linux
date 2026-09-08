@@ -18,7 +18,9 @@ import org.json.JSONObject
  * Microdroid uses VirtualMachine.connectVsock(); Debian uses AVF's custom-image/display APIs.
  */
 class VmBridge : IVmBridge.Stub() {
-    private val microVmName = "dev1-gate-a"
+    // Fresh instance name because the Gate-A payload now correctly reports payload-ready.
+    // Protected Microdroid instance state must not be reused across payload changes.
+    private val microVmName = "dev1-gate-a-v2"
     private val debianVmName = "dev1-debian13"
     private val vmData = File("/data/local/tmp/dev1-linux-vmm")
     private val debianDir = File("/data/local/tmp/dev1-linux/debian")
@@ -53,6 +55,7 @@ class VmBridge : IVmBridge.Stub() {
         override fun getFilesDir(): File = File(root, "files").also { it.mkdirs() }
         override fun getCacheDir(): File = File(root, "cache").also { it.mkdirs() }
         override fun getCodeCacheDir(): File = File(root, "code_cache").also { it.mkdirs() }
+        override fun getNoBackupFilesDir(): File = File(root, "no_backup").also { it.mkdirs() }
         override fun getApplicationContext(): Context = this
     }
 
@@ -73,6 +76,7 @@ class VmBridge : IVmBridge.Stub() {
         check(vmData.mkdirs() || vmData.isDirectory) { "Cannot create ${vmData.path}" }
         val context = RedirectedDataContext(baseContext(), vmData)
         context.filesDir.mkdirs()
+        context.noBackupFilesDir.mkdirs()
         append("context package=${context.packageName} uid=${android.os.Process.myUid()} dataDir=${context.dataDir}")
         return context
     }
@@ -89,9 +93,32 @@ class VmBridge : IVmBridge.Stub() {
 
     private fun vmStatus(machine: Any): Int = (AvfReflect.call(machine, "getStatus") as Number).toInt()
     private fun runningStatus(machine: Any): Int = machine.javaClass.getField("STATUS_RUNNING").getInt(null)
+    private fun stoppedStatus(machine: Any): Int = runCatching { machine.javaClass.getField("STATUS_STOPPED").getInt(null) }.getOrDefault(0)
+    private fun deletedStatus(machine: Any): Int = runCatching { machine.javaClass.getField("STATUS_DELETED").getInt(null) }.getOrDefault(-1)
     private fun isRunning(machine: Any?): Boolean = machine != null && runCatching {
         vmStatus(machine) == runningStatus(machine)
     }.getOrDefault(false)
+
+    private fun waitUntilRunning(machine: Any, mode: String, timeoutMs: Long) {
+        stage = "vm_wait_running:$mode"
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+        var last = Int.MIN_VALUE
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            val current = vmStatus(machine)
+            if (current != last) {
+                append("[$mode] VM status=$current waiting for STATUS_RUNNING=${runningStatus(machine)}")
+                last = current
+            }
+            if (current == runningStatus(machine)) {
+                stage = "running:$mode"
+                append("[$mode] PASS status=RUNNING")
+                return
+            }
+            if (current == deletedStatus(machine)) error("$mode VM became deleted before reaching RUNNING")
+            Thread.sleep(250)
+        }
+        error("Timed out waiting ${timeoutMs}ms for $mode VM STATUS_RUNNING; lastStatus=$last stopped=${stoppedStatus(machine)}")
+    }
 
     private fun buildMicrodroid(context: Context): Any {
         val configClass = Class.forName("android.system.virtualmachine.VirtualMachineConfig")
@@ -100,6 +127,7 @@ class VmBridge : IVmBridge.Stub() {
         AvfReflect.call(builder, "setProtectedVm", true)
         AvfReflect.call(builder, "setDebugLevel", configClass.getField("DEBUG_LEVEL_FULL").getInt(null))
         AvfReflect.call(builder, "setMemoryBytes", 512L * 1024L * 1024L)
+        runCatching { AvfReflect.call(builder, "setVmOutputCaptured", true) }
         AvfReflect.call(builder, "setPayloadBinaryName", "libdev1_payload.so")
         return AvfReflect.call(builder, "build") ?: error("VirtualMachineConfig build returned null")
     }
@@ -115,21 +143,23 @@ class VmBridge : IVmBridge.Stub() {
         } catch (t: Throwable) {
             append("setConfig unavailable/rejected (${AvfReflect.unwrap(t).message}); recreating only $name")
             runCatching { AvfReflect.call(machine, "stop") }
-            AvfReflect.call(mgr, "delete", name)
+            runCatching { AvfReflect.call(mgr, "delete", name) }
             machine = AvfReflect.call(mgr, "create", name, config) ?: error("create returned null")
         }
         vm = machine
         vmMode = mode
-        append("managed VM acquired name=$name mode=$mode")
+        append("managed VM acquired name=$name mode=$mode status=${runCatching { vmStatus(machine) }.getOrDefault(-999)}")
         return machine
     }
 
     private fun startMachine(machine: Any, mode: String) {
         if (!isRunning(machine)) {
             stage = "vm_start:$mode"
+            append("[$mode] invoking VirtualMachine.run()")
             AvfReflect.call(machine, "run")
             append("VirtualMachine.run() accepted for $mode")
         }
+        waitUntilRunning(machine, mode, if (mode == "debian") 60_000L else 45_000L)
         attachConsole(machine)
         stage = "running:$mode"
     }
@@ -408,28 +438,49 @@ class VmBridge : IVmBridge.Stub() {
         require(command.length <= 4096) { "Command too long" }
         val machine = vm ?: return JSONObject().put("ok", false).put("error", "Managed VM is not created").toString()
         check(vmMode == "microdroid") { "Gate A shell uses the stock Microdroid VM" }
-        check(isRunning(machine)) { "Managed VM is not running" }
+
+        // Guard inside the bridge itself. The Android service is not trusted as the lifecycle authority.
+        if (!isRunning(machine)) {
+            append("[guest_command] VM not running at entry; waiting for real AVF status")
+            waitUntilRunning(machine, "microdroid", 45_000L)
+        }
+
         stage = "connect_vsock"
+        val deadline = android.os.SystemClock.elapsedRealtime() + 30_000L
+        var attempt = 0
         var last: Throwable? = null
-        repeat(30) { attempt ->
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            attempt++
+            if (!isRunning(machine)) {
+                last = IllegalStateException("VM left STATUS_RUNNING while waiting for guest endpoint")
+                append("[connect_vsock] attempt=$attempt VM no longer RUNNING; waiting briefly")
+                Thread.sleep(300)
+                continue
+            }
             try {
                 val method = machine.javaClass.methods.firstOrNull { it.name == "connectVsock" && it.parameterCount == 1 }
                     ?: error("VirtualMachine.connectVsock not found")
-                val arg: Any = if (method.parameterTypes[0] == java.lang.Long.TYPE) 5555L else 5555
+                val type = method.parameterTypes[0]
+                val arg: Any = if (type == java.lang.Long.TYPE || type == java.lang.Long::class.java) 5555L else 5555
                 val pfd = method.invoke(machine, arg) as ParcelFileDescriptor
+                append("[connect_vsock] PASS port=5555 fd=${pfd.fd} attempt=$attempt")
                 pfd.use {
                     stage = "adb_shell"
                     val output = NativeTransport.shellFd(it.fd, command)
                     stage = "guest_command_pass"
-                    append("guest command passed: ${command.take(120)}")
+                    lastError = ""
+                    append("[guest_command] PASS command=${command.take(120)}")
                     return JSONObject().put("ok", true).put("output", output).toString()
                 }
             } catch (t: Throwable) {
                 last = AvfReflect.unwrap(t)
-                if (attempt < 29) Thread.sleep(500)
+                if (attempt == 1 || attempt % 5 == 0) {
+                    append("[connect_vsock] waiting attempt=$attempt: ${last.javaClass.name}: ${last.message}")
+                }
+                Thread.sleep(if (attempt < 5) 300L else 750L)
             }
         }
-        val e = last ?: IllegalStateException("connectVsock failed")
+        val e = last ?: IllegalStateException("connectVsock timed out")
         lastError = "${e.javaClass.name}: ${e.message}"
         stage = "blocked:connect_vsock"
         append(lastError)
@@ -441,11 +492,13 @@ class VmBridge : IVmBridge.Stub() {
         val root = vm?.let { machine ->
             runCatching { AvfReflect.callOptional(machine, "getRootDir") as? File }.getOrNull()?.path ?: ""
         } ?: ""
+        val rawStatus = vm?.let { runCatching { vmStatus(it) }.getOrDefault(-999) } ?: -999
         val total = installTotalBytes
         val progress = if (total > 0) (installDoneBytes.toDouble() / total).coerceIn(0.0, 1.0) else -1.0
         return JSONObject()
             .put("name", if (vmMode == "debian") debianVmName else microVmName)
             .put("running", running)
+            .put("rawVmStatus", rawStatus)
             .put("cid", -1)
             .put("managed", vm != null)
             .put("mode", vmMode)
