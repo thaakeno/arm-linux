@@ -33,18 +33,34 @@ BUILD_SH="$TP_DIR/packages/$PKG/build.sh"
 python - "$BUILD_SH" <<'PY'
 from pathlib import Path
 import sys
+
 p = Path(sys.argv[1])
 s = p.read_text()
-needle = "\t\t-Dvenus=true \\\\\n\t\t-Dplatforms=egl"
-replacement = "\t\t-Dvenus=true \\\\\n\t\t-Drender-server-worker=thread \\\\\n\t\t-Dplatforms=egl"
+
 if "-Drender-server-worker=thread" not in s:
-    if needle not in s:
-        raise SystemExit("could not find virglrenderer meson option block")
-    s = s.replace(needle, replacement, 1)
+    lines = s.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if "-Dvenus=true" not in line:
+            continue
+
+        indent = line[: len(line) - len(line.lstrip())]
+        newline = "\r\n" if line.endswith("\r\n") else "\n"
+        lines.insert(i + 1, f"{indent}-Drender-server-worker=thread \\\\{newline}")
+        s = "".join(lines)
+        break
+    else:
+        raise SystemExit("could not find -Dvenus=true in virglrenderer meson options")
+
 p.write_text(s)
+
+# Fail here with a useful message rather than much later in Meson.
+patched = p.read_text()
+if "-Dvenus=true" not in patched or "-Drender-server-worker=thread" not in patched:
+    raise SystemExit("virglrenderer recipe patch verification failed")
 PY
 
 echo "[venus-build] patched recipe: render-server-worker=thread"
+grep -n -A2 -- '-Dvenus=true' "$BUILD_SH" | head -3
 
 echo "[venus-build] preparing on-device Termux build environment..."
 cd "$TP_DIR"
