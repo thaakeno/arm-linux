@@ -94,6 +94,70 @@ jobs:
       - name: Build and check APK
         run: ./gradlew stageDebugApk testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
 
+      - name: Preserve compressed ext4 seed and re-sign APK
+        run: |
+          set -euxo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          TMP="app/build/outputs/apk/debug/app-repacked.apk"
+          ALIGNED="app/build/outputs/apk/debug/app-aligned.apk"
+
+          # AAPT treats .gz as an asset it may transparently expand/rename. Rebuild the APK
+          # after aapt packaging so the guest sees the exact gzip bytes and exact .gz name.
+          python3 - <<'PY'
+          import os, zipfile
+          src='app/build/outputs/apk/debug/app-debug.apk'
+          dst='app/build/outputs/apk/debug/app-repacked.apk'
+          source_seed='app/src/main/assets/debian-rootfs.ext4.gz'
+          wanted='assets/debian-rootfs.ext4.gz'
+          transformed='assets/debian-rootfs.ext4'
+          with zipfile.ZipFile(src, 'r') as zin, zipfile.ZipFile(dst, 'w', allowZip64=True) as zout:
+              print('AAPT asset entries before normalization:')
+              for n in zin.namelist():
+                  if 'debian-rootfs.ext4' in n:
+                      i=zin.getinfo(n)
+                      print(n, i.file_size, i.compress_size, i.compress_type)
+              for info in zin.infolist():
+                  name=info.filename
+                  upper=name.upper()
+                  if name in (wanted, transformed):
+                      continue
+                  if upper.startswith('META-INF/') and upper.endswith(('.SF','.RSA','.DSA','.EC')):
+                      continue
+                  if upper == 'META-INF/MANIFEST.MF':
+                      continue
+                  data=zin.read(name)
+                  out=zipfile.ZipInfo(name)
+                  out.date_time=info.date_time
+                  out.external_attr=info.external_attr
+                  out.internal_attr=info.internal_attr
+                  out.create_system=info.create_system
+                  out.compress_type=info.compress_type
+                  zout.writestr(out, data)
+              with open(source_seed,'rb') as f:
+                  seed=f.read()
+              out=zipfile.ZipInfo(wanted)
+              out.compress_type=zipfile.ZIP_STORED
+              out.external_attr=0o644 << 16
+              zout.writestr(out, seed)
+          print('Injected exact gzip seed bytes:', os.path.getsize(source_seed))
+          PY
+
+          ZIPALIGN="$ANDROID_HOME/build-tools/36.0.0/zipalign"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          "$ZIPALIGN" -f -p 4 "$TMP" "$ALIGNED"
+          "$APKSIGNER" sign \
+            --ks "$HOME/.android/debug.keystore" \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            "$ALIGNED"
+          mv "$ALIGNED" "$APK"
+          rm -f "$TMP" "$APK.idsig"
+          for f in build/deliverables/DreamLinux-*.apk; do cp "$APK" "$f"; done
+
       - name: Verify compressed ext4 seed inside APK
         run: |
           set -euxo pipefail
@@ -105,8 +169,10 @@ jobs:
               names=set(z.namelist())
               for required in [asset, 'assets/debian-rootfs.ext4.size', 'assets/debian-rootfs.ext4.sha256']:
                   assert required in names, required
+              assert 'assets/debian-rootfs.ext4' not in names, 'AAPT-expanded raw ext4 must not remain in final APK'
               info=z.getinfo(asset)
               assert info.file_size < 500_000_000, info.file_size
+              assert info.compress_type == zipfile.ZIP_STORED
               expected_size=int(z.read('assets/debian-rootfs.ext4.size').decode().strip())
               expected_sha=z.read('assets/debian-rootfs.ext4.sha256').decode().strip()
               with tempfile.NamedTemporaryFile(delete=False) as f:
@@ -137,11 +203,17 @@ jobs:
 
       - name: Prepare Verification Metadata
         run: |
+          APK_SHA256=$(sha256sum app/build/outputs/apk/debug/app-debug.apk | awk '{print $1}')
+          APK_BYTES=$(stat -c '%s' app/build/outputs/apk/debug/app-debug.apk)
+          SEED_BYTES=$(stat -c '%s' app/src/main/assets/debian-rootfs.ext4.gz)
           cat <<EOF > verification.json
           {
             "commit": "${{ github.sha }}",
             "version": "0.8.6-dev1",
             "apk_signature_v3": "PASS",
+            "apk_sha256": "$APK_SHA256",
+            "apk_bytes": $APK_BYTES,
+            "compressed_seed_bytes": $SEED_BYTES,
             "debian_bundle": "DEBIAN 13 ARM64 MINBASE IN GZIP-COMPRESSED 768 MIB EXT4 SEED",
             "first_boot": "TOYBOX GZIP STREAMS SMALL APK ASSET DIRECTLY INTO ENCRYPTED STORAGE WITH PROGRESS + SIZE + SHA256 CHECKS",
             "persistent_root": "SEED LOOP-MOUNTED EXEC THEN BACKING FILE SPARSE-GROWN TO 8 GIB AND EXT4 RESIZED ONLINE",
@@ -152,6 +224,7 @@ jobs:
             "hardware_acceleration": "NOT PROVEN"
           }
           EOF
+          cat verification.json
 
       - name: Deploy to Branch-Isolated Rolling Release
         env:
@@ -165,7 +238,7 @@ jobs:
           gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json apk-signature.txt --clobber
           gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("DreamLinux-") and endswith(".apk"))' | while IFS= read -r asset; do gh release delete-asset "$TAG" "$asset" --yes; done
           gh release upload "$TAG" build/deliverables/DreamLinux-*.apk --clobber
-          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.6-dev1. First boot no longer copies a 1.8 GiB APK entry. A small gzip-compressed ext4 seed is streamed into persistent encrypted storage, verified, loop-mounted exec, then sparsely expanded to 8 GiB. Runtime verification requires the target phone."
+          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.6-dev1. First boot no longer copies a 1.8 GiB APK entry. The final APK preserves an exact ~100 MB gzip-compressed ext4 seed, which streams into persistent encrypted storage, is verified, loop-mounted exec, then sparsely expanded to 8 GiB. Runtime verification requires the target phone."
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
