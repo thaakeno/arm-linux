@@ -43,8 +43,6 @@ jobs:
           sudo apt-get install -y debootstrap
           mkdir -p app/src/main/assets build/debian-rootfs
           sudo debootstrap --arch=arm64 --foreign --variant=minbase trixie build/debian-rootfs http://deb.debian.org/debian
-          # /dev is supplied by a bind mount inside Microdroid. Do not archive Linux device nodes:
-          # extracting mknod entries under the enforcing Microdroid SELinux policy aborts toybox tar.
           sudo tar --numeric-owner \
             --exclude='./dev/*' \
             --exclude='./proc/*' \
@@ -159,10 +157,12 @@ jobs:
           cat <<EOF > verification.json
           {
             "commit": "${{ github.sha }}",
-            "version": "0.8.1-dev1",
+            "version": "0.8.2-dev1",
             "apk_signature_v3": "PASS",
             "stable_signing": "${{ env.STABLE_SIGNING }}",
             "debian_bundle": "DEBIAN 13 ARM64 MINBASE WITHOUT DEVICE NODES + DEBOOTSTRAP SECOND STAGE + HELPER VERIFIED IN CI",
+            "protected_vm_identity": "UNIQUE PER APK BUILD TO AVOID REUSING STALE MICRODROID INSTANCE",
+            "vsock_failfast": "ABORT WHEN VM LEAVES STATUS_RUNNING",
             "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
             "microdroid_gate_a": "PASS ON TARGET FROM PRIOR DEVICE TEST",
             "linux_userspace": "DEBIAN 13 ROOTFS IN MICRODROID ENCRYPTED STORE; TARGET RETEST REQUIRED",
@@ -184,7 +184,7 @@ jobs:
           gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json apk-signature.txt --clobber
           gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("DreamLinux-") and endswith(".apk"))' | while IFS= read -r asset; do gh release delete-asset "$TAG" "$asset" --yes; done
           gh release upload "$TAG" build/deliverables/DreamLinux-*.apk --clobber
-          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.1-dev1. Debian 13 arm64 rootfs excludes Linux device nodes that cannot be recreated under Microdroid SELinux. Runtime Debian/Internet/Plasma/GPU verification still requires the target phone."
+          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.2-dev1. Each APK now creates a fresh protected Microdroid VM identity and vsock retries stop immediately if the VM powers off. Debian archive still excludes Linux device nodes. Runtime Debian/Internet/Plasma/GPU verification requires the target phone."
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
