@@ -2,7 +2,9 @@
 import argparse
 import array
 import os
+import select
 import socket
+import stat
 import struct
 import threading
 import time
@@ -11,11 +13,13 @@ HDR = struct.Struct("!BI")
 DATA_H2G = 1
 DATA_G2H = 2
 FD_DIRECT_H2G = 6
+FD_SIGNAL_H2G = 7
+SIGNAL_H2G = 8
 CTRL_MSG = struct.Struct("=IIQ")
 CTRL_ACK = struct.Struct("=Ii")
 CTRL_REGISTER = 0
 CTRL_UNREGISTER = 1
-GUEST_PAGE_SIZE = 16 * 1024
+UML_PAGE_SIZE = 16384
 
 
 def recvn(sock, n):
@@ -31,39 +35,6 @@ def recvn(sock, n):
 def recv_frame(sock):
     t, n = HDR.unpack(recvn(sock, HDR.size))
     return t, recvn(sock, n)
-
-
-def round_up(value, align):
-    return (value + align - 1) & ~(align - 1)
-
-
-def pad_fd_for_guest_pages(fd, protocol_size):
-    """Grow the real Venus memfd so a 16K UML PTE never maps past EOF.
-
-    Venus can create objects whose logical size is not aligned to UML's 16K
-    guest page size (including 4K objects).  UML has to map whole guest pages,
-    so the host backing file must be at least PAGE_ALIGN(logical_size).  We
-    keep forwarding the original logical size in the vtest protocol; only the
-    backing memfd is enlarged.
-    """
-    padded = round_up(protocol_size, GUEST_PAGE_SIZE)
-    if padded == protocol_size:
-        return padded
-
-    try:
-        os.ftruncate(fd, padded)
-    except OSError as e:
-        raise RuntimeError(
-            f"cannot grow Venus memfd {protocol_size}->{padded} bytes for "
-            f"{GUEST_PAGE_SIZE}-byte UML pages: {e}"
-        ) from e
-
-    actual = os.fstat(fd).st_size
-    if actual < padded:
-        raise RuntimeError(
-            f"Venus memfd remained too small after ftruncate: {actual} < {padded}"
-        )
-    return padded
 
 
 class FramedWriter:
@@ -119,6 +90,8 @@ class Relay:
         self.stop = threading.Event()
         self.error = None
         self.registered_ids = []
+        self.sync_fds = set()
+        self.sync_lock = threading.Lock()
 
     def connect_venus(self):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -150,6 +123,58 @@ class Relay:
         self.registered_ids.append(obj_id)
         print(f"[host-direct] UML registered id={obj_id} fd={fd} size={size}", flush=True)
 
+    @staticmethod
+    def pad_memfd(fd, size):
+        rounded = (size + UML_PAGE_SIZE - 1) & ~(UML_PAGE_SIZE - 1)
+        if rounded != size:
+            os.ftruncate(fd, rounded)
+            print(
+                f"[host-direct] padded Venus memfd backing {size}->{rounded} "
+                f"for 16K UML pages",
+                flush=True,
+            )
+        return rounded
+
+    def _watch_sync_fd(self, sync_id, fd):
+        try:
+            poller = select.poll()
+            poller.register(fd, select.POLLIN | select.POLLERR | select.POLLHUP)
+            while not self.stop.is_set():
+                events = poller.poll(250)
+                if not events:
+                    continue
+                # A vtest sync-wait fd is a one-shot readiness notification.
+                # Preserve that semantic by signalling a guest-local pipe.
+                self.writer.send(SIGNAL_H2G, struct.pack("!I", sync_id))
+                print(f"[host-direct] sync fd signalled id={sync_id}", flush=True)
+                return
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        finally:
+            with self.sync_lock:
+                self.sync_fds.discard(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _forward_sync_fd(self, fd, data):
+        sync_id = self.alloc_id()
+        with self.sync_lock:
+            self.sync_fds.add(fd)
+        payload = struct.pack("!II", sync_id, len(data)) + data
+        self.writer.send(FD_SIGNAL_H2G, payload)
+        print(
+            f"[host-direct] proxied pollable sync fd id={sync_id} carrier={len(data)}",
+            flush=True,
+        )
+        threading.Thread(
+            target=self._watch_sync_fd,
+            args=(sync_id, fd),
+            name=f"venus-sync-{sync_id}",
+            daemon=True,
+        ).start()
+
     def venus_to_guest(self):
         ancbuf = socket.CMSG_SPACE(16 * struct.calcsize("i"))
         while not self.stop.is_set():
@@ -179,17 +204,27 @@ class Relay:
                 raise RuntimeError("SCM_RIGHTS arrived without carrier byte")
 
             fd = fds[0]
+            keep_fd = False
             try:
-                size = os.fstat(fd).st_size
-                if size <= 0:
-                    raise RuntimeError(f"non-mappable Venus fd size={size}")
-                padded = pad_fd_for_guest_pages(fd, size)
-                if padded != size:
-                    print(
-                        f"[host-direct] padded Venus memfd backing "
-                        f"{size}->{padded} for 16K UML pages",
-                        flush=True,
+                st = os.fstat(fd)
+                size = st.st_size
+
+                # Venus vtest sends two fundamentally different FD classes:
+                # mapped blob/memfd storage (non-zero size), and one-shot
+                # pollable sync-wait FDs (normally anon-inode, size zero).
+                # The former must share memory with UML; the latter only need
+                # readiness semantics, so proxy them with a guest-local pipe.
+                if size == 0:
+                    self._forward_sync_fd(fd, data)
+                    keep_fd = True  # watcher owns/ closes the host FD
+                    continue
+
+                if size < 0 or not stat.S_ISREG(st.st_mode):
+                    raise RuntimeError(
+                        f"unsupported Venus fd mode={oct(st.st_mode)} size={size}"
                     )
+
+                self.pad_memfd(fd, size)
                 obj_id = self.alloc_id()
                 self.register_fd_with_uml(obj_id, fd, size)
                 payload = struct.pack("!IQI", obj_id, size, len(data)) + data
@@ -200,7 +235,8 @@ class Relay:
                     flush=True,
                 )
             finally:
-                os.close(fd)
+                if not keep_fd:
+                    os.close(fd)
 
     def guest_to_venus(self):
         while not self.stop.is_set():
@@ -217,6 +253,15 @@ class Relay:
             except Exception as e:
                 print(f"[host-direct] unregister id={obj_id} warning: {e}", flush=True)
         self.registered_ids.clear()
+
+        with self.sync_lock:
+            fds = list(self.sync_fds)
+            self.sync_fds.clear()
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     def run(self):
         self.connect_venus()
