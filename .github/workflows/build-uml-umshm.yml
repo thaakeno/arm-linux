@@ -38,6 +38,18 @@ jobs:
 
       - name: Apply umshm source transform
         run: |
+          # The phys_mapping source matcher was accidentally written as a raw
+          # Python string containing literal "\\t" sequences. Normalize only
+          # that matcher block to real tabs before executing the transformer.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/venus_poc/apply_umshm.py')
+          s = p.read_text()
+          start = s.index("old_phys_mapping = r'''")
+          end = s.index("new_phys_mapping = r'''", start)
+          s = s[:start] + s[start:end].replace(r'\t', '\t') + s[end:]
+          p.write_text(s)
+          PY
           python3 tools/venus_poc/apply_umshm.py linux-um-arm64
           python3 tools/venus_poc/fix_umshm_nonblock.py linux-um-arm64
           python3 tools/venus_poc/fix_umshm_ptrace_fds.py linux-um-arm64
