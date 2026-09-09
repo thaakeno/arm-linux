@@ -19,12 +19,13 @@ fi
 
 TP_DIR="${TERMUX_PACKAGES_DIR:-$HOME/termux-packages-venus}"
 
-# Pin the Khronos headers so this build does not depend on whatever happens to
-# be installed globally in Termux. The on-device ndk-sysroot package strips
-# EGL/GLES/KHR headers even though virglrenderer-android's host build needs
-# them while compiling its bundled libepoxy.
+# Pin graphics API headers so this build does not depend on whatever happens
+# to be installed globally in Termux. The on-device ndk-sysroot package strips
+# EGL/GLES/KHR/Vulkan headers even though virglrenderer-android's host build
+# needs them while compiling bundled libepoxy and Venus.
 EGL_REGISTRY_COMMIT="5961a7fe64cf8a126890ced6f13d69e0a1e1b83e"
 GL_REGISTRY_COMMIT="1cdd228e34966dd6b95bd203e9f84faba0f371a1"
+VULKAN_HEADERS_COMMIT="ee2ec5fd83dafce291024683b50dc89219333076"
 KHRONOS_ROOT="$TP_DIR/.venus-khronos-headers"
 KHRONOS_INCLUDE="$KHRONOS_ROOT/include"
 
@@ -94,6 +95,7 @@ BUILD_PKGS=(
   jq
   git
   curl
+  tar
   make
   ninja
   pkg-config
@@ -131,7 +133,44 @@ fetch_header() {
   fi
 }
 
-echo "[venus-build] preparing private Khronos EGL/GLES headers..."
+prepare_vulkan_headers() {
+  if [ -s "$KHRONOS_INCLUDE/vulkan/vulkan.h" ] && \
+     [ -s "$KHRONOS_INCLUDE/vulkan/vulkan_core.h" ] && \
+     [ -s "$KHRONOS_INCLUDE/vulkan/vulkan_android.h" ]; then
+    return
+  fi
+
+  echo "[venus-build] fetching pinned Vulkan-Headers..."
+  local archive="$KHRONOS_ROOT/Vulkan-Headers-$VULKAN_HEADERS_COMMIT.tar.gz"
+  local extract="$KHRONOS_ROOT/vulkan-extract"
+  local src="$extract/Vulkan-Headers-$VULKAN_HEADERS_COMMIT/include"
+
+  mkdir -p "$KHRONOS_ROOT"
+  if [ ! -s "$archive" ]; then
+    curl -fL --retry 3 --retry-delay 1 \
+      -o "$archive.tmp" \
+      "https://github.com/KhronosGroup/Vulkan-Headers/archive/$VULKAN_HEADERS_COMMIT.tar.gz"
+    mv "$archive.tmp" "$archive"
+  fi
+
+  rm -rf "$extract"
+  mkdir -p "$extract"
+  tar -xzf "$archive" -C "$extract"
+
+  [ -d "$src/vulkan" ] || {
+    echo "[venus-build] Vulkan-Headers archive did not contain include/vulkan" >&2
+    exit 1
+  }
+
+  rm -rf "$KHRONOS_INCLUDE/vulkan" "$KHRONOS_INCLUDE/vk_video"
+  cp -R "$src/vulkan" "$KHRONOS_INCLUDE/"
+  if [ -d "$src/vk_video" ]; then
+    cp -R "$src/vk_video" "$KHRONOS_INCLUDE/"
+  fi
+  rm -rf "$extract"
+}
+
+echo "[venus-build] preparing private Khronos EGL/GLES/Vulkan headers..."
 mkdir -p "$KHRONOS_INCLUDE"
 EGL_RAW="https://raw.githubusercontent.com/KhronosGroup/EGL-Registry/$EGL_REGISTRY_COMMIT/api"
 GL_RAW="https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/$GL_REGISTRY_COMMIT/api"
@@ -150,11 +189,18 @@ done
 for f in gl3.h gl31.h gl32.h gl3platform.h; do
   fetch_header "$GL_RAW/GLES3/$f" "$KHRONOS_INCLUDE/GLES3/$f"
 done
+prepare_vulkan_headers
 
-[ -s "$KHRONOS_INCLUDE/EGL/eglplatform.h" ] && [ -s "$KHRONOS_INCLUDE/KHR/khrplatform.h" ] || {
-  echo "[venus-build] Khronos header staging failed" >&2
-  exit 1
-}
+for required_header in \
+  "$KHRONOS_INCLUDE/EGL/eglplatform.h" \
+  "$KHRONOS_INCLUDE/KHR/khrplatform.h" \
+  "$KHRONOS_INCLUDE/vulkan/vulkan.h" \
+  "$KHRONOS_INCLUDE/vulkan/vulkan_android.h"; do
+  [ -s "$required_header" ] || {
+    echo "[venus-build] required private header missing: $required_header" >&2
+    exit 1
+  }
+done
 
 BUILD_SH="$TP_DIR/packages/$PKG/build.sh"
 [ -f "$BUILD_SH" ] || {
@@ -198,8 +244,8 @@ if "-Drender-server-worker=thread" not in s:
         raise SystemExit("could not find -Dvenus=true in virglrenderer Meson options")
 
 # On-device Termux's installed NDK sysroot intentionally omits EGL/GLES/KHR
-# headers. The regular cross-builder has them in its full NDK. Inject our
-# private, pinned Khronos headers only into this package's host build.
+# and Vulkan headers. The regular cross-builder has them in its full NDK.
+# Inject our private, pinned graphics headers only into this host build.
 if "VENUS_KHRONOS_HEADERS" not in s:
     needle = 'CPPFLAGS=""'
     replacement = 'CPPFLAGS="-I${VENUS_KHRONOS_HEADERS:?}"'
@@ -220,7 +266,7 @@ for required in (
         raise SystemExit(f"virglrenderer recipe patch verification failed: {required}")
 PY
 
-echo "[venus-build] patched recipe: Venus + thread worker + private Khronos headers"
+echo "[venus-build] patched recipe: Venus + thread worker + private graphics headers"
 grep -n -A2 -- '-Dvenus=true' "$BUILD_SH" | head -3
 grep -n -- 'VENUS_KHRONOS_HEADERS' "$BUILD_SH" | head -1
 
