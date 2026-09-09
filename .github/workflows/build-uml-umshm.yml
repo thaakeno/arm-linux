@@ -49,7 +49,7 @@ jobs:
           NDK="$NDK" \
           ART="$GITHUB_WORKSPACE/artifacts" \
           O="$RUNNER_TEMP/uml-umshm-build" \
-          tools/um-arm64/harness/build-bionic.sh
+          bash tools/um-arm64/harness/build-bionic.sh
 
       - name: Verify outputs
         run: |
