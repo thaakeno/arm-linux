@@ -75,7 +75,7 @@ class Control:
         with self.lock:
             self.sock.sendall(meta)
             status = self._wait_ack(obj_id)
-        if status not in (0, -2):  # -ENOENT is already clean
+        if status not in (0, -2):
             raise RuntimeError(f"UML unregister id={obj_id} failed: {status}")
 
 
@@ -126,6 +126,28 @@ class Relay:
     @staticmethod
     def pad_memfd(fd, size):
         rounded = (size + UML_PAGE_SIZE - 1) & ~(UML_PAGE_SIZE - 1)
+
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            target = ""
+
+        st = os.fstat(fd)
+        print(
+            f"[host-direct] Venus fd inspect fd={fd} size={size} "
+            f"rounded={rounded} mode={oct(st.st_mode)} target={target}",
+            flush=True,
+        )
+
+        if "dmabuf:" in target:
+            if rounded != size:
+                print(
+                    f"[host-direct] short DMA-BUF backing size={size} "
+                    f"guest_page={UML_PAGE_SIZE}",
+                    flush=True,
+                )
+            return size
+
         if rounded != size:
             os.ftruncate(fd, rounded)
             print(
@@ -133,6 +155,7 @@ class Relay:
                 f"for 16K UML pages",
                 flush=True,
             )
+
         return rounded
 
     def _watch_sync_fd(self, sync_id, fd):
@@ -143,8 +166,6 @@ class Relay:
                 events = poller.poll(250)
                 if not events:
                     continue
-                # A vtest sync-wait fd is a one-shot readiness notification.
-                # Preserve that semantic by signalling a guest-local pipe.
                 self.writer.send(SIGNAL_H2G, struct.pack("!I", sync_id))
                 print(f"[host-direct] sync fd signalled id={sync_id}", flush=True)
                 return
@@ -209,29 +230,22 @@ class Relay:
                 st = os.fstat(fd)
                 size = st.st_size
 
-                # Venus vtest sends two fundamentally different FD classes:
-                # mapped blob/memfd storage (non-zero size), and one-shot
-                # pollable sync-wait FDs (normally anon-inode, size zero).
-                # The former must share memory with UML; the latter only need
-                # readiness semantics, so proxy them with a guest-local pipe.
                 if size == 0:
                     self._forward_sync_fd(fd, data)
-                    keep_fd = True  # watcher owns/ closes the host FD
+                    keep_fd = True
                     continue
 
-                if size < 0 or not stat.S_ISREG(st.st_mode):
-                    raise RuntimeError(
-                        f"unsupported Venus fd mode={oct(st.st_mode)} size={size}"
-                    )
+                if size < 0:
+                    raise RuntimeError(f"invalid Venus fd size={size}")
 
-                self.pad_memfd(fd, size)
+                backing_size = self.pad_memfd(fd, size)
                 obj_id = self.alloc_id()
-                self.register_fd_with_uml(obj_id, fd, size)
+                self.register_fd_with_uml(obj_id, fd, backing_size)
                 payload = struct.pack("!IQI", obj_id, size, len(data)) + data
                 self.writer.send(FD_DIRECT_H2G, payload)
                 print(
                     f"[host-direct] forwarded SCM_RIGHTS id={obj_id} "
-                    f"size={size} carrier={len(data)}",
+                    f"size={size} backing={backing_size} carrier={len(data)}",
                     flush=True,
                 )
             finally:
