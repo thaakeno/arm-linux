@@ -14,7 +14,9 @@ DATA_G2H = 2
 FD_H2G = 3
 SHMEM_H2G = 4
 SHMEM_G2H = 5
-PAGE = 4096
+RING_CHUNK = 64
+BULK_CHUNK = 4096
+RING_MAX = 256 * 1024
 
 
 def recvn(sock, n):
@@ -97,7 +99,15 @@ class Relay:
                 mm = mmap.mmap(fd, size, mmap.MAP_SHARED,
                                mmap.PROT_READ | mmap.PROT_WRITE)
                 mm[:] = image
-                self.shmem[obj_id] = {"fd": fd, "mm": mm, "size": size}
+                chunk_size = RING_CHUNK if size <= RING_MAX else BULK_CHUNK
+                self.shmem[obj_id] = {
+                    "fd": fd,
+                    "mm": mm,
+                    "size": size,
+                    "shadow": bytearray(image),
+                    "lock": threading.Lock(),
+                    "chunk": chunk_size,
+                }
 
                 anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
                         array.array("i", [fd]).tobytes())]
@@ -106,7 +116,7 @@ class Relay:
                     raise RuntimeError(f"short SCM_RIGHTS sendmsg: {sent}/{len(data)}")
                 print(
                     f"[guest] created local SCM_RIGHTS id={obj_id} fd={fd} "
-                    f"size={size} data_len={len(data)}",
+                    f"size={size} data_len={len(data)} chunk={chunk_size}",
                     flush=True,
                 )
 
@@ -117,7 +127,16 @@ class Relay:
                 obj = self.shmem.get(obj_id)
                 if obj is None:
                     continue
-                obj["mm"][off:off+n] = payload[16:16+n]
+                chunk = payload[16:16+n]
+                if len(chunk) != n or off + n > obj["size"]:
+                    raise RuntimeError(
+                        f"bad host shmem update id={obj_id} off={off} len={n}"
+                    )
+                # Keep the shadow in lockstep with remote writes so the polling
+                # thread does not mistake them for guest writes and echo them.
+                with obj["lock"]:
+                    obj["mm"][off:off+n] = chunk
+                    obj["shadow"][off:off+n] = chunk
             else:
                 raise RuntimeError(f"unexpected host frame type {t}")
 
@@ -125,16 +144,27 @@ class Relay:
         obj = self.shmem[obj_id]
         mm = obj["mm"]
         size = obj["size"]
-        prev = bytearray(mm[:])
+        chunk_size = obj["chunk"]
+        shadow = obj["shadow"]
+        lock = obj["lock"]
+        sleep_s = 0.00025 if chunk_size == RING_CHUNK else 0.001
+
         while not self.stop.is_set() and obj_id in self.shmem:
-            cur = mm[:]
-            for off in range(0, size, PAGE):
-                end = min(off + PAGE, size)
-                if cur[off:end] != prev[off:end]:
-                    payload = struct.pack("!IQI", obj_id, off, end - off) + cur[off:end]
-                    self.writer.send(SHMEM_G2H, payload)
-                    prev[off:end] = cur[off:end]
-            time.sleep(0.001)
+            with lock:
+                cur = mm[:]
+                changed = []
+                for off in range(0, size, chunk_size):
+                    end = min(off + chunk_size, size)
+                    if cur[off:end] != shadow[off:end]:
+                        chunk = cur[off:end]
+                        shadow[off:end] = chunk
+                        changed.append((off, chunk))
+
+            for off, chunk in changed:
+                payload = struct.pack("!IQI", obj_id, off, len(chunk)) + chunk
+                self.writer.send(SHMEM_G2H, payload)
+
+            time.sleep(sleep_s)
 
     def run(self):
         a = threading.Thread(target=self.local_to_host, daemon=True)
