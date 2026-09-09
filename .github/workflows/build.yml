@@ -36,13 +36,15 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
 
-      - name: Prepare Debian 13 executable ext4 userspace asset
+      - name: Prepare compressed Debian 13 ext4 seed
         run: |
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y debootstrap e2fsprogs g++-aarch64-linux-gnu
           rm -rf build/debian-rootfs
           mkdir -p app/src/main/assets build/debian-rootfs
+          rm -f app/src/main/assets/debian-rootfs.ext4 app/src/main/assets/debian-rootfs.ext4.gz \
+                app/src/main/assets/debian-rootfs.ext4.size app/src/main/assets/debian-rootfs.ext4.sha256
 
           sudo debootstrap --arch=arm64 --foreign --variant=minbase trixie build/debian-rootfs http://deb.debian.org/debian
           sudo find build/debian-rootfs/dev build/debian-rootfs/proc build/debian-rootfs/sys build/debian-rootfs/run -mindepth 1 -delete 2>/dev/null || true
@@ -51,22 +53,24 @@ jobs:
           aarch64-linux-gnu-g++ tools/dev1_guest_bridge.cpp -std=c++20 -O2 -fPIE -pie -pthread -s -o /tmp/dev1_guest_bridge
           sudo install -m 0755 /tmp/dev1_guest_bridge build/debian-rootfs/usr/local/bin/dev1_guest_bridge
 
-          printf '%s\n' 'Debian GNU/Linux 13 (trixie) arm64 minbase · executable ext4 root' > app/src/main/assets/debian-version.txt
+          printf '%s\n' 'Debian GNU/Linux 13 (trixie) arm64 minbase · compressed ext4 seed · expands persistently in pVM' > app/src/main/assets/debian-version.txt
 
-          # Keep the single ZIP entry below 2 GiB. Android zipalign chokes on a ZIP64-sized
-          # 2.5 GiB ext4 entry even when DEFLATE makes the APK itself much smaller.
-          # 1900 MiB leaves room for Debian + initial desktop packages while staying ZIP32-safe.
-          rm -f app/src/main/assets/debian-rootfs.ext4
-          truncate -s 1900M app/src/main/assets/debian-rootfs.ext4
-          sudo mkfs.ext4 -F -L DEV1_DEBIAN -m 0 -d build/debian-rootfs app/src/main/assets/debian-rootfs.ext4
-          sudo e2fsck -fy app/src/main/assets/debian-rootfs.ext4
-          sudo chown "$USER:$USER" app/src/main/assets/debian-rootfs.ext4
+          # Seed only needs to hold minbase. On first successful guest mount we grow the
+          # persistent backing file sparsely to 8 GiB and resize ext4 online.
+          truncate -s 768M /tmp/debian-rootfs.ext4
+          sudo mkfs.ext4 -F -L DEV1_DEBIAN -m 0 -d build/debian-rootfs /tmp/debian-rootfs.ext4
+          sudo e2fsck -fy /tmp/debian-rootfs.ext4
+          sudo chown "$USER:$USER" /tmp/debian-rootfs.ext4
 
-          debugfs -R 'stat /etc/debian_version' app/src/main/assets/debian-rootfs.ext4
-          debugfs -R 'stat /debootstrap/debootstrap' app/src/main/assets/debian-rootfs.ext4
-          debugfs -R 'stat /usr/local/bin/dev1_guest_bridge' app/src/main/assets/debian-rootfs.ext4
+          debugfs -R 'stat /etc/debian_version' /tmp/debian-rootfs.ext4
+          debugfs -R 'stat /debootstrap/debootstrap' /tmp/debian-rootfs.ext4
+          debugfs -R 'stat /usr/local/bin/dev1_guest_bridge' /tmp/debian-rootfs.ext4
           file /tmp/dev1_guest_bridge
-          ls -lh app/src/main/assets/debian-rootfs.ext4
+
+          stat -c '%s' /tmp/debian-rootfs.ext4 > app/src/main/assets/debian-rootfs.ext4.size
+          sha256sum /tmp/debian-rootfs.ext4 | awk '{print $1}' > app/src/main/assets/debian-rootfs.ext4.sha256
+          gzip -1 -n -c /tmp/debian-rootfs.ext4 > app/src/main/assets/debian-rootfs.ext4.gz
+          ls -lh /tmp/debian-rootfs.ext4 app/src/main/assets/debian-rootfs.ext4.gz
 
       - name: Make Gradle executable
         run: chmod +x ./gradlew
@@ -90,59 +94,38 @@ jobs:
       - name: Build and check APK
         run: ./gradlew stageDebugApk testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
 
-      - name: Normalize ext4 asset and re-sign APK
+      - name: Verify compressed ext4 seed inside APK
         run: |
           set -euxo pipefail
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          TMP="app/build/outputs/apk/debug/app-repacked.apk"
-          ALIGNED="app/build/outputs/apk/debug/app-aligned.apk"
           python3 - <<'PY'
-          import zipfile
-          src='app/build/outputs/apk/debug/app-debug.apk'
-          dst='app/build/outputs/apk/debug/app-repacked.apk'
-          asset='assets/debian-rootfs.ext4'
-          with zipfile.ZipFile(src, 'r') as zin:
-              if asset not in zin.namelist():
-                  raise SystemExit('Debian ext4 asset missing from APK')
-              with zipfile.ZipFile(dst, 'w', allowZip64=True, compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zout:
-                  for info in zin.infolist():
-                      name=info.filename
-                      upper=name.upper()
-                      if upper.startswith('META-INF/') and upper.endswith(('.SF','.RSA','.DSA','.EC')):
-                          continue
-                      if upper == 'META-INF/MANIFEST.MF':
-                          continue
-                      data=zin.read(name)
-                      out=zipfile.ZipInfo(name)
-                      out.date_time=info.date_time
-                      out.external_attr=info.external_attr
-                      out.compress_type=zipfile.ZIP_DEFLATED if name == asset else info.compress_type
-                      zout.writestr(out, data)
-          PY
-          ZIPALIGN="$ANDROID_HOME/build-tools/36.0.0/zipalign"
-          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
-          "$ZIPALIGN" -f -p 4 "$TMP" "$ALIGNED"
-          "$APKSIGNER" sign --ks "$HOME/.android/debug.keystore" --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true "$ALIGNED"
-          mv "$ALIGNED" "$APK"
-          rm -f "$TMP" "$APK.idsig"
-          for f in build/deliverables/DreamLinux-*.apk; do cp "$APK" "$f"; done
-          python3 - <<'PY'
-          import os, tempfile, zipfile, subprocess
+          import gzip, hashlib, os, shutil, subprocess, tempfile, zipfile
           apk='app/build/outputs/apk/debug/app-debug.apk'
+          asset='assets/debian-rootfs.ext4.gz'
           with zipfile.ZipFile(apk) as z:
-              info=z.getinfo('assets/debian-rootfs.ext4')
-              assert 1_800_000_000 <= info.file_size < 2_147_483_648, info.file_size
+              names=set(z.namelist())
+              for required in [asset, 'assets/debian-rootfs.ext4.size', 'assets/debian-rootfs.ext4.sha256']:
+                  assert required in names, required
+              info=z.getinfo(asset)
+              assert info.file_size < 500_000_000, info.file_size
+              expected_size=int(z.read('assets/debian-rootfs.ext4.size').decode().strip())
+              expected_sha=z.read('assets/debian-rootfs.ext4.sha256').decode().strip()
               with tempfile.NamedTemporaryFile(delete=False) as f:
-                  f.write(z.read('assets/debian-rootfs.ext4'))
                   p=f.name
+                  with z.open(asset) as raw, gzip.GzipFile(fileobj=raw) as gz:
+                      shutil.copyfileobj(gz, f, 1024*1024)
           try:
+              assert os.path.getsize(p) == expected_size
+              h=hashlib.sha256()
+              with open(p,'rb') as f:
+                  for chunk in iter(lambda:f.read(1024*1024), b''): h.update(chunk)
+              assert h.hexdigest() == expected_sha
               subprocess.check_call(['e2fsck','-fn',p])
               for path in ['/etc/debian_version','/debootstrap/debootstrap','/usr/local/bin/dev1_guest_bridge']:
                   out=subprocess.check_output(['debugfs','-R',f'stat {path}',p], stderr=subprocess.STDOUT, text=True)
                   assert 'Inode:' in out, path
           finally:
               os.unlink(p)
-          print('APK executable ext4 Debian root verification: PASS')
+          print('APK compressed ext4 Debian seed verification: PASS')
           PY
 
       - name: Verify APK Signature Schemes
@@ -157,11 +140,12 @@ jobs:
           cat <<EOF > verification.json
           {
             "commit": "${{ github.sha }}",
-            "version": "0.8.5-dev1",
+            "version": "0.8.6-dev1",
             "apk_signature_v3": "PASS",
-            "debian_bundle": "DEBIAN 13 ARM64 MINBASE INSIDE 1900 MIB EXT4 FILESYSTEM IMAGE",
-            "execution": "NOEXEC ENCRYPTEDSTORE USED ONLY AS BACKING FILE; DEBIAN ROOT LOOP-MOUNTED EXEC",
-            "apk_packaging": "EXT4 ENTRY KEPT BELOW 2 GIB TO AVOID ZIPALIGN ZIP64 FAILURE",
+            "debian_bundle": "DEBIAN 13 ARM64 MINBASE IN GZIP-COMPRESSED 768 MIB EXT4 SEED",
+            "first_boot": "TOYBOX GZIP STREAMS SMALL APK ASSET DIRECTLY INTO ENCRYPTED STORAGE WITH PROGRESS + SIZE + SHA256 CHECKS",
+            "persistent_root": "SEED LOOP-MOUNTED EXEC THEN BACKING FILE SPARSE-GROWN TO 8 GIB AND EXT4 RESIZED ONLINE",
+            "execution": "NOEXEC ENCRYPTEDSTORE IS BACKING ONLY; DEBIAN EXECUTES FROM LOOP-MOUNTED EXT4",
             "network_bridge": "DEBIAN GLIBC ARM64 BRIDGE RUNS FROM EXEC ROOT; HOST INTERNET OVER VSOCK",
             "protected_vm_identity": "UNIQUE PER APK VERSION CODE",
             "runtime": "TARGET PHONE RETEST REQUIRED",
@@ -181,7 +165,7 @@ jobs:
           gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json apk-signature.txt --clobber
           gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("DreamLinux-") and endswith(".apk"))' | while IFS= read -r asset; do gh release delete-asset "$TAG" "$asset" --yes; done
           gh release upload "$TAG" build/deliverables/DreamLinux-*.apk --clobber
-          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.5-dev1. Debian is stored in a real ext4 filesystem image. The image is 1900 MiB so the APK entry remains below the ZIP32 2 GiB boundary that broke zipalign in the previous build. Runtime verification requires the target phone."
+          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.6-dev1. First boot no longer copies a 1.8 GiB APK entry. A small gzip-compressed ext4 seed is streamed into persistent encrypted storage, verified, loop-mounted exec, then sparsely expanded to 8 GiB. Runtime verification requires the target phone."
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
