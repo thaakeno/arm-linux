@@ -47,15 +47,13 @@ class Relay:
         self.tcp = tcp
         self.local = local
         self.writer = FramedWriter(tcp)
-        self.shmem_fd = None
-        self.shmem = None
-        self.shmem_size = 0
+        self.shmem = {}
         self.stop = threading.Event()
 
     def local_to_host(self):
         ancbuf = socket.CMSG_SPACE(16 * struct.calcsize("i"))
         while not self.stop.is_set():
-            data, anc, flags, _ = self.local.recvmsg(1 << 20, ancbuf)
+            data, anc, flags, _ = self.local.recvmsg(1, ancbuf)
             if not data and not anc:
                 raise EOFError("Mesa client closed")
 
@@ -80,51 +78,60 @@ class Relay:
             if t == DATA_H2G:
                 self.local.sendall(payload)
             elif t == FD_H2G:
-                size, data_len = struct.unpack("!QI", payload[:12])
-                data = payload[12:12+data_len]
-                image = payload[12+data_len:]
+                obj_id, size, data_len = struct.unpack("!IQI", payload[:16])
+                data = payload[16:16+data_len]
+                image = payload[16+data_len:]
                 if len(image) != size:
                     raise RuntimeError(
                         f"bad initial shmem image: got {len(image)}, expected {size}"
                     )
+                if not data:
+                    raise RuntimeError("FD_H2G arrived without the required carrier byte")
 
                 if hasattr(os, "memfd_create"):
-                    fd = os.memfd_create("vkr-shmem-uml", 0)
+                    fd = os.memfd_create(f"vkr-shmem-uml-{obj_id}", 0)
                 else:
-                    fd = os.open("/tmp/vkr-shmem-uml.bin",
-                                 os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+                    path = f"/tmp/vkr-shmem-uml-{obj_id}.bin"
+                    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
                 os.ftruncate(fd, size)
                 mm = mmap.mmap(fd, size, mmap.MAP_SHARED,
                                mmap.PROT_READ | mmap.PROT_WRITE)
                 mm[:] = image
-
-                self.shmem_fd = fd
-                self.shmem = mm
-                self.shmem_size = size
+                self.shmem[obj_id] = {"fd": fd, "mm": mm, "size": size}
 
                 anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
                         array.array("i", [fd]).tobytes())]
-                self.local.sendmsg([data], anc)
-                print(f"[guest] created local SCM_RIGHTS memfd={fd} size={size}", flush=True)
+                sent = self.local.sendmsg([data], anc)
+                if sent != len(data):
+                    raise RuntimeError(f"short SCM_RIGHTS sendmsg: {sent}/{len(data)}")
+                print(
+                    f"[guest] created local SCM_RIGHTS id={obj_id} fd={fd} "
+                    f"size={size} data_len={len(data)}",
+                    flush=True,
+                )
 
                 threading.Thread(target=self.sync_guest_to_host,
-                                 daemon=True).start()
+                                 args=(obj_id,), daemon=True).start()
             elif t == SHMEM_H2G:
-                if self.shmem is None:
+                obj_id, off, n = struct.unpack("!IQI", payload[:16])
+                obj = self.shmem.get(obj_id)
+                if obj is None:
                     continue
-                off, n = struct.unpack("!QI", payload[:12])
-                self.shmem[off:off+n] = payload[12:12+n]
+                obj["mm"][off:off+n] = payload[16:16+n]
             else:
                 raise RuntimeError(f"unexpected host frame type {t}")
 
-    def sync_guest_to_host(self):
-        prev = bytearray(self.shmem[:])
-        while not self.stop.is_set() and self.shmem is not None:
-            cur = self.shmem[:]
-            for off in range(0, self.shmem_size, PAGE):
-                end = min(off + PAGE, self.shmem_size)
+    def sync_guest_to_host(self, obj_id):
+        obj = self.shmem[obj_id]
+        mm = obj["mm"]
+        size = obj["size"]
+        prev = bytearray(mm[:])
+        while not self.stop.is_set() and obj_id in self.shmem:
+            cur = mm[:]
+            for off in range(0, size, PAGE):
+                end = min(off + PAGE, size)
                 if cur[off:end] != prev[off:end]:
-                    payload = struct.pack("!QI", off, end - off) + cur[off:end]
+                    payload = struct.pack("!IQI", obj_id, off, end - off) + cur[off:end]
                     self.writer.send(SHMEM_G2H, payload)
                     prev[off:end] = cur[off:end]
             time.sleep(0.001)
