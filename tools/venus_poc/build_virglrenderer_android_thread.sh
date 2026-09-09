@@ -19,6 +19,15 @@ fi
 
 TP_DIR="${TERMUX_PACKAGES_DIR:-$HOME/termux-packages-venus}"
 
+# Pin the Khronos headers so this build does not depend on whatever happens to
+# be installed globally in Termux. The on-device ndk-sysroot package strips
+# EGL/GLES/KHR headers even though virglrenderer-android's host build needs
+# them while compiling its bundled libepoxy.
+EGL_REGISTRY_COMMIT="5961a7fe64cf8a126890ced6f13d69e0a1e1b83e"
+GL_REGISTRY_COMMIT="1cdd228e34966dd6b95bd203e9f84faba0f371a1"
+KHRONOS_ROOT="$TP_DIR/.venus-khronos-headers"
+KHRONOS_INCLUDE="$KHRONOS_ROOT/include"
+
 need() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "[venus-build] missing command: $1" >&2
@@ -84,6 +93,7 @@ BUILD_PKGS=(
   unzip
   jq
   git
+  curl
   make
   ninja
   pkg-config
@@ -109,6 +119,42 @@ else
   git -C "$TP_DIR" fetch --depth=1 origin "$TP_BRANCH"
   git -C "$TP_DIR" reset --hard "origin/$TP_BRANCH"
 fi
+
+fetch_header() {
+  local url="$1"
+  local out="$2"
+  mkdir -p "$(dirname "$out")"
+  if [ ! -s "$out" ]; then
+    echo "[venus-build] fetching Khronos header: ${out#$KHRONOS_INCLUDE/}"
+    curl -fL --retry 3 --retry-delay 1 -o "$out.tmp" "$url"
+    mv "$out.tmp" "$out"
+  fi
+}
+
+echo "[venus-build] preparing private Khronos EGL/GLES headers..."
+mkdir -p "$KHRONOS_INCLUDE"
+EGL_RAW="https://raw.githubusercontent.com/KhronosGroup/EGL-Registry/$EGL_REGISTRY_COMMIT/api"
+GL_RAW="https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/$GL_REGISTRY_COMMIT/api"
+
+fetch_header "$EGL_RAW/EGL/egl.h" "$KHRONOS_INCLUDE/EGL/egl.h"
+fetch_header "$EGL_RAW/EGL/eglext.h" "$KHRONOS_INCLUDE/EGL/eglext.h"
+fetch_header "$EGL_RAW/EGL/eglplatform.h" "$KHRONOS_INCLUDE/EGL/eglplatform.h"
+fetch_header "$EGL_RAW/KHR/khrplatform.h" "$KHRONOS_INCLUDE/KHR/khrplatform.h"
+
+for f in gl.h glext.h glplatform.h egl.h; do
+  fetch_header "$GL_RAW/GLES/$f" "$KHRONOS_INCLUDE/GLES/$f"
+done
+for f in gl2.h gl2ext.h gl2platform.h; do
+  fetch_header "$GL_RAW/GLES2/$f" "$KHRONOS_INCLUDE/GLES2/$f"
+done
+for f in gl3.h gl31.h gl32.h gl3platform.h; do
+  fetch_header "$GL_RAW/GLES3/$f" "$KHRONOS_INCLUDE/GLES3/$f"
+done
+
+[ -s "$KHRONOS_INCLUDE/EGL/eglplatform.h" ] && [ -s "$KHRONOS_INCLUDE/KHR/khrplatform.h" ] || {
+  echo "[venus-build] Khronos header staging failed" >&2
+  exit 1
+}
 
 BUILD_SH="$TP_DIR/packages/$PKG/build.sh"
 [ -f "$BUILD_SH" ] || {
@@ -151,20 +197,38 @@ if "-Drender-server-worker=thread" not in s:
     else:
         raise SystemExit("could not find -Dvenus=true in virglrenderer Meson options")
 
+# On-device Termux's installed NDK sysroot intentionally omits EGL/GLES/KHR
+# headers. The regular cross-builder has them in its full NDK. Inject our
+# private, pinned Khronos headers only into this package's host build.
+if "VENUS_KHRONOS_HEADERS" not in s:
+    needle = 'CPPFLAGS=""'
+    replacement = 'CPPFLAGS="-I${VENUS_KHRONOS_HEADERS:?}"'
+    if needle not in s:
+        raise SystemExit("could not find virglrenderer host-build CPPFLAGS assignment")
+    s = s.replace(needle, replacement, 1)
+
 p.write_text(s)
 
 patched = p.read_text()
-for required in ("-Dvenus=true", "-Drender-server-worker=thread", "-Dplatforms=egl"):
+for required in (
+    "-Dvenus=true",
+    "-Drender-server-worker=thread",
+    "-Dplatforms=egl",
+    "VENUS_KHRONOS_HEADERS",
+):
     if required not in patched:
         raise SystemExit(f"virglrenderer recipe patch verification failed: {required}")
 PY
 
-echo "[venus-build] patched recipe: Venus + render-server-worker=thread"
+echo "[venus-build] patched recipe: Venus + thread worker + private Khronos headers"
 grep -n -A2 -- '-Dvenus=true' "$BUILD_SH" | head -3
+grep -n -- 'VENUS_KHRONOS_HEADERS' "$BUILD_SH" | head -1
 
 echo "[venus-build] building $PKG..."
 cd "$TP_DIR"
-TERMUX_ON_DEVICE_BUILD=true ./build-package.sh -f -I "$PKG"
+VENUS_KHRONOS_HEADERS="$KHRONOS_INCLUDE" \
+  TERMUX_ON_DEVICE_BUILD=true \
+  ./build-package.sh -f -I "$PKG"
 
 DEB="$(find "$TP_DIR/output" "$TP_DIR/debs" -maxdepth 1 -type f -name 'virglrenderer-android_*_aarch64.deb' 2>/dev/null | sort | tail -1 || true)"
 [ -n "$DEB" ] || {
