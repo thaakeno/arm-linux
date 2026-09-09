@@ -31,66 +31,42 @@ s = replace_once(
     "\t\tint prev_fd = mm_idp->syscall_fd_map[sc->mem.fd];\n\n\t\tif (phys_fd == prev_fd) {",
     "mmap compression fd lookup",
 )
-mem.write_text(s)
-
-s = proc.read_text()
 helper_anchor = "static inline long do_syscall_stub(struct mm_id *mm_idp)\n{"
 helper = r'''static int send_stub_fds_ptrace(struct mm_id *mm_idp)
 {
 	const char byte = 0;
-	struct iovec iov = {
-		.iov_base = (void *)&byte,
-		.iov_len = sizeof(byte),
-	};
-	union {
-		char data[CMSG_SPACE(sizeof(mm_idp->syscall_fd_map))];
-		struct cmsghdr align;
-	} ctrl = {};
-	struct msghdr msgh = {
-		.msg_iov = &iov,
-		.msg_iovlen = 1,
-	};
-	unsigned int fds_size;
-	struct cmsghdr *cmsg;
 	int ret;
 
 	if (!mm_idp->syscall_fd_num)
 		return 0;
 
-	fds_size = sizeof(int) * mm_idp->syscall_fd_num;
-	msgh.msg_control = ctrl.data;
-	msgh.msg_controllen = CMSG_SPACE(fds_size);
-	cmsg = CMSG_FIRSTHDR(&msgh);
-	cmsg->cmsg_level = SOL_SOCKET;
-	cmsg->cmsg_type = SCM_RIGHTS;
-	cmsg->cmsg_len = CMSG_LEN(fds_size);
-	memcpy(CMSG_DATA(cmsg), mm_idp->syscall_fd_map, fds_size);
-
 	do {
-		ret = syscall(__NR_sendmsg, mm_idp->sock, &msgh, 0);
-	} while (ret < 0 && errno == EINTR);
+		ret = os_sendmsg_fds(mm_idp->sock, &byte, sizeof(byte),
+				     mm_idp->syscall_fd_map,
+				     mm_idp->syscall_fd_num);
+	} while (ret == -EINTR);
 
-	return ret < 0 ? -errno : 0;
+	return ret < 0 ? ret : 0;
 }
 
 static inline long do_syscall_stub(struct mm_id *mm_idp)
 {'''
 s = replace_once(s, helper_anchor, helper, "ptrace fd sender helper anchor")
-
 s = replace_once(
     s,
     "\t} else {\n\t\tn = put_host_regs(pid, syscall_regs);",
     "\t} else {\n\t\t/* Tell the ptrace stub how many descriptors to receive, then pass\n\t\t * them over the socket it keeps as fd 0. */\n\t\tproc_data->restart_wait = mm_idp->syscall_fd_num;\n\t\terr = send_stub_fds_ptrace(mm_idp);\n\t\tif (err < 0) {\n\t\t\tprintk(UM_KERN_ERR \"%s : sendmsg FDs failed, errno = %d\\n\",\n\t\t\t       __func__, -err);\n\t\t\tmm_idp->syscall_data_len = err;\n\t\t\treturn err;\n\t\t}\n\n\t\tn = put_host_regs(pid, syscall_regs);",
     "ptrace send fds before PTRACE_CONT",
 )
-
 s = replace_once(
     s,
     "\tif (using_seccomp)\n\t\tmm_idp->syscall_fd_num = 0;\n\n\treturn mm_idp->syscall_data_len;",
     "\tmm_idp->syscall_fd_num = 0;\n\n\treturn mm_idp->syscall_data_len;",
     "reset fd map after ptrace flush",
 )
+mem.write_text(s)
 
+s = proc.read_text()
 s = replace_once(
     s,
     "\tclose(tramp_data.sockpair[0]);\n\tif (using_seccomp)\n\t\tmm_id->sock = tramp_data.sockpair[1];\n\telse\n\t\tclose(tramp_data.sockpair[1]);",
