@@ -36,29 +36,20 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
 
-      - name: Prepare Alpine pVM payload assets
+      - name: Prepare Debian 13 pVM userspace assets
         run: |
           set -euxo pipefail
-          mkdir -p app/src/main/assets
-          python3 - <<'PY'
-          import re, urllib.request
-          base = 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/'
-          html = urllib.request.urlopen(base, timeout=30).read().decode('utf-8', 'replace')
-          names = re.findall(r'href="(alpine-minirootfs-[0-9][^"/]*-aarch64\.tar\.gz)"', html)
-          names = [n for n in names if '_rc' not in n and '-rc' not in n]
-          if not names:
-              raise SystemExit('No Alpine aarch64 minirootfs found in latest-stable index')
-          def version_key(name):
-              m = re.search(r'alpine-minirootfs-([0-9]+(?:\.[0-9]+)+)-aarch64', name)
-              return tuple(int(x) for x in m.group(1).split('.')) if m else (0,)
-          name = max(names, key=version_key)
-          print('Bundling', name)
-          urllib.request.urlretrieve(base + name, 'app/src/main/assets/alpine-minirootfs.tar.gz')
-          open('app/src/main/assets/alpine-version.txt', 'w').write(name + '\n')
-          PY
+          sudo apt-get update
+          sudo apt-get install -y debootstrap
+          mkdir -p app/src/main/assets build/debian-rootfs
+          sudo debootstrap --arch=arm64 --foreign --variant=minbase trixie build/debian-rootfs http://deb.debian.org/debian
+          sudo tar --numeric-owner -C build/debian-rootfs -czf app/src/main/assets/debian-rootfs.tar.gz .
+          sudo chown "$USER:$USER" app/src/main/assets/debian-rootfs.tar.gz
+          printf '%s\n' 'Debian GNU/Linux 13 (trixie) arm64 minbase' > app/src/main/assets/debian-version.txt
           CXX="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++"
           "$CXX" tools/dev1_guest_bridge.cpp -std=c++20 -O2 -fPIE -pie -pthread -Wl,--strip-all -o app/src/main/assets/dev1_guest_bridge
           file app/src/main/assets/dev1_guest_bridge
+          tar -tzf app/src/main/assets/debian-rootfs.tar.gz | grep -E '^\./(etc/debian_version|debootstrap/debootstrap)$'
           ls -lh app/src/main/assets
 
       - name: Make Gradle executable
@@ -83,38 +74,34 @@ jobs:
               -keyalg RSA -keysize 2048 -validity 10000
             chmod 600 "$HOME/.android/debug.keystore"
             echo "STABLE_SIGNING=false" >> "$GITHUB_ENV"
-            echo "::warning::Persistent signing key missing; generated an ephemeral Android debug key for this rolling test build. Android may require uninstalling an older differently-signed APK before installation. Files in /data/local/tmp/dev1-linux* are retained."
           fi
           keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
-          echo "Debug keystore ready for Gradle and post-build re-signing"
 
       - name: Build and check APK
         run: ./gradlew stageDebugApk testDebugUnitTest lintDebug --no-daemon
 
-      - name: Normalize Alpine asset and re-sign APK
+      - name: Normalize Debian asset and re-sign APK
         run: |
           set -euxo pipefail
           APK="app/build/outputs/apk/debug/app-debug.apk"
           TMP="app/build/outputs/apk/debug/app-repacked.apk"
           ALIGNED="app/build/outputs/apk/debug/app-aligned.apk"
-
           python3 - <<'PY'
           import gzip, zipfile
           src='app/build/outputs/apk/debug/app-debug.apk'
           dst='app/build/outputs/apk/debug/app-repacked.apk'
           with zipfile.ZipFile(src, 'r') as zin:
               names=set(zin.namelist())
-              root_name='assets/alpine-minirootfs.tar' if 'assets/alpine-minirootfs.tar' in names else 'assets/alpine-minirootfs.tar.gz'
+              root_name='assets/debian-rootfs.tar' if 'assets/debian-rootfs.tar' in names else 'assets/debian-rootfs.tar.gz'
               raw=zin.read(root_name)
               gz=raw if root_name.endswith('.gz') else gzip.compress(raw, compresslevel=9, mtime=0)
               helper=zin.read('assets/dev1_guest_bridge')
-              version=zin.read('assets/alpine-version.txt')
               if not helper.startswith(b'\x7fELF'):
                   raise SystemExit('dev1_guest_bridge is not an ELF executable')
               with zipfile.ZipFile(dst, 'w', allowZip64=True) as zout:
                   for info in zin.infolist():
                       name=info.filename
-                      if name in {'assets/alpine-minirootfs.tar','assets/alpine-minirootfs.tar.gz'}:
+                      if name in {'assets/debian-rootfs.tar','assets/debian-rootfs.tar.gz'}:
                           continue
                       upper=name.upper()
                       if upper.startswith('META-INF/') and upper.endswith(('.SF','.RSA','.DSA','.EC')):
@@ -122,45 +109,30 @@ jobs:
                       if upper == 'META-INF/MANIFEST.MF':
                           continue
                       zout.writestr(info, zin.read(name))
-                  info=zipfile.ZipInfo('assets/alpine-minirootfs.tar.gz')
+                  info=zipfile.ZipInfo('assets/debian-rootfs.tar.gz')
                   info.compress_type=zipfile.ZIP_STORED
                   info.external_attr=0o100644 << 16
                   zout.writestr(info, gz)
-          print('repacked Alpine rootfs gzip bytes', len(gz), 'version', version.decode().strip())
           PY
-
           ZIPALIGN="$ANDROID_HOME/build-tools/36.0.0/zipalign"
           APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
           "$ZIPALIGN" -f -p 4 "$TMP" "$ALIGNED"
-          "$APKSIGNER" sign \
-            --ks "$HOME/.android/debug.keystore" \
-            --ks-key-alias androiddebugkey \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            "$ALIGNED"
+          "$APKSIGNER" sign --ks "$HOME/.android/debug.keystore" --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true "$ALIGNED"
           mv "$ALIGNED" "$APK"
           rm -f "$TMP" "$APK.idsig"
-
-          for f in build/deliverables/DreamLinux-*.apk; do
-            cp "$APK" "$f"
-          done
-
-          unzip -l "$APK" | grep -F 'assets/alpine-minirootfs.tar.gz'
-          unzip -l "$APK" | grep -F 'assets/dev1_guest_bridge'
+          for f in build/deliverables/DreamLinux-*.apk; do cp "$APK" "$f"; done
           python3 - <<'PY'
           import gzip, io, tarfile, zipfile
           apk='app/build/outputs/apk/debug/app-debug.apk'
           with zipfile.ZipFile(apk) as z:
-              data=z.read('assets/alpine-minirootfs.tar.gz')
+              data=z.read('assets/debian-rootfs.tar.gz')
               raw=gzip.decompress(data)
               with tarfile.open(fileobj=io.BytesIO(raw), mode='r:') as t:
-                  names=t.getnames()
-                  assert any(n.endswith('etc/alpine-release') or n == 'etc/alpine-release' for n in names)
+                  names=set(t.getnames())
+                  assert './etc/debian_version' in names or 'etc/debian_version' in names
+                  assert './debootstrap/debootstrap' in names or 'debootstrap/debootstrap' in names
               assert z.read('assets/dev1_guest_bridge').startswith(b'\x7fELF')
-          print('APK Alpine bundle verification: PASS')
+          print('APK Debian bundle verification: PASS')
           PY
 
       - name: Verify APK Signature Schemes
@@ -169,22 +141,21 @@ jobs:
           APK="app/build/outputs/apk/debug/app-debug.apk"
           "$APKSIGNER" verify --verbose --print-certs "$APK" | tee apk-signature.txt
           grep -q 'Verified using v3 scheme (APK Signature Scheme v3): true' apk-signature.txt
-          echo 'AVF-required APK Signature Scheme v3: PASS'
 
       - name: Prepare Verification Metadata
         run: |
           cat <<EOF > verification.json
           {
             "commit": "${{ github.sha }}",
-            "version": "0.7.1-dev1",
+            "version": "0.8.0-dev1",
             "apk_signature_v3": "PASS",
             "stable_signing": "${{ env.STABLE_SIGNING }}",
-            "alpine_bundle": "APK ENTRY + GZIP + TAR + HELPER VERIFIED IN CI",
+            "debian_bundle": "DEBIAN 13 ARM64 MINBASE + DEBOOTSTRAP SECOND STAGE + HELPER VERIFIED IN CI",
             "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
             "microdroid_gate_a": "PASS ON TARGET FROM PRIOR DEVICE TEST",
-            "linux_userspace": "ALPINE ROOTFS IN MICRODROID ENCRYPTED STORE; TARGET RETEST REQUIRED",
+            "linux_userspace": "DEBIAN 13 ROOTFS IN MICRODROID ENCRYPTED STORE; TARGET RETEST REQUIRED",
             "network": "HOST-MEDIATED HTTP PROXY OVER VSOCK; TARGET RETEST REQUIRED",
-            "desktop": "XFCE/TIGERVNC PROVISIONING; TARGET RETEST REQUIRED",
+            "desktop": "PLASMA 6/TIGERVNC PROVISIONING; TARGET RETEST REQUIRED",
             "hardware_acceleration": "NOT PROVEN"
           }
           EOF
@@ -194,25 +165,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           BRANCH="${GITHUB_REF_NAME}"
-          if [ "$BRANCH" = "dev-1" ]; then
-            TAG="latest-dev-1"
-            TITLE="Latest Build (dev-1)"
-          elif [ "$BRANCH" = "dev-2" ]; then
-            TAG="latest-dev-2"
-            TITLE="Latest Build (dev-2)"
-          else
-            TAG="latest"
-            TITLE="Latest Build (master)"
-          fi
-
-          echo "Target release tag: $TAG"
+          if [ "$BRANCH" = "dev-1" ]; then TAG="latest-dev-1"; TITLE="Latest Build (dev-1)";
+          elif [ "$BRANCH" = "dev-2" ]; then TAG="latest-dev-2"; TITLE="Latest Build (dev-2)";
+          else TAG="latest"; TITLE="Latest Build (master)"; fi
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TITLE" --notes "Rolling build from branch $BRANCH commit ${{ github.sha }}" --prerelease
           gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json apk-signature.txt --clobber
-          gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("DreamLinux-") and endswith(".apk"))' | while IFS= read -r asset; do
-            gh release delete-asset "$TAG" "$asset" --yes
-          done
+          gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("DreamLinux-") and endswith(".apk"))' | while IFS= read -r asset; do gh release delete-asset "$TAG" "$asset" --yes; done
           gh release upload "$TAG" build/deliverables/DreamLinux-*.apk --clobber
-          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.7.1-dev1. Alpine gzip/rootfs/helper assets are verified inside the final signed APK. Runtime Internet/desktop/GPU verification still requires the target phone."
+          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.0-dev1. Debian 13 arm64 rootfs/helper assets are verified inside the final signed APK. Runtime Debian/Internet/Plasma/GPU verification still requires the target phone."
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
