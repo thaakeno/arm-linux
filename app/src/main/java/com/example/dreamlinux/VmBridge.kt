@@ -197,13 +197,13 @@ class VmBridge : IVmBridge.Stub() {
             .put("displayServiceApi", false).put("debianInstalled", bundleReady()).put("kdeInstalled", desktopMarker().isFile).toString()
     } catch (t: Throwable) { val e = AvfReflect.unwrap(t); JSONObject().put("ok", false).put("error", "${e.javaClass.name}: ${e.message}").toString() }
 
-    private fun bundleReady(): Boolean = runCatching { baseContext().assets.open("debian-rootfs.ext4").use { it.read() >= 0 } }.getOrDefault(false)
+    private fun bundleReady(): Boolean = runCatching { baseContext().assets.open("debian-rootfs.ext4.gz").use { it.read() >= 0 } }.getOrDefault(false)
 
     private fun debianAssetName(): String = runCatching { baseContext().assets.open("debian-version.txt").bufferedReader().use { it.readLine().orEmpty() } }
-        .getOrDefault("Debian GNU/Linux 13 (trixie) arm64 executable ext4 root")
+        .getOrDefault("Debian GNU/Linux 13 (trixie) arm64 compressed executable ext4 seed")
 
     override fun installDebian(): String {
-        installError = if (bundleReady()) "" else "Embedded Debian ext4 rootfs is missing from this APK"
+        installError = if (bundleReady()) "" else "Embedded Debian compressed ext4 seed is missing from this APK"
         stage = if (bundleReady()) "debian_bundle_ready" else "blocked:debian_bundle_missing"
         append("Debian bundle ${if (bundleReady()) "ready" else "missing"}: ${debianAssetName()}"); return status()
     }
@@ -214,10 +214,10 @@ class VmBridge : IVmBridge.Stub() {
     private fun startLinuxMode(): String {
         lastError = ""; guestVerified = false; internetReady = false; internetStage = "starting"
         return try {
-            check(bundleReady()) { "Debian 13 ext4 rootfs bundle is missing from APK" }
+            check(bundleReady()) { "Debian 13 compressed ext4 seed is missing from APK" }
             if (isRunning(vm)) stopInternal()
             val context = redirectedContext(); stage = "config:debian_pvm"
-            append("Using OEM-trusted Microdroid pVM kernel; encryptedstore is backing only; Debian runs from loop-mounted exec ext4")
+            append("Using OEM-trusted Microdroid pVM kernel; compressed Debian seed streams into encrypted backing then runs from loop-mounted exec ext4")
             val machine = acquireVm(linuxVmName, buildMicrodroid(context, true), "debian")
             startMachine(machine, "debian")
             stage = "microdroid_adb_root"; ensureAdbRoot(machine)
@@ -248,25 +248,50 @@ class VmBridge : IVmBridge.Stub() {
         val script = """
             set -u
             ROOT=$DEBIAN_ROOT
-            ASSET=/mnt/apk/assets/debian-rootfs.ext4
+            ASSET=/mnt/apk/assets/debian-rootfs.ext4.gz
+            SIZE_FILE=/mnt/apk/assets/debian-rootfs.ext4.size
+            SHA_FILE=/mnt/apk/assets/debian-rootfs.ext4.sha256
             IMAGE=/mnt/encryptedstore/dev1-debian-root.ext4
             IMAGE_TMP=/mnt/encryptedstore/dev1-debian-root.ext4.partial
+            TARGET_BYTES=8589934592
             echo DEV1_PROVISION_BEGIN
             echo UID=${'$'}(id -u)
             echo ASSET_INFO
-            ls -lh "${'$'}ASSET" 2>&1 || exit 30
+            ls -lh "${'$'}ASSET" "${'$'}SIZE_FILE" "${'$'}SHA_FILE" 2>&1 || exit 30
+            EXPECTED_SIZE=${'$'}(cat "${'$'}SIZE_FILE" 2>/dev/null || echo '')
+            EXPECTED_SHA=${'$'}(cat "${'$'}SHA_FILE" 2>/dev/null || echo '')
+            echo DEV1_SEED_EXPECTED_SIZE=${'$'}EXPECTED_SIZE
+            echo DEV1_SEED_EXPECTED_SHA=${'$'}EXPECTED_SHA
+            [ -n "${'$'}EXPECTED_SIZE" ] && [ -n "${'$'}EXPECTED_SHA" ] || exit 31
             echo STORAGE_INFO
             df -h /mnt/encryptedstore 2>&1 || true
             mount | grep ' /mnt/encryptedstore ' || true
             mkdir -p "${'$'}ROOT"
 
             if [ ! -f "${'$'}IMAGE" ]; then
-              echo DEV1_EXT4_COPY_START
+              echo DEV1_EXT4_DECOMPRESS_START
               rm -f "${'$'}IMAGE_TMP"
-              cat "${'$'}ASSET" > "${'$'}IMAGE_TMP" || { echo DEV1_EXT4_COPY_FAIL rc=${'$'}?; exit 31; }
+              /system/bin/toybox gzip -dc "${'$'}ASSET" > "${'$'}IMAGE_TMP" &
+              GPID=${'$'}!
+              LAST=-1
+              while kill -0 "${'$'}GPID" 2>/dev/null; do
+                CUR=${'$'}(stat -c %s "${'$'}IMAGE_TMP" 2>/dev/null || echo 0)
+                if [ "${'$'}CUR" != "${'$'}LAST" ]; then echo DEV1_EXT4_DECOMPRESS_PROGRESS=${'$'}CUR/${'$'}EXPECTED_SIZE; LAST=${'$'}CUR; fi
+                sleep 1
+              done
+              wait "${'$'}GPID"
+              GRC=${'$'}?
+              echo DEV1_GUNZIP_RC=${'$'}GRC
+              [ "${'$'}GRC" -eq 0 ] || exit 32
+              ACTUAL_SIZE=${'$'}(stat -c %s "${'$'}IMAGE_TMP" 2>/dev/null || echo 0)
+              echo DEV1_SEED_ACTUAL_SIZE=${'$'}ACTUAL_SIZE
+              [ "${'$'}ACTUAL_SIZE" = "${'$'}EXPECTED_SIZE" ] || { echo DEV1_SEED_SIZE_MISMATCH; exit 33; }
+              ACTUAL_SHA=${'$'}(sha256sum "${'$'}IMAGE_TMP" 2>/dev/null | cut -d' ' -f1)
+              echo DEV1_SEED_ACTUAL_SHA=${'$'}ACTUAL_SHA
+              [ "${'$'}ACTUAL_SHA" = "${'$'}EXPECTED_SHA" ] || { echo DEV1_SEED_SHA_MISMATCH; exit 34; }
               sync
-              mv "${'$'}IMAGE_TMP" "${'$'}IMAGE" || { echo DEV1_EXT4_RENAME_FAIL rc=${'$'}?; exit 32; }
-              echo DEV1_EXT4_COPY_DONE
+              mv "${'$'}IMAGE_TMP" "${'$'}IMAGE" || { echo DEV1_EXT4_RENAME_FAIL rc=${'$'}?; exit 35; }
+              echo DEV1_EXT4_DECOMPRESS_DONE
             else
               echo DEV1_EXT4_IMAGE_REUSE
             fi
@@ -277,20 +302,40 @@ class VmBridge : IVmBridge.Stub() {
               mount -t ext4 -o loop,rw,suid,dev,exec "${'$'}IMAGE" "${'$'}ROOT" 2>&1
               MRC=${'$'}?
               echo DEV1_EXT4_MOUNT_RC=${'$'}MRC
-              [ "${'$'}MRC" -eq 0 ] || exit 33
+              [ "${'$'}MRC" -eq 0 ] || exit 36
             fi
             echo DEV1_EXT4_MOUNT_INFO
-            grep " ${'$'}ROOT " /proc/mounts || { echo DEV1_EXT4_MOUNT_MISSING; exit 34; }
-            if grep " ${'$'}ROOT " /proc/mounts | grep -q noexec; then echo DEV1_EXT4_STILL_NOEXEC; exit 35; fi
+            grep " ${'$'}ROOT " /proc/mounts || { echo DEV1_EXT4_MOUNT_MISSING; exit 37; }
+            if grep " ${'$'}ROOT " /proc/mounts | grep -q noexec; then echo DEV1_EXT4_STILL_NOEXEC; exit 38; fi
+
+            LOOPDEV=${'$'}(grep " ${'$'}ROOT " /proc/mounts | head -1 | cut -d' ' -f1)
+            echo DEV1_LOOPDEV=${'$'}LOOPDEV
+            [ -n "${'$'}LOOPDEV" ] || { echo DEV1_LOOPDEV_MISSING; exit 39; }
+
+            CURRENT_BYTES=${'$'}(stat -c %s "${'$'}IMAGE" 2>/dev/null || echo 0)
+            if [ "${'$'}CURRENT_BYTES" -lt "${'$'}TARGET_BYTES" ]; then
+              echo DEV1_EXT4_GROW_START from=${'$'}CURRENT_BYTES to=${'$'}TARGET_BYTES
+              truncate -s "${'$'}TARGET_BYTES" "${'$'}IMAGE" || { echo DEV1_TRUNCATE_FAIL rc=${'$'}?; exit 40; }
+              /system/bin/toybox losetup -c "${'$'}LOOPDEV" 2>&1 || { echo DEV1_LOOP_CAPACITY_FAIL rc=${'$'}?; exit 41; }
+              [ -x /system/bin/resize2fs ] || { echo DEV1_RESIZE2FS_MISSING; ls -l /system/bin/resize2fs 2>&1 || true; exit 42; }
+              /system/bin/resize2fs "${'$'}LOOPDEV" 2>&1
+              RRC=${'$'}?
+              echo DEV1_RESIZE2FS_RC=${'$'}RRC
+              [ "${'$'}RRC" -eq 0 ] || exit 43
+              echo DEV1_EXT4_GROW_DONE
+            else
+              echo DEV1_EXT4_ALREADY_GROWN bytes=${'$'}CURRENT_BYTES
+            fi
+            df -h "${'$'}ROOT" 2>&1 || true
 
             echo DEV1_EXEC_TEST_START
-            chroot "${'$'}ROOT" /bin/sh -c 'echo DEV1_EXEC_ROOT_PASS' 2>&1 || { echo DEV1_EXEC_ROOT_FAIL rc=${'$'}?; exit 36; }
+            chroot "${'$'}ROOT" /bin/sh -c 'echo DEV1_EXEC_ROOT_PASS' 2>&1 || { echo DEV1_EXEC_ROOT_FAIL rc=${'$'}?; exit 44; }
 
             mkdir -p "${'$'}ROOT/dev" "${'$'}ROOT/proc" "${'$'}ROOT/sys" "${'$'}ROOT/tmp" "${'$'}ROOT/run" "${'$'}ROOT/dev/pts"
             chmod 1777 "${'$'}ROOT/tmp" || true
-            grep -q " ${'$'}ROOT/dev " /proc/mounts || mount --bind /dev "${'$'}ROOT/dev" 2>&1 || { echo DEV1_BIND_DEV_FAIL rc=${'$'}?; exit 41; }
-            grep -q " ${'$'}ROOT/proc " /proc/mounts || mount --bind /proc "${'$'}ROOT/proc" 2>&1 || { echo DEV1_BIND_PROC_FAIL rc=${'$'}?; exit 42; }
-            grep -q " ${'$'}ROOT/sys " /proc/mounts || mount --bind /sys "${'$'}ROOT/sys" 2>&1 || { echo DEV1_BIND_SYS_FAIL rc=${'$'}?; exit 43; }
+            grep -q " ${'$'}ROOT/dev " /proc/mounts || mount --bind /dev "${'$'}ROOT/dev" 2>&1 || { echo DEV1_BIND_DEV_FAIL rc=${'$'}?; exit 45; }
+            grep -q " ${'$'}ROOT/proc " /proc/mounts || mount --bind /proc "${'$'}ROOT/proc" 2>&1 || { echo DEV1_BIND_PROC_FAIL rc=${'$'}?; exit 46; }
+            grep -q " ${'$'}ROOT/sys " /proc/mounts || mount --bind /sys "${'$'}ROOT/sys" 2>&1 || { echo DEV1_BIND_SYS_FAIL rc=${'$'}?; exit 47; }
             printf '%s\n' 'nameserver 1.1.1.1' 'nameserver 8.8.8.8' > "${'$'}ROOT/etc/resolv.conf"
 
             if [ -x "${'$'}ROOT/debootstrap/debootstrap" ]; then
@@ -298,7 +343,7 @@ class VmBridge : IVmBridge.Stub() {
               chroot "${'$'}ROOT" /debootstrap/debootstrap --second-stage 2>&1
               DRC=${'$'}?
               echo DEV1_DEBOOTSTRAP_RC=${'$'}DRC
-              [ "${'$'}DRC" -eq 0 ] || exit 44
+              [ "${'$'}DRC" -eq 0 ] || exit 48
             fi
 
             cat > "${'$'}ROOT/etc/apt/sources.list" <<'EOF'
@@ -318,23 +363,26 @@ class VmBridge : IVmBridge.Stub() {
             sleep 1
             cat "${'$'}ROOT/run/dev1-bridge.log" 2>/dev/null || true
             BPID=${'$'}(cat "${'$'}ROOT/run/dev1-bridge.pid" 2>/dev/null || echo '')
-            [ -n "${'$'}BPID" ] && kill -0 "${'$'}BPID" 2>/dev/null || { echo DEV1_BRIDGE_NOT_RUNNING; exit 45; }
+            [ -n "${'$'}BPID" ] && kill -0 "${'$'}BPID" 2>/dev/null || { echo DEV1_BRIDGE_NOT_RUNNING; exit 49; }
             echo DEV1_BRIDGE_READY pid=${'$'}BPID
 
             touch "${'$'}ROOT/.dev1-rootfs-ready"
             echo DEV1_VERIFY_START
-            chroot "${'$'}ROOT" /bin/bash -lc 'cat /etc/os-release; echo ARCH=$(dpkg --print-architecture); apt-get --version | head -1; uname -a; id' 2>&1
+            chroot "${'$'}ROOT" /bin/bash -lc 'cat /etc/os-release; echo ARCH=$(dpkg --print-architecture); apt-get --version | head -1; uname -a; id; df -h /' 2>&1
             echo DEV1_PROVISION_DONE
         """.trimIndent()
         val out = adbShell(machine, script, 20L * 60L * 1000L)
-        append("[debian_provision_output]\n${out.takeLast(24000)}")
+        append("[debian_provision_output]\n${out.takeLast(32000)}")
+        check(out.contains("DEV1_EXT4_DECOMPRESS_DONE") || out.contains("DEV1_EXT4_IMAGE_REUSE")) {
+            "Debian ext4 seed provisioning failed. Guest output:\n${out.takeLast(30000)}"
+        }
         check(out.contains("DEV1_EXEC_ROOT_PASS") && out.contains("DEV1_PROVISION_DONE")) {
-            "Debian ext4 provisioning failed. Guest output:\n${out.takeLast(22000)}"
+            "Debian executable ext4 provisioning failed. Guest output:\n${out.takeLast(30000)}"
         }
         check(out.contains("Debian GNU/Linux 13") && out.contains("ARCH=arm64") && out.contains("DEV1_BRIDGE_READY")) {
-            "Debian rootfs verification failed. Guest output:\n${out.takeLast(22000)}"
+            "Debian rootfs verification failed. Guest output:\n${out.takeLast(30000)}"
         }
-        append("[debian_rootfs] PASS executable ext4 · ${debianAssetName()}")
+        append("[debian_rootfs] PASS compressed seed -> persistent executable ext4 · ${debianAssetName()}")
     }
 
     private fun verifyInternet(machine: Any) {
@@ -490,7 +538,7 @@ class VmBridge : IVmBridge.Stub() {
         return JSONObject().put("name", when (vmMode) { "debian" -> linuxVmName; "microdroid" -> gateVmName; else -> "" })
             .put("running", isRunning(machine)).put("rawVmStatus", machine?.let { runCatching { vmStatus(it) }.getOrDefault(-999) } ?: -999)
             .put("cid", -1).put("managed", machine != null).put("mode", vmMode).put("stage", stage)
-            .put("api", "VirtualMachineManager/connectVsock/Microdroid encrypted storage + executable loop ext4")
+            .put("api", "VirtualMachineManager/connectVsock/Microdroid encrypted storage + compressed ext4 seed + executable loop root")
             .put("vmRoot", machine?.let { runCatching { (AvfReflect.callOptional(it, "getRootDir") as? File)?.path ?: "" }.getOrDefault("") } ?: "")
             .put("dataDir", vmData.path).put("error", lastError).put("log", logSnapshot())
             .put("debianInstalled", bundleReady()).put("debianInstalling", installing.get()).put("installBytes", 0L).put("installTotal", -1L).put("installProgress", -1.0).put("installError", installError)
@@ -498,7 +546,7 @@ class VmBridge : IVmBridge.Stub() {
             .put("kdeInstalled", desktopMarker().isFile).put("kdeInstalling", desktopInstalling.get()).put("kdeStage", desktopStage).put("kdeError", desktopError)
             .put("vncReady", vncReady || desktopMarker().isFile).put("vncPort", ANDROID_VNC_PORT)
             .put("guestGraphics", if (desktopMarker().isFile) "Debian Plasma 6 via TigerVNC software framebuffer; hardware GPU still unproven" else "Debian pVM ready; desktop/GPU pending")
-            .put("debian", if (guestVerified) "Debian 13 userspace verified on executable loop-mounted ext4" else "embedded Debian ext4 bundle ${if (bundleReady()) "ready" else "missing"}")
+            .put("debian", if (guestVerified) "Debian 13 userspace verified on persistent executable loop-mounted ext4" else "embedded compressed Debian ext4 seed ${if (bundleReady()) "ready" else "missing"}")
             .put("debianVersion", debianAssetName()).put("adbRootReady", adbRootReady).toString()
     }
 
