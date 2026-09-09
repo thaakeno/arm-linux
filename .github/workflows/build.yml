@@ -43,17 +43,16 @@ jobs:
           sudo apt-get install -y debootstrap
           mkdir -p app/src/main/assets build/debian-rootfs
           sudo debootstrap --arch=arm64 --foreign --variant=minbase trixie build/debian-rootfs http://deb.debian.org/debian
-          sudo tar --numeric-owner \
-            --exclude='./dev/*' \
-            --exclude='./proc/*' \
-            --exclude='./sys/*' \
-            --exclude='./run/*' \
+          sudo find build/debian-rootfs -xdev \( -type b -o -type c -o -type p -o -type s \) -delete || true
+          sudo tar --format=posix --numeric-owner --owner=0 --group=0 \
+            --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' --exclude='./run/*' \
             -C build/debian-rootfs -czf app/src/main/assets/debian-rootfs.tar.gz .
           sudo chown "$USER:$USER" app/src/main/assets/debian-rootfs.tar.gz
           printf '%s\n' 'Debian GNU/Linux 13 (trixie) arm64 minbase' > app/src/main/assets/debian-version.txt
-          CXX="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++"
-          "$CXX" tools/dev1_guest_bridge.cpp -std=c++20 -O2 -fPIE -pie -pthread -Wl,--strip-all -o app/src/main/assets/dev1_guest_bridge
-          file app/src/main/assets/dev1_guest_bridge
+          TOOLCHAIN="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$TOOLCHAIN/aarch64-linux-android29-clang++" tools/dev1_guest_bridge.cpp -std=c++20 -O2 -fPIE -pie -pthread -Wl,--strip-all -o app/src/main/assets/dev1_guest_bridge
+          "$TOOLCHAIN/aarch64-linux-android29-clang" tools/dev1_gunzip.c -O2 -fPIE -pie -Wl,--strip-all -lz -o app/src/main/assets/dev1_gunzip
+          file app/src/main/assets/dev1_guest_bridge app/src/main/assets/dev1_gunzip
           tar -tzf app/src/main/assets/debian-rootfs.tar.gz | grep -E '^\./(etc/debian_version|debootstrap/debootstrap)$'
           if tar -tzf app/src/main/assets/debian-rootfs.tar.gz | grep -Eq '^\./dev/.+'; then
             echo 'Unexpected /dev payload entry in Debian archive' >&2
@@ -74,13 +73,7 @@ jobs:
             chmod 600 "$HOME/.android/debug.keystore"
             echo "STABLE_SIGNING=true" >> "$GITHUB_ENV"
           else
-            keytool -genkeypair -v \
-              -keystore "$HOME/.android/debug.keystore" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -dname "CN=Android Debug,O=Android,C=US" \
-              -keyalg RSA -keysize 2048 -validity 10000
+            keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey -keypass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
             chmod 600 "$HOME/.android/debug.keystore"
             echo "STABLE_SIGNING=false" >> "$GITHUB_ENV"
           fi
@@ -104,9 +97,9 @@ jobs:
               root_name='assets/debian-rootfs.tar' if 'assets/debian-rootfs.tar' in names else 'assets/debian-rootfs.tar.gz'
               raw=zin.read(root_name)
               gz=raw if root_name.endswith('.gz') else gzip.compress(raw, compresslevel=9, mtime=0)
-              helper=zin.read('assets/dev1_guest_bridge')
-              if not helper.startswith(b'\x7fELF'):
-                  raise SystemExit('dev1_guest_bridge is not an ELF executable')
+              for helper in ('assets/dev1_guest_bridge','assets/dev1_gunzip'):
+                  if not zin.read(helper).startswith(b'\x7fELF'):
+                      raise SystemExit(f'{helper} is not an ELF executable')
               with zipfile.ZipFile(dst, 'w', allowZip64=True) as zout:
                   for info in zin.infolist():
                       name=info.filename
@@ -134,15 +127,15 @@ jobs:
           import gzip, io, tarfile, zipfile
           apk='app/build/outputs/apk/debug/app-debug.apk'
           with zipfile.ZipFile(apk) as z:
-              data=z.read('assets/debian-rootfs.tar.gz')
-              raw=gzip.decompress(data)
+              raw=gzip.decompress(z.read('assets/debian-rootfs.tar.gz'))
               with tarfile.open(fileobj=io.BytesIO(raw), mode='r:') as t:
                   names=set(t.getnames())
                   assert './etc/debian_version' in names or 'etc/debian_version' in names
                   assert './debootstrap/debootstrap' in names or 'debootstrap/debootstrap' in names
                   assert not any(n.startswith('./dev/') or n.startswith('dev/') for n in names)
               assert z.read('assets/dev1_guest_bridge').startswith(b'\x7fELF')
-          print('APK Debian bundle verification: PASS')
+              assert z.read('assets/dev1_gunzip').startswith(b'\x7fELF')
+          print('APK Debian bundle + native extractor verification: PASS')
           PY
 
       - name: Verify APK Signature Schemes
@@ -157,17 +150,13 @@ jobs:
           cat <<EOF > verification.json
           {
             "commit": "${{ github.sha }}",
-            "version": "0.8.2-dev1",
+            "version": "0.8.3-dev1",
             "apk_signature_v3": "PASS",
-            "stable_signing": "${{ env.STABLE_SIGNING }}",
-            "debian_bundle": "DEBIAN 13 ARM64 MINBASE WITHOUT DEVICE NODES + DEBOOTSTRAP SECOND STAGE + HELPER VERIFIED IN CI",
-            "protected_vm_identity": "UNIQUE PER APK BUILD TO AVOID REUSING STALE MICRODROID INSTANCE",
+            "debian_bundle": "DEBIAN 13 ARM64 MINBASE NORMALIZED + NATIVE GUNZIP HELPER VERIFIED IN FINAL APK",
+            "extraction": "NATIVE ZLIB GUNZIP THEN TOYBOX UNCOMPRESSED TAR WITH OWNER/MTIME RESTORE DISABLED",
+            "protected_vm_identity": "UNIQUE PER APK VERSION CODE",
             "vsock_failfast": "ABORT WHEN VM LEAVES STATUS_RUNNING",
-            "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
-            "microdroid_gate_a": "PASS ON TARGET FROM PRIOR DEVICE TEST",
-            "linux_userspace": "DEBIAN 13 ROOTFS IN MICRODROID ENCRYPTED STORE; TARGET RETEST REQUIRED",
-            "network": "HOST-MEDIATED HTTP PROXY OVER VSOCK; TARGET RETEST REQUIRED",
-            "desktop": "PLASMA 6/TIGERVNC PROVISIONING; TARGET RETEST REQUIRED",
+            "runtime": "TARGET PHONE RETEST REQUIRED",
             "hardware_acceleration": "NOT PROVEN"
           }
           EOF
@@ -184,7 +173,7 @@ jobs:
           gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json apk-signature.txt --clobber
           gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("DreamLinux-") and endswith(".apk"))' | while IFS= read -r asset; do gh release delete-asset "$TAG" "$asset" --yes; done
           gh release upload "$TAG" build/deliverables/DreamLinux-*.apk --clobber
-          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.2-dev1. Each APK creates a fresh protected Microdroid VM identity and vsock retries stop immediately if the VM powers off. Debian archive excludes Linux device nodes. Runtime Debian/Internet/Plasma/GPU verification requires the target phone."
+          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.3-dev1. Debian extraction no longer depends on Microdroid gzip/tar compression support: the APK includes a native ARM64 zlib gunzip helper, then extracts a plain tar with Toybox. Runtime Debian/Internet/Plasma/GPU verification requires the target phone."
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
