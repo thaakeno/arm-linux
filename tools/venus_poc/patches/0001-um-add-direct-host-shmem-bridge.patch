@@ -1,33 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: DreamLinux Venus POC <noreply@example.com>
-Date: Wed, 9 Sep 2026 17:20:00 +0200
-Subject: [PATCH] um: add direct host shared-memory bridge
-
-Venus vtest passes vkr-shmem with SCM_RIGHTS and expects both sides to mmap
-exactly the same host-visible pages.  Byte mirroring over TCP is insufficient
-for the lock-free ring.
-
-Add a tiny UML-only bridge:
-
-* a host Unix control socket receives one memfd plus {id,size};
-* the memfd is registered as a pseudo-physical mapping;
-* phys_mapping() resolves that pseudo-physical range to the real host fd;
-* /dev/umshm lets guest userspace bind an id with a 4-byte write and mmap it;
-* remap_pfn_range() puts those pseudo PFNs in the guest page tables, so UML's
-  normal TLB path maps the real host memfd MAP_SHARED into the guest process.
-
-This is deliberately a POC for Venus and keeps a small fixed mapping table.
----
- arch/um/drivers/Makefile          |   1 +
- arch/um/drivers/umshm_kern.c      | 177 ++++++++++++++++++++++++++++++
- arch/um/include/shared/umshm.h    |  16 +++
- arch/um/kernel/physmem.c          |  75 ++++++++++++-
- 4 files changed, 268 insertions(+), 1 deletion(-)
- create mode 100644 arch/um/drivers/umshm_kern.c
- create mode 100644 arch/um/include/shared/umshm.h
-
 diff --git a/arch/um/drivers/Makefile b/arch/um/drivers/Makefile
-index 0a5a1c9..d1e3b78 100644
 --- a/arch/um/drivers/Makefile
 +++ b/arch/um/drivers/Makefile
 @@ -46,6 +46,7 @@ obj-$(CONFIG_UML_RTC) += rtc.o
@@ -38,12 +9,12 @@ index 0a5a1c9..d1e3b78 100644
  
  # pcap_user.o must be added explicitly.
  USER_OBJS := fd.o null.o pty.o tty.o xterm.o vector_user.o
+
 diff --git a/arch/um/include/shared/umshm.h b/arch/um/include/shared/umshm.h
 new file mode 100644
-index 0000000..fa7b87b
 --- /dev/null
 +++ b/arch/um/include/shared/umshm.h
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,17 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef __UM_UML_SHM_H
 +#define __UM_UML_SHM_H
@@ -55,7 +26,6 @@ index 0000000..fa7b87b
 +int uml_shm_lookup(__u32 id, unsigned long *phys_out,
 +		   unsigned long *len_out);
 +
-+/* The host control protocol is native-endian; host and UML are both arm64. */
 +struct uml_shm_host_msg {
 +	__u32 id;
 +	__u32 reserved;
@@ -63,319 +33,327 @@ index 0000000..fa7b87b
 +};
 +
 +#endif
-+diff --git a/arch/um/kernel/physmem.c b/arch/um/kernel/physmem.c
-+index 9ac086e..eef12b1 100644
-+--- a/arch/um/kernel/physmem.c
-++++ b/arch/um/kernel/physmem.c
-+@@ -7,6 +7,8 @@
-+ #include <linux/mm.h>
-+ #include <linux/pfn.h>
-+ #include <asm/page.h>
-++#include <linux/spinlock.h>
-++#include <linux/sizes.h>
-+ #include <asm/sections.h>
-+ #include <as-layout.h>
-+ #include <init.h>
-+@@ -14,10 +16,28 @@
-+ #include <mem_user.h>
-+ #include <os.h>
-++#include <umshm.h>
-+ 
-+ static int physmem_fd = -1;
-+ 
-++#define UML_SHM_MAX_MAPS 16
-++
-++struct uml_shm_map {
-++	bool used;
-++	__u32 id;
-++	int fd;
-++	unsigned long phys;
-++	unsigned long len;
-++};
-++
-++static struct uml_shm_map uml_shm_maps[UML_SHM_MAX_MAPS];
-++static DEFINE_SPINLOCK(uml_shm_lock);
-++static unsigned long uml_shm_next_phys;
-++
-+ /* Changed during early boot */
-+ unsigned long high_physmem;
-+ EXPORT_SYMBOL(high_physmem);
-+ 
-++int uml_shm_register(__u32 id, int host_fd, unsigned long len,
-++		     unsigned long *phys_out)
-++{
-++	unsigned long flags, rounded = PAGE_ALIGN(len);
-++	int i, free_slot = -1;
-++
-++	if (!id || host_fd < 0 || !len || !phys_out)
-++		return -EINVAL;
-++
-++	spin_lock_irqsave(&uml_shm_lock, flags);
-++	if (!uml_shm_next_phys)
-++		uml_shm_next_phys = PAGE_ALIGN(physmem_size + SZ_1G);
-++
-++	for (i = 0; i < UML_SHM_MAX_MAPS; i++) {
-++		if (uml_shm_maps[i].used && uml_shm_maps[i].id == id) {
-++			spin_unlock_irqrestore(&uml_shm_lock, flags);
-++			return -EEXIST;
-++		}
-++		if (!uml_shm_maps[i].used && free_slot < 0)
-++			free_slot = i;
-++	}
-++	if (free_slot < 0) {
-++		spin_unlock_irqrestore(&uml_shm_lock, flags);
-++		return -ENOSPC;
-++	}
-++
-++	uml_shm_maps[free_slot].used = true;
-++	uml_shm_maps[free_slot].id = id;
-++	uml_shm_maps[free_slot].fd = host_fd;
-++	uml_shm_maps[free_slot].phys = uml_shm_next_phys;
-++	uml_shm_maps[free_slot].len = rounded;
-++	*phys_out = uml_shm_next_phys;
-++	uml_shm_next_phys += rounded;
-++	spin_unlock_irqrestore(&uml_shm_lock, flags);
-++	return 0;
-++}
-++EXPORT_SYMBOL_GPL(uml_shm_register);
-++
-++int uml_shm_lookup(__u32 id, unsigned long *phys_out,
-++		   unsigned long *len_out)
-++{
-++	unsigned long flags;
-++	int i, ret = -ENOENT;
-++
-++	spin_lock_irqsave(&uml_shm_lock, flags);
-++	for (i = 0; i < UML_SHM_MAX_MAPS; i++) {
-++		if (!uml_shm_maps[i].used || uml_shm_maps[i].id != id)
-++			continue;
-++		*phys_out = uml_shm_maps[i].phys;
-++		*len_out = uml_shm_maps[i].len;
-++		ret = 0;
-++		break;
-++	}
-++	spin_unlock_irqrestore(&uml_shm_lock, flags);
-++	return ret;
-++}
-++EXPORT_SYMBOL_GPL(uml_shm_lookup);
-++
-+ void map_memory(unsigned long virt, unsigned long phys, unsigned long len,
-+ 		int r, int w, int x)
-+ {
-+@@ -86,12 +106,29 @@ int phys_mapping(unsigned long phys, unsigned long long *offset_out)
-+ {
-+ 	int fd = -1;
-++	unsigned long flags;
-++	int i;
-+ 
-+ 	if (phys < physmem_size) {
-+ 		fd = physmem_fd;
-+ 		*offset_out = phys;
-++		return fd;
-+ 	}
-+ 
-++	spin_lock_irqsave(&uml_shm_lock, flags);
-++	for (i = 0; i < UML_SHM_MAX_MAPS; i++) {
-++		struct uml_shm_map *m = &uml_shm_maps[i];
-++
-++		if (!m->used || phys < m->phys || phys >= m->phys + m->len)
-++			continue;
-++		fd = m->fd;
-++		*offset_out = phys - m->phys;
-++		break;
-++	}
-++	spin_unlock_irqrestore(&uml_shm_lock, flags);
-+ 	return fd;
-+ }
-+ EXPORT_SYMBOL(phys_mapping);
-+diff --git a/arch/um/drivers/umshm_kern.c b/arch/um/drivers/umshm_kern.c
-+new file mode 100644
-+index 0000000..3461f66
-+--- /dev/null
-++++ b/arch/um/drivers/umshm_kern.c
-+@@ -0,0 +1,177 @@
-++// SPDX-License-Identifier: GPL-2.0
-++/* Direct host memfd -> UML guest userspace bridge, initially for Venus. */
-++
-++#include <linux/delay.h>
-++#include <linux/fs.h>
-++#include <linux/kthread.h>
-++#include <linux/miscdevice.h>
-++#include <linux/mm.h>
-++#include <linux/module.h>
-++#include <linux/slab.h>
-++#include <linux/uaccess.h>
-++#include <linux/types.h>
-++#include <linux/string.h>
-++#include <os.h>
-++#include <shared/init.h>
-++#include <umshm.h>
-++
-++#define UML_SHM_PATH_MAX 108
-++
-++struct uml_shm_ack {
-++	__u32 id;
-++	__s32 status;
-++};
-++
-++static char uml_shm_socket[UML_SHM_PATH_MAX];
-++static struct task_struct *uml_shm_thread;
-++
-++static int uml_shm_arg(char *line, int *add)
-++{
-++	*add = 0;
-++	strscpy(uml_shm_socket, line, sizeof(uml_shm_socket));
-++	return 0;
-++}
-++
-++__uml_setup("umshm_sock=", uml_shm_arg,
-++"umshm_sock=<host unix socket>\n"
-++"    Receive host memfds for /dev/umshm mappings.\n\n"
-++);
-++
-++static int uml_shm_control(void *unused)
-++{
-++	int sock = -1;
-++
-++	while (!kthread_should_stop()) {
-++		if (sock < 0) {
-++			if (!uml_shm_socket[0])
-++				return 0;
-++			sock = os_connect_socket(uml_shm_socket);
-++			if (sock < 0) {
-++				msleep(100);
-++				continue;
-++			}
-++			pr_info("umshm: connected to host control socket %s\n",
-++				uml_shm_socket);
-++		}
-++
-++		for (;;) {
-++			struct uml_shm_host_msg msg;
-++			struct uml_shm_ack ack;
-++			unsigned long phys;
-++			int fd = -1;
-++			ssize_t n;
-++			int ret;
-++
-++			if (kthread_should_stop())
-++				goto out;
-++
-++			n = os_rcv_fd_msg(sock, &fd, 1, &msg, sizeof(msg));
-++			if (n <= 0) {
-++				os_close_file(sock);
-++				sock = -1;
-++				break;
-++			}
-++			if (n != sizeof(msg) || fd < 0) {
-++				if (fd >= 0)
-++					os_close_file(fd);
-++				continue;
-++			}
-++
-++			if (!msg.size || msg.size > ULONG_MAX)
-++				ret = -EINVAL;
-++			else
-++				ret = uml_shm_register(msg.id, fd,
-++						       (unsigned long)msg.size, &phys);
-++
-++			if (ret)
-++				os_close_file(fd);
-++			else
-++				pr_info("umshm: id=%u size=%llu phys=0x%lx fd=%d\n",
-++					msg.id, (unsigned long long)msg.size, phys, fd);
-++
-++			ack.id = msg.id;
-++			ack.status = ret;
-++			os_write_file(sock, &ack, sizeof(ack));
-++		}
-++	}
-++out:
-++	if (sock >= 0)
-++		os_close_file(sock);
-++	return 0;
-++}
-++
-++static int uml_shm_open(struct inode *inode, struct file *file)
-++{
-++	file->private_data = NULL;
-++	return 0;
-++}
-++
-++static ssize_t uml_shm_write(struct file *file, const char __user *buf,
-++			     size_t len, loff_t *ppos)
-++{
-++	__u32 id;
-++	unsigned long phys, map_len;
-++	int ret;
-++
-++	if (len != sizeof(id))
-++		return -EINVAL;
-++	if (copy_from_user(&id, buf, sizeof(id)))
-++		return -EFAULT;
-++	ret = uml_shm_lookup(id, &phys, &map_len);
-++	if (ret)
-++		return ret;
-++	file->private_data = (void *)(uintptr_t)id;
-++	return sizeof(id);
-++}
-++
-++static int uml_shm_mmap(struct file *file, struct vm_area_struct *vma)
-++{
-++	__u32 id = (__u32)(uintptr_t)file->private_data;
-++	unsigned long phys, map_len;
-++	unsigned long len = vma->vm_end - vma->vm_start;
-++	int ret;
-++
-++	if (!id)
-++		return -EINVAL;
-++	ret = uml_shm_lookup(id, &phys, &map_len);
-++	if (ret)
-++		return ret;
-++	if (vma->vm_pgoff || !len || len > map_len)
-++		return -EINVAL;
-++
-++	vma->vm_flags |= VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP;
-++	return remap_pfn_range(vma, vma->vm_start, phys >> PAGE_SHIFT,
-++			       len, vma->vm_page_prot);
-++}
-++
-++static const struct file_operations uml_shm_fops = {
-++	.owner = THIS_MODULE,
-++	.open = uml_shm_open,
-++	.write = uml_shm_write,
-++	.mmap = uml_shm_mmap,
-++	.llseek = no_llseek,
-++};
-++
-++static struct miscdevice uml_shm_misc = {
-++	.minor = MISC_DYNAMIC_MINOR,
-++	.name = "umshm",
-++	.fops = &uml_shm_fops,
-++	.mode = 0666,
-++};
-++
-++static int __init uml_shm_init(void)
-++{
-++	int ret;
-++
-++	ret = misc_register(&uml_shm_misc);
-++	if (ret)
-++		return ret;
-++
-++	if (uml_shm_socket[0]) {
-++		uml_shm_thread = kthread_run(uml_shm_control, NULL, "umshm-host");
-++		if (IS_ERR(uml_shm_thread)) {
-++			ret = PTR_ERR(uml_shm_thread);
-++			misc_deregister(&uml_shm_misc);
-++			return ret;
-++		}
-++	}
-++
-++	pr_info("umshm: /dev/umshm ready\n");
-++	return 0;
-++}
-++device_initcall(uml_shm_init);
+
+diff --git a/arch/um/kernel/physmem.c b/arch/um/kernel/physmem.c
+--- a/arch/um/kernel/physmem.c
++++ b/arch/um/kernel/physmem.c
+@@ -6,6 +6,8 @@
+ #include <linux/memblock.h>
+ #include <linux/mm.h>
+ #include <linux/pfn.h>
++#include <linux/sizes.h>
++#include <linux/spinlock.h>
+ #include <asm/page.h>
+ #include <asm/sections.h>
+ #include <as-layout.h>
+@@ -14,11 +16,71 @@
+ #include <mem_user.h>
+ #include <os.h>
++#include <umshm.h>
+ 
+ static int physmem_fd = -1;
+ 
++#define UML_SHM_MAX_MAPS 16
 +
-+-- 
-+2.51.0
++struct uml_shm_map {
++	bool used;
++	__u32 id;
++	int fd;
++	unsigned long phys;
++	unsigned long len;
++};
++
++static struct uml_shm_map uml_shm_maps[UML_SHM_MAX_MAPS];
++static DEFINE_SPINLOCK(uml_shm_lock);
++static unsigned long uml_shm_next_phys;
++
+ /* Changed during early boot */
+ unsigned long high_physmem;
+ EXPORT_SYMBOL(high_physmem);
+ 
++int uml_shm_register(__u32 id, int host_fd, unsigned long len,
++		     unsigned long *phys_out)
++{
++	unsigned long flags;
++	unsigned long rounded = PAGE_ALIGN(len);
++	int i, free_slot = -1;
++
++	if (!id || host_fd < 0 || !len || !phys_out)
++		return -EINVAL;
++
++	spin_lock_irqsave(&uml_shm_lock, flags);
++	if (!uml_shm_next_phys)
++		uml_shm_next_phys = PAGE_ALIGN(physmem_size + SZ_1G);
++
++	for (i = 0; i < UML_SHM_MAX_MAPS; i++) {
++		if (uml_shm_maps[i].used && uml_shm_maps[i].id == id) {
++			spin_unlock_irqrestore(&uml_shm_lock, flags);
++			return -EEXIST;
++		}
++		if (!uml_shm_maps[i].used && free_slot < 0)
++			free_slot = i;
++	}
++
++	if (free_slot < 0) {
++		spin_unlock_irqrestore(&uml_shm_lock, flags);
++		return -ENOSPC;
++	}
++
++	uml_shm_maps[free_slot].used = true;
++	uml_shm_maps[free_slot].id = id;
++	uml_shm_maps[free_slot].fd = host_fd;
++	uml_shm_maps[free_slot].phys = uml_shm_next_phys;
++	uml_shm_maps[free_slot].len = rounded;
++	*phys_out = uml_shm_next_phys;
++	uml_shm_next_phys += rounded;
++
++	spin_unlock_irqrestore(&uml_shm_lock, flags);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(uml_shm_register);
++
++int uml_shm_lookup(__u32 id, unsigned long *phys_out,
++		   unsigned long *len_out)
++{
++	unsigned long flags;
++	int i, ret = -ENOENT;
++
++	spin_lock_irqsave(&uml_shm_lock, flags);
++	for (i = 0; i < UML_SHM_MAX_MAPS; i++) {
++		if (!uml_shm_maps[i].used || uml_shm_maps[i].id != id)
++			continue;
++		*phys_out = uml_shm_maps[i].phys;
++		*len_out = uml_shm_maps[i].len;
++		ret = 0;
++		break;
++	}
++	spin_unlock_irqrestore(&uml_shm_lock, flags);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(uml_shm_lookup);
++
+ void map_memory(unsigned long virt, unsigned long phys, unsigned long len,
+ 		int r, int w, int x)
+ {
+@@ -86,12 +148,29 @@ int phys_mapping(unsigned long phys, unsigned long long *offset_out)
+ {
+ 	int fd = -1;
++	unsigned long flags;
++	int i;
+ 
+ 	if (phys < physmem_size) {
+ 		fd = physmem_fd;
+ 		*offset_out = phys;
++		return fd;
+ 	}
+ 
++	spin_lock_irqsave(&uml_shm_lock, flags);
++	for (i = 0; i < UML_SHM_MAX_MAPS; i++) {
++		struct uml_shm_map *m = &uml_shm_maps[i];
++
++		if (!m->used || phys < m->phys || phys >= m->phys + m->len)
++			continue;
++
++		fd = m->fd;
++		*offset_out = phys - m->phys;
++		break;
++	}
++	spin_unlock_irqrestore(&uml_shm_lock, flags);
++
+ 	return fd;
+ }
+ EXPORT_SYMBOL(phys_mapping);
+
+diff --git a/arch/um/drivers/umshm_kern.c b/arch/um/drivers/umshm_kern.c
+new file mode 100644
+--- /dev/null
++++ b/arch/um/drivers/umshm_kern.c
+@@ -0,0 +1,169 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Direct host memfd -> UML guest userspace bridge, initially for Venus. */
++
++#include <linux/delay.h>
++#include <linux/fs.h>
++#include <linux/kthread.h>
++#include <linux/limits.h>
++#include <linux/miscdevice.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++#include <os.h>
++#include <shared/init.h>
++#include <umshm.h>
++
++#define UML_SHM_PATH_MAX 108
++
++struct uml_shm_ack {
++	__u32 id;
++	__s32 status;
++};
++
++static char uml_shm_socket[UML_SHM_PATH_MAX];
++static struct task_struct *uml_shm_thread;
++
++static int uml_shm_arg(char *line, int *add)
++{
++	*add = 0;
++	strscpy(uml_shm_socket, line, sizeof(uml_shm_socket));
++	return 0;
++}
++
++__uml_setup("umshm_sock=", uml_shm_arg,
++"umshm_sock=<host unix socket>\n"
++"    Receive host memfds for /dev/umshm mappings.\n\n"
++);
++
++static int uml_shm_control(void *unused)
++{
++	int sock = -1;
++
++	while (!kthread_should_stop()) {
++		if (sock < 0) {
++			if (!uml_shm_socket[0])
++				return 0;
++
++			sock = os_connect_socket(uml_shm_socket);
++			if (sock < 0) {
++				msleep(100);
++				continue;
++			}
++
++			pr_info("umshm: connected to host control socket %s\n",
++				uml_shm_socket);
++		}
++
++		for (;;) {
++			struct uml_shm_host_msg msg;
++			struct uml_shm_ack ack;
++			unsigned long phys;
++			int fd = -1;
++			ssize_t n;
++			int ret;
++
++			if (kthread_should_stop())
++				goto out;
++
++			n = os_rcv_fd_msg(sock, &fd, 1, &msg, sizeof(msg));
++			if (n <= 0) {
++				os_close_file(sock);
++				sock = -1;
++				break;
++			}
++
++			if (n != sizeof(msg) || fd < 0) {
++				if (fd >= 0)
++					os_close_file(fd);
++				continue;
++			}
++
++			if (!msg.size || msg.size > (u64)ULONG_MAX)
++				ret = -EINVAL;
++			else
++				ret = uml_shm_register(msg.id, fd,
++						       (unsigned long)msg.size, &phys);
++
++			if (ret)
++				os_close_file(fd);
++			else
++				pr_info("umshm: id=%u size=%llu phys=0x%lx fd=%d\n",
++					msg.id, (unsigned long long)msg.size, phys, fd);
++
++			ack.id = msg.id;
++			ack.status = ret;
++			os_write_file(sock, &ack, sizeof(ack));
++		}
++	}
++
++out:
++	if (sock >= 0)
++		os_close_file(sock);
++	return 0;
++}
++
++static int uml_shm_open(struct inode *inode, struct file *file)
++{
++	file->private_data = NULL;
++	return 0;
++}
++
++static ssize_t uml_shm_write(struct file *file, const char __user *buf,
++			     size_t len, loff_t *ppos)
++{
++	__u32 id;
++	unsigned long phys, map_len;
++	int ret;
++
++	if (len != sizeof(id))
++		return -EINVAL;
++	if (copy_from_user(&id, buf, sizeof(id)))
++		return -EFAULT;
++
++	ret = uml_shm_lookup(id, &phys, &map_len);
++	if (ret)
++		return ret;
++
++	file->private_data = (void *)(unsigned long)id;
++	return sizeof(id);
++}
++
++static int uml_shm_mmap(struct file *file, struct vm_area_struct *vma)
++{
++	__u32 id = (__u32)(unsigned long)file->private_data;
++	unsigned long phys, map_len;
++	unsigned long len = vma->vm_end - vma->vm_start;
++	int ret;
++
++	if (!id)
++		return -EINVAL;
++
++	ret = uml_shm_lookup(id, &phys, &map_len);
++	if (ret)
++		return ret;
++	if (vma->vm_pgoff || !len || len > map_len)
++		return -EINVAL;
++
++	vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
++	return remap_pfn_range(vma, vma->vm_start, phys >> PAGE_SHIFT,
++			       len, vma->vm_page_prot);
++}
++
++static const struct file_operations uml_shm_fops = {
++	.owner = THIS_MODULE,
++	.open = uml_shm_open,
++	.write = uml_shm_write,
++	.mmap = uml_shm_mmap,
++	.llseek = no_llseek,
++};
++
++static struct miscdevice uml_shm_misc = {
++	.minor = MISC_DYNAMIC_MINOR,
++	.name = "umshm",
++	.fops = &uml_shm_fops,
++	.mode = 0666,
++};
++
++static int __init uml_shm_init(void)
++{
++	int ret;
++
++	ret = misc_register(&uml_shm_misc);
++	if (ret)
++		return ret;
++
++	if (uml_shm_socket[0]) {
++		uml_shm_thread = kthread_run(uml_shm_control, NULL, "umshm-host");
++		if (IS_ERR(uml_shm_thread)) {
++			ret = PTR_ERR(uml_shm_thread);
++			misc_deregister(&uml_shm_misc);
++			return ret;
++		}
++	}
++
++	pr_info("umshm: /dev/umshm ready\n");
++	return 0;
++}
++device_initcall(uml_shm_init);
