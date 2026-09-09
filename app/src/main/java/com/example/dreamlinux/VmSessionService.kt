@@ -48,9 +48,8 @@ class VmSessionService : Service() {
     private var successfulGateACommands=0
     private var reconnectProbeArmed=false
 
-    // New process suffix guarantees an old Debian-era UserService cannot survive an APK update.
     private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,AsyncVmBridge::class.java))
-        .daemon(false).processNameSuffix("vm_bridge_alpine").debuggable(true).version(BuildConfig.VERSION_CODE) }
+        .daemon(false).processNameSuffix("vm_bridge_debian08").debuggable(true).version(BuildConfig.VERSION_CODE) }
 
     private val connection=object:ServiceConnection {
         override fun onServiceConnected(name:ComponentName,binder:IBinder) {
@@ -79,7 +78,7 @@ class VmSessionService : Service() {
                 .put("running",current.running).put("name",current.name).put("mode",current.mode)
                 .put("stage",current.stage).put("api",current.api).put("vmRoot",current.vmRoot)
                 .put("linuxStarting",current.debianStarting)
-                .put("alpineBundleReady",current.debianInstalled)
+                .put("debianBundleReady",current.debianInstalled)
                 .put("desktopInstalled",current.kdeInstalled).put("desktopInstalling",current.kdeInstalling).put("desktopStage",current.kdeStage)
                 .put("internetReady",current.internetReady).put("internetStage",current.internetStage)
                 .put("graphics",current.graphics).put("capabilities",current.capabilities)
@@ -107,7 +106,7 @@ class VmSessionService : Service() {
             error.isNotBlank() -> error
             desktopError.isNotBlank() -> desktopError
             installError.isNotBlank() -> installError
-            linuxStarting -> "Starting Alpine pVM · ${obj.optLong("startupElapsedSeconds",0L)}s · ${humanStage(obj.optString("stage"))}"
+            linuxStarting -> "Starting Debian pVM · ${obj.optLong("startupElapsedSeconds",0L)}s · ${humanStage(obj.optString("stage"))}"
             obj.optBoolean("kdeInstalling") -> "Desktop: ${obj.optString("kdeStage","working")}"
             else -> humanStage(obj.optString("stage","unknown"))
         }
@@ -125,17 +124,17 @@ class VmSessionService : Service() {
     }
 
     private fun humanStage(stage:String):String = when(stage) {
-        "config:alpine_pvm" -> "Preparing trusted Microdroid pVM"
-        "vm_create:alpine" -> "Creating Alpine pVM"
-        "vm_start:alpine" -> "Starting protected VM"
-        "vm_wait_running:alpine" -> "Waiting for AVF"
-        "running:alpine" -> "Microdroid running"
+        "config:debian_pvm" -> "Preparing trusted Microdroid pVM"
+        "vm_create:debian" -> "Creating Debian pVM"
+        "vm_start:debian" -> "Starting protected VM"
+        "vm_wait_running:debian" -> "Waiting for AVF"
+        "running:debian" -> "Microdroid running"
         "microdroid_adb_root" -> "Enabling VM-local root"
-        "alpine_provision" -> "Preparing Alpine userspace"
-        "internet_bridge" -> "Connecting Alpine to phone Internet"
-        "alpine_ready" -> "Alpine Linux ready"
-        "desktop_packages" -> "Installing XFCE desktop"
-        "desktop_ready" -> "XFCE desktop ready"
+        "debian_provision" -> "Preparing Debian 13 userspace"
+        "internet_bridge" -> "Connecting Debian to phone Internet"
+        "debian_ready" -> "Debian 13 ready"
+        "desktop_packages" -> "Installing Plasma 6 desktop"
+        "desktop_ready" -> "Plasma 6 desktop ready"
         "guest_command_pass" -> "Gate A guest command passed"
         else -> if(stage.startsWith("blocked:")) "Blocked: ${stage.removePrefix("blocked:")}" else "Stage: $stage"
     }
@@ -176,7 +175,7 @@ class VmSessionService : Service() {
             }
             delay(400)
         }
-        throw IllegalStateException("Alpine startup exceeded 12 minutes; check diagnostics")
+        throw IllegalStateException("Debian startup exceeded 12 minutes; check diagnostics")
     }
 
     fun startVm()=operation { b ->
@@ -189,14 +188,14 @@ class VmSessionService : Service() {
         pendingSurface=null
         applyStatus(withContext(Dispatchers.IO){b.stopVm()})
         if(successfulGateACommands>0) reconnectProbeArmed=true
-        state.value=state.value.copy(message="Linux VM stopped; encrypted Alpine data retained")
+        state.value=state.value.copy(message="Linux VM stopped; encrypted Debian data retained")
     }
 
     fun installDebian()=operation("linux") { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
 
     fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation("linux") { b ->
         pendingSurface=null
-        state.value=state.value.copy(message="Launching Alpine pVM…")
+        state.value=state.value.copy(message="Launching Debian 13 pVM…")
         applyStatus(withContext(Dispatchers.IO){b.startDebian(width,height,dpi,refreshRate)})
         waitForLinuxStartup(b)
         refresh()
@@ -204,7 +203,7 @@ class VmSessionService : Service() {
 
     fun startDebianDiagnostic()=operation("linux") { b ->
         pendingSurface=null
-        state.value=state.value.copy(message="Launching Alpine diagnostic…")
+        state.value=state.value.copy(message="Launching Debian diagnostic…")
         applyStatus(withContext(Dispatchers.IO){b.startDebianDiagnostic()})
         waitForLinuxStartup(b)
         refresh()
@@ -212,7 +211,6 @@ class VmSessionService : Service() {
 
     fun installKde()=operation("linux") { b ->
         applyStatus(withContext(Dispatchers.IO){b.installKde()})
-        // installKde starts its own guest worker; status polling shows package progress.
         refresh()
     }
 
@@ -220,11 +218,11 @@ class VmSessionService : Service() {
         waitForVmRunning(b,60_000L)
         val reply=withContext(Dispatchers.IO){b.debianConsole(command)}
         val result=JSONObject(reply)
-        check(result.optBoolean("ok")) { result.optString("error","Alpine command failed") }
+        check(result.optBoolean("ok")) { result.optString("error","Debian command failed") }
         val output=result.optString("output")
         state.value=state.value.copy(
             debianTerminal=(state.value.debianTerminal+"\n# $command\n$output").takeLast(256000),
-            message="Alpine command completed")
+            message="Debian command completed")
         refresh()
     }
 
