@@ -225,9 +225,7 @@ class VmBridge : IVmBridge.Stub() {
     }
 
     private fun bundleReady(): Boolean = runCatching {
-        baseContext().assets.open("debian-rootfs.tar.gz").use { it.read() >= 0 } &&
-        baseContext().assets.open("dev1_guest_bridge").use { it.read() >= 0 } &&
-        baseContext().assets.open("dev1_gunzip").use { it.read() >= 0 }
+        baseContext().assets.open("debian-rootfs.tar.gz").use { it.read() >= 0 }
     }.getOrDefault(false)
 
     private fun debianAssetName(): String = runCatching {
@@ -235,7 +233,7 @@ class VmBridge : IVmBridge.Stub() {
     }.getOrDefault("Debian GNU/Linux 13 (trixie) arm64 minbase")
 
     override fun installDebian(): String {
-        installError = if (bundleReady()) "" else "Embedded Debian/rootfs helpers are missing from this APK"
+        installError = if (bundleReady()) "" else "Embedded Debian rootfs is missing from this APK"
         stage = if (bundleReady()) "debian_bundle_ready" else "blocked:debian_bundle_missing"
         append("Debian bundle ${if (bundleReady()) "ready" else "missing"}: ${debianAssetName()}")
         return status()
@@ -247,7 +245,7 @@ class VmBridge : IVmBridge.Stub() {
     private fun startLinuxMode(): String {
         lastError = ""; guestVerified = false; internetReady = false; internetStage = "starting"
         return try {
-            check(bundleReady()) { "Debian 13 rootfs/helper bundle is missing from APK" }
+            check(bundleReady()) { "Debian 13 rootfs bundle is missing from APK" }
             if (isRunning(vm)) stopInternal()
             val context = redirectedContext()
             stage = "config:debian_pvm"
@@ -288,77 +286,76 @@ class VmBridge : IVmBridge.Stub() {
             ROOT=$DEBIAN_ROOT
             ASSET=/mnt/apk/assets/debian-rootfs.tar.gz
             TMP=/mnt/encryptedstore/dev1-debian-rootfs.tar
-            GUNZIP=/data/local/tmp/dev1_gunzip
-            BRIDGE=/data/local/tmp/dev1_guest_bridge
+            GUNZIP=/mnt/encryptedstore/dev1_gunzip
             echo DEV1_PROVISION_BEGIN
-            echo UID=$(id -u)
+            echo UID=${'$'}(id -u)
             echo ASSET_INFO
-            ls -l "$ASSET" /mnt/apk/assets/dev1_gunzip /mnt/apk/assets/dev1_guest_bridge 2>&1 || true
+            ls -l "${'$'}ASSET" /mnt/apk/assets/dev1_gunzip 2>&1 || true
             echo STORAGE_INFO
             df -h /mnt/encryptedstore 2>&1 || true
-            mkdir -p "$ROOT"
-            if [ ! -f "$ROOT/.dev1-rootfs-ready" ]; then
+            mount | grep ' /mnt/encryptedstore ' || true
+            mkdir -p "${'$'}ROOT"
+            if [ ! -f "${'$'}ROOT/.dev1-rootfs-ready" ]; then
               echo DEV1_DEBIAN_UNPACK_START
-              rm -rf "$ROOT"/* "$ROOT"/.[!.]* "$ROOT"/..?* 2>/dev/null || true
-              cp /mnt/apk/assets/dev1_gunzip "$GUNZIP" || { echo DEV1_GUNZIP_COPY_FAIL rc=$?; exit 31; }
-              chmod 755 "$GUNZIP" || { echo DEV1_GUNZIP_CHMOD_FAIL rc=$?; exit 32; }
-              rm -f "$TMP"
-              "$GUNZIP" "$ASSET" "$TMP" 2>&1
-              GZRC=$?
-              echo DEV1_GUNZIP_RC=$GZRC
-              [ "$GZRC" -eq 0 ] || exit 33
-              ls -lh "$TMP" 2>&1 || true
-              echo DEV1_TAR_HELP
-              toybox tar --help 2>&1 | head -20 || true
+              rm -rf "${'$'}ROOT"/* "${'$'}ROOT"/.[!.]* "${'$'}ROOT"/..?* 2>/dev/null || true
+              rm -f "${'$'}TMP"
+              if toybox gzip --help >/dev/null 2>&1; then
+                echo DEV1_GUNZIP_PATH=toybox
+                toybox gzip -dc "${'$'}ASSET" > "${'$'}TMP" 2>&1
+                GZRC=${'$'}?
+              else
+                echo DEV1_GUNZIP_PATH=encryptedstore_helper
+                cp /mnt/apk/assets/dev1_gunzip "${'$'}GUNZIP" || { echo DEV1_GUNZIP_COPY_FAIL rc=${'$'}?; exit 31; }
+                chmod 755 "${'$'}GUNZIP" || { echo DEV1_GUNZIP_CHMOD_FAIL rc=${'$'}?; exit 32; }
+                "${'$'}GUNZIP" "${'$'}ASSET" "${'$'}TMP" 2>&1
+                GZRC=${'$'}?
+              fi
+              echo DEV1_GUNZIP_RC=${'$'}GZRC
+              [ "${'$'}GZRC" -eq 0 ] || exit 33
+              ls -lh "${'$'}TMP" 2>&1 || true
               echo DEV1_TAR_EXTRACT_START
-              toybox tar -xomf "$TMP" -C "$ROOT" 2>&1
-              TRC=$?
-              echo DEV1_TAR_RC=$TRC
-              [ "$TRC" -eq 0 ] || exit 34
-              rm -f "$TMP"
+              toybox tar -xomf "${'$'}TMP" -C "${'$'}ROOT" 2>&1
+              TRC=${'$'}?
+              echo DEV1_TAR_RC=${'$'}TRC
+              [ "${'$'}TRC" -eq 0 ] || exit 34
+              rm -f "${'$'}TMP"
               echo DEV1_DEBIAN_UNPACK_DONE
             fi
-            mkdir -p "$ROOT/dev" "$ROOT/proc" "$ROOT/sys" "$ROOT/tmp" "$ROOT/run" "$ROOT/dev/pts"
-            chmod 1777 "$ROOT/tmp" || true
-            grep -q " $ROOT/dev " /proc/mounts || mount --bind /dev "$ROOT/dev" 2>&1 || { echo DEV1_BIND_DEV_FAIL rc=$?; exit 41; }
-            grep -q " $ROOT/proc " /proc/mounts || mount --bind /proc "$ROOT/proc" 2>&1 || { echo DEV1_BIND_PROC_FAIL rc=$?; exit 42; }
-            grep -q " $ROOT/sys " /proc/mounts || mount --bind /sys "$ROOT/sys" 2>&1 || { echo DEV1_BIND_SYS_FAIL rc=$?; exit 43; }
-            printf '%s\n' 'nameserver 1.1.1.1' 'nameserver 8.8.8.8' > "$ROOT/etc/resolv.conf"
-            if [ -x "$ROOT/debootstrap/debootstrap" ]; then
+            mkdir -p "${'$'}ROOT/dev" "${'$'}ROOT/proc" "${'$'}ROOT/sys" "${'$'}ROOT/tmp" "${'$'}ROOT/run" "${'$'}ROOT/dev/pts"
+            chmod 1777 "${'$'}ROOT/tmp" || true
+            grep -q " ${'$'}ROOT/dev " /proc/mounts || mount --bind /dev "${'$'}ROOT/dev" 2>&1 || { echo DEV1_BIND_DEV_FAIL rc=${'$'}?; exit 41; }
+            grep -q " ${'$'}ROOT/proc " /proc/mounts || mount --bind /proc "${'$'}ROOT/proc" 2>&1 || { echo DEV1_BIND_PROC_FAIL rc=${'$'}?; exit 42; }
+            grep -q " ${'$'}ROOT/sys " /proc/mounts || mount --bind /sys "${'$'}ROOT/sys" 2>&1 || { echo DEV1_BIND_SYS_FAIL rc=${'$'}?; exit 43; }
+            printf '%s\n' 'nameserver 1.1.1.1' 'nameserver 8.8.8.8' > "${'$'}ROOT/etc/resolv.conf"
+            if [ -x "${'$'}ROOT/debootstrap/debootstrap" ]; then
               echo DEV1_DEBOOTSTRAP_SECOND_STAGE
-              chroot "$ROOT" /debootstrap/debootstrap --second-stage 2>&1
-              DRC=$?
-              echo DEV1_DEBOOTSTRAP_RC=$DRC
-              [ "$DRC" -eq 0 ] || exit 44
+              chroot "${'$'}ROOT" /debootstrap/debootstrap --second-stage 2>&1
+              DRC=${'$'}?
+              echo DEV1_DEBOOTSTRAP_RC=${'$'}DRC
+              [ "${'$'}DRC" -eq 0 ] || exit 44
             fi
-            cat > "$ROOT/etc/apt/sources.list" <<'EOF'
+            cat > "${'$'}ROOT/etc/apt/sources.list" <<'EOF'
             deb http://deb.debian.org/debian trixie main
             deb http://deb.debian.org/debian trixie-updates main
             deb http://security.debian.org/debian-security trixie-security main
             EOF
-            mkdir -p "$ROOT/etc/apt/apt.conf.d"
-            cat > "$ROOT/etc/apt/apt.conf.d/80dev1proxy" <<'EOF'
+            mkdir -p "${'$'}ROOT/etc/apt/apt.conf.d"
+            cat > "${'$'}ROOT/etc/apt/apt.conf.d/80dev1proxy" <<'EOF'
             Acquire::http::Proxy "http://127.0.0.1:3128";
             Acquire::https::Proxy "http://127.0.0.1:3128";
             EOF
-            cp /mnt/apk/assets/dev1_guest_bridge "$BRIDGE" || exit 45
-            chmod 755 "$BRIDGE"
-            pkill -f "$BRIDGE" 2>/dev/null || true
-            ("$BRIDGE" >/data/local/tmp/dev1-bridge.log 2>&1 &)
-            sleep 1
-            cat /data/local/tmp/dev1-bridge.log 2>/dev/null || true
-            touch "$ROOT/.dev1-rootfs-ready"
+            touch "${'$'}ROOT/.dev1-rootfs-ready"
             echo DEV1_VERIFY_START
-            chroot "$ROOT" /bin/bash -lc 'cat /etc/os-release; echo ARCH=$(dpkg --print-architecture); apt-get --version | head -1; uname -a; id' 2>&1
+            chroot "${'$'}ROOT" /bin/bash -lc 'cat /etc/os-release; echo ARCH=$(dpkg --print-architecture); apt-get --version | head -1; uname -a; id' 2>&1
             echo DEV1_PROVISION_DONE
         """.trimIndent()
-        val out = adbShell(machine, script, 240_000L)
-        append("[debian_provision_output]\n${out.takeLast(14000)}")
+        val out = adbShell(machine, script, 300_000L)
+        append("[debian_provision_output]\n${out.takeLast(16000)}")
         check(out.contains("DEV1_DEBIAN_UNPACK_DONE") || out.contains("DEV1_PROVISION_DONE")) {
-            "Debian extraction failed. Guest output:\n${out.takeLast(12000)}"
+            "Debian extraction failed. Guest output:\n${out.takeLast(14000)}"
         }
         check(out.contains("Debian GNU/Linux 13") && out.contains("ARCH=arm64") && out.contains("DEV1_PROVISION_DONE")) {
-            "Debian rootfs verification failed. Guest output:\n${out.takeLast(12000)}"
+            "Debian rootfs verification failed. Guest output:\n${out.takeLast(14000)}"
         }
         append("[debian_rootfs] PASS ${debianAssetName()}")
     }
