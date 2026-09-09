@@ -87,7 +87,7 @@ jobs:
           keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
 
       - name: Build and check APK
-        run: ./gradlew stageDebugApk testDebugUnitTest lintDebug --no-daemon
+        run: ./gradlew stageDebugApk testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
 
       - name: Normalize Debian asset and re-sign APK
         run: |
@@ -184,7 +184,7 @@ jobs:
           gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json apk-signature.txt --clobber
           gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("DreamLinux-") and endswith(".apk"))' | while IFS= read -r asset; do gh release delete-asset "$TAG" "$asset" --yes; done
           gh release upload "$TAG" build/deliverables/DreamLinux-*.apk --clobber
-          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.2-dev1. Each APK now creates a fresh protected Microdroid VM identity and vsock retries stop immediately if the VM powers off. Debian archive still excludes Linux device nodes. Runtime Debian/Internet/Plasma/GPU verification requires the target phone."
+          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.2-dev1. Each APK creates a fresh protected Microdroid VM identity and vsock retries stop immediately if the VM powers off. Debian archive excludes Linux device nodes. Runtime Debian/Internet/Plasma/GPU verification requires the target phone."
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
