@@ -6,6 +6,7 @@ root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("linux-um-arm64")
 mem = root / "arch/um/os-Linux/skas/mem.c"
 proc = root / "arch/um/os-Linux/skas/process.c"
 stub = root / "arch/um/kernel/skas/stub.c"
+stub_exe = root / "arch/um/kernel/skas/stub_exe.c"
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -74,6 +75,18 @@ s = replace_once(
     "retain ptrace fd socket",
 )
 proc.write_text(s)
+
+# The stub executable historically closes fd 0 in ptrace mode after reading its
+# init block. Keep it open as a blocking Unix socket so the kernel can pass late
+# backing FDs before PTRACE_CONT. SECCOMP retains its existing nonblocking mode.
+s = stub_exe.read_text()
+s = replace_once(
+    s,
+    "\t/* In SECCOMP mode, FD 0 is a socket and is later used for FD passing */\n\tif (!init_data.seccomp)\n\t\tstub_syscall1(__NR_close, 0);\n\telse\n\t\tstub_syscall3(__NR_fcntl, 0, F_SETFL, O_NONBLOCK);",
+    "\t/* FD 0 stays open in both modes for SCM_RIGHTS FD passing.\n\t * SECCOMP needs nonblocking recvmsg; ptrace receives only after the\n\t * kernel has queued descriptors and can safely keep the socket blocking. */\n\tif (init_data.seccomp)\n\t\tstub_syscall3(__NR_fcntl, 0, F_SETFL, O_NONBLOCK);",
+    "keep ptrace stub fd0 open",
+)
+stub_exe.write_text(s)
 
 s = stub.read_text()
 old_handler = r'''void __section(".__syscall_stub")
