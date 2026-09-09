@@ -20,22 +20,17 @@ import org.json.JSONObject
 /**
  * Shizuku-side AVF controller for DEV 1.
  *
- * Qualcomm on this device exposes protected AVF only. Instead of forcing Google's non-pVM Debian
- * kernel through pvmfw, this build keeps the OEM/AOSP-trusted Microdroid kernel and runs a normal
- * Alpine aarch64 userspace from Microdroid's persistent encrypted storage. The VM is fully
- * hardware-virtualized by AVF/Gunyah; only the guest userspace is Alpine.
- *
- * A fully debuggable Microdroid explicitly supports adb root. We use that root *inside the VM*
- * (never Android host root) to unpack/chroot Alpine and to launch a small bionic helper. The helper
- * exposes a localhost HTTP proxy and VNC endpoint, while all host access still enters through
- * VirtualMachine.connectVsock().
+ * This device exposes protected AVF only, so DEV 1 keeps the OEM/AOSP-trusted Microdroid kernel
+ * and runs a persistent Debian 13 arm64 userspace from Microdroid encrypted storage. The VM is
+ * hardware-virtualized by AVF/Gunyah; Debian is entered with chroot inside the trusted guest.
+ * Android itself is never rooted and no custom kernel or pvmfw bypass is used.
  */
 class VmBridge : IVmBridge.Stub() {
     private val gateVmName = "dev1-gate-a-v4"
-    private val linuxVmName = "dev1-alpine-pvm-v1"
+    private val linuxVmName = "dev1-debian-pvm-v1"
     private val storageSuffix = if (BuildConfig.LOCAL_TEST) "-localtest" else ""
     private val vmData = File("/data/local/tmp/dev1-linux-vmm$storageSuffix")
-    private val stateDir = File("/data/local/tmp/dev1-linux$storageSuffix/alpine-state")
+    private val stateDir = File("/data/local/tmp/dev1-linux$storageSuffix/debian-state")
 
     private var manager: Any? = null
     @Volatile private var vm: Any? = null
@@ -147,7 +142,6 @@ class VmBridge : IVmBridge.Stub() {
         AvfReflect.call(builder, "setDebugLevel", configClass.getField("DEBUG_LEVEL_FULL").getInt(null))
         AvfReflect.call(builder, "setMemoryBytes", (if (linux) 4096L else 512L) * 1024L * 1024L)
         if (linux) {
-            // Persistent ext4/dm-crypt storage mounted by Microdroid at /mnt/encryptedstore.
             AvfReflect.call(builder, "setEncryptedStorageBytes", 10L * 1024L * 1024L * 1024L)
             runCatching {
                 val topology = configClass.getField("CPU_TOPOLOGY_MATCH_HOST").getInt(null)
@@ -263,7 +257,7 @@ class VmBridge : IVmBridge.Stub() {
             .put("gpuConfigApi", classExists("android.system.virtualmachine.VirtualMachineCustomImageConfig\$GpuConfig\$Builder"))
             .put("displayConfigApi", classExists("android.system.virtualmachine.VirtualMachineCustomImageConfig\$DisplayConfig\$Builder"))
             .put("displayServiceApi", false)
-            .put("desktopPath", "trusted Microdroid pVM + Alpine chroot + TigerVNC over vsock")
+            .put("desktopPath", "trusted Microdroid pVM + Debian 13 chroot + Plasma 6/TigerVNC over vsock")
             .put("networkPath", "host-mediated HTTP proxy over VirtualMachine.connectVsock")
             .put("debianInstalled", bundleReady())
             .put("kdeInstalled", desktopMarker().isFile)
@@ -276,26 +270,19 @@ class VmBridge : IVmBridge.Stub() {
     private fun classExists(name: String) = runCatching { Class.forName(name) }.isSuccess
 
     private fun bundleReady(): Boolean = runCatching {
-        baseContext().assets.open("alpine-minirootfs.tar.gz").use { it.read() >= 0 } &&
+        baseContext().assets.open("debian-rootfs.tar.gz").use { it.read() >= 0 } &&
             baseContext().assets.open("dev1_guest_bridge").use { it.read() >= 0 }
     }.getOrDefault(false)
 
-    private fun alpineAssetName(): String = runCatching {
-        baseContext().assets.open("alpine-version.txt").bufferedReader().use { it.readLine().orEmpty() }
-    }.getOrDefault("alpine-minirootfs")
-
-    private fun alpineBranch(): String {
-        val match = Regex("alpine-minirootfs-([0-9]+\\.[0-9]+)").find(alpineAssetName())
-        return "v${match?.groupValues?.getOrNull(1) ?: "3.24"}"
-    }
+    private fun debianAssetName(): String = runCatching {
+        baseContext().assets.open("debian-version.txt").bufferedReader().use { it.readLine().orEmpty() }
+    }.getOrDefault("Debian 13 trixie arm64 minbase")
 
     override fun installDebian(): String {
-        // Alpine minirootfs is bundled into the APK. Provisioning happens into encrypted storage
-        // on first Start Linux, so there is no separate multi-gigabyte host download anymore.
         installError = ""
-        stage = if (bundleReady()) "alpine_bundle_ready" else "blocked:alpine_bundle_missing"
-        if (!bundleReady()) installError = "Embedded Alpine rootfs/helper assets are missing from this APK"
-        append("Alpine bundle ${if (bundleReady()) "ready" else "missing"}: ${alpineAssetName()}")
+        stage = if (bundleReady()) "debian_bundle_ready" else "blocked:debian_bundle_missing"
+        if (!bundleReady()) installError = "Embedded Debian 13 arm64 rootfs/helper assets are missing from this APK"
+        append("Debian bundle ${if (bundleReady()) "ready" else "missing"}: ${debianAssetName()}")
         return status()
     }
 
@@ -310,20 +297,20 @@ class VmBridge : IVmBridge.Stub() {
         internetReady = false
         internetStage = "starting"
         return try {
-            check(bundleReady()) { "Alpine rootfs/helper bundle is missing from APK" }
+            check(bundleReady()) { "Debian 13 rootfs/helper bundle is missing from APK" }
             if (isRunning(vm)) stopInternal()
             val context = redirectedContext()
-            stage = "config:alpine_pvm"
-            append("Using OEM-trusted Microdroid pVM kernel; Alpine userspace lives in persistent encrypted storage")
+            stage = "config:debian_pvm"
+            append("Using OEM-trusted Microdroid pVM kernel; Debian 13 userspace lives in persistent encrypted storage")
             append("No custom kernel, no pvmfw bypass, no Termux/proot")
-            val machine = acquireVm(linuxVmName, buildMicrodroid(context, true), "alpine")
-            startMachine(machine, "alpine")
+            val machine = acquireVm(linuxVmName, buildMicrodroid(context, true), "debian")
+            startMachine(machine, "debian")
 
             stage = "microdroid_adb_root"
             ensureAdbRoot(machine)
 
-            stage = "alpine_provision"
-            provisionAlpine(machine)
+            stage = "debian_provision"
+            provisionDebian(machine)
             guestVerified = true
 
             stage = "internet_bridge"
@@ -331,9 +318,9 @@ class VmBridge : IVmBridge.Stub() {
             startVncForwarder(machine)
             verifyInternet(machine)
 
-            stage = "alpine_ready"
-            append("[alpine] PASS real Alpine aarch64 userspace running on trusted Microdroid kernel")
-            append("[alpine] kernel remains ${adbShell(machine, "uname -r").trim()}; userspace=${alpineAssetName()}")
+            stage = "debian_ready"
+            append("[debian] PASS Debian 13 arm64 userspace running on trusted Microdroid kernel")
+            append("[debian] kernel remains ${adbShell(machine, "uname -r").trim()}; userspace=${debianAssetName()}")
             status()
         } catch (t: Throwable) {
             blocked(t, stage)
@@ -350,14 +337,17 @@ class VmBridge : IVmBridge.Stub() {
         }
 
         val pfd = connectVsockRetry(machine, ADB_VSOCK_PORT, 30_000L)
-        val reply = pfd.use { NativeTransport.serviceFd(it.fd, "root:") }
-        append("[adb_root] request: ${reply.trim().take(1000)}")
+        val rootRequest = runCatching { pfd.use { NativeTransport.serviceFd(it.fd, "root:") } }
+        rootRequest.onSuccess { append("[adb_root] request: ${it.trim().take(1000)}") }
+        rootRequest.onFailure {
+            append("[adb_root] adbd closed the control socket while restarting; reconnecting (${AvfReflect.unwrap(it).message})")
+        }
 
         val deadline = android.os.SystemClock.elapsedRealtime() + 30_000L
         var last = ""
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
             Thread.sleep(350)
-            last = runCatching { adbShell(machine, "id -u; id; getenforce") }.getOrDefault("")
+            last = runCatching { adbShell(machine, "id -u; id; getenforce", 5_000L) }.getOrDefault("")
             val firstNumeric = last.lineSequence().map { it.trim() }.firstOrNull { it == "0" }
             if (firstNumeric == "0") {
                 adbRootReady = true
@@ -368,60 +358,68 @@ class VmBridge : IVmBridge.Stub() {
         error("Microdroid adb root did not become ready. Last output: ${last.takeLast(2000)}")
     }
 
-    private fun provisionAlpine(machine: Any) {
-        val root = ALPINE_ROOT
-        val branch = alpineBranch()
+    private fun provisionDebian(machine: Any) {
+        val root = DEBIAN_ROOT
         val script = """
             set -eu
             test "$(id -u)" = 0
             test -d /mnt/encryptedstore
-            test -f /mnt/apk/assets/alpine-minirootfs.tar.gz
+            test -f /mnt/apk/assets/debian-rootfs.tar.gz
             test -f /mnt/apk/assets/dev1_guest_bridge
             ROOT=$root
             mkdir -p "$root"
             if [ ! -f "$root/.dev1-rootfs-ready" ]; then
-              echo DEV1_UNPACK_START
+              echo DEV1_DEBIAN_UNPACK_START
               rm -rf "$root"/* "$root"/.[!.]* "$root"/..?* 2>/dev/null || true
-              tar -xzf /mnt/apk/assets/alpine-minirootfs.tar.gz -C "$root"
-              touch "$root/.dev1-rootfs-ready"
-              echo DEV1_UNPACK_DONE
+              tar -xzf /mnt/apk/assets/debian-rootfs.tar.gz -C "$root"
+              echo DEV1_DEBIAN_UNPACK_DONE
             fi
-            mkdir -p "$root/dev" "$root/proc" "$root/sys" "$root/tmp" "$root/run"
+            mkdir -p "$root/dev" "$root/proc" "$root/sys" "$root/tmp" "$root/run" "$root/dev/pts"
             grep -q " $root/dev " /proc/mounts || mount --bind /dev "$root/dev"
             grep -q " $root/proc " /proc/mounts || mount --bind /proc "$root/proc"
             grep -q " $root/sys " /proc/mounts || mount --bind /sys "$root/sys"
-            printf '%s\n' \
-              'https://dl-cdn.alpinelinux.org/alpine/$branch/main' \
-              'https://dl-cdn.alpinelinux.org/alpine/$branch/community' > "$root/etc/apk/repositories"
             printf '%s\n' 'nameserver 1.1.1.1' 'nameserver 8.8.8.8' > "$root/etc/resolv.conf"
+            if [ -x "$root/debootstrap/debootstrap" ]; then
+              echo DEV1_DEBOOTSTRAP_SECOND_STAGE
+              chroot "$root" /debootstrap/debootstrap --second-stage
+            fi
+            cat > "$root/etc/apt/sources.list" <<'EOF'
+            deb http://deb.debian.org/debian trixie main
+            deb http://deb.debian.org/debian trixie-updates main
+            deb http://security.debian.org/debian-security trixie-security main
+            EOF
+            mkdir -p "$root/etc/apt/apt.conf.d"
+            cat > "$root/etc/apt/apt.conf.d/80dev1proxy" <<'EOF'
+            Acquire::http::Proxy "http://127.0.0.1:3128";
+            Acquire::https::Proxy "http://127.0.0.1:3128";
+            EOF
             cp /mnt/apk/assets/dev1_guest_bridge /data/local/tmp/dev1_guest_bridge
             chmod 755 /data/local/tmp/dev1_guest_bridge
+            pkill -f /data/local/tmp/dev1_guest_bridge 2>/dev/null || true
             (/data/local/tmp/dev1_guest_bridge >/data/local/tmp/dev1-bridge.log 2>&1 &)
             sleep 1
             cat /data/local/tmp/dev1-bridge.log 2>/dev/null || true
-            chroot "$root" /bin/sh -lc 'cat /etc/alpine-release; uname -a; id; /bin/busybox | head -1'
+            touch "$root/.dev1-rootfs-ready"
+            chroot "$root" /bin/bash -lc 'cat /etc/os-release; echo ARCH=$(dpkg --print-architecture); apt-get --version | head -1; uname -a; id'
         """.trimIndent()
-        val out = adbShell(machine, script, 120_000L)
-        check(out.contains("Alpine") || Regex("\\d+\\.\\d+\\.\\d+").containsMatchIn(out)) {
-            "Alpine rootfs verification failed: ${out.takeLast(5000)}"
+        val out = adbShell(machine, script, 180_000L)
+        check(out.contains("Debian GNU/Linux 13") && out.contains("ARCH=arm64")) {
+            "Debian rootfs verification failed: ${out.takeLast(7000)}"
         }
-        append("[alpine_rootfs] PASS ${alpineAssetName()}\n${out.takeLast(5000)}")
+        append("[debian_rootfs] PASS ${debianAssetName()}\n${out.takeLast(7000)}")
     }
 
     private fun verifyInternet(machine: Any) {
-        internetStage = "testing Alpine apk through host vsock proxy"
+        internetStage = "testing Debian apt through host vsock proxy"
         var last: Throwable? = null
         repeat(10) { attempt ->
             try {
                 Thread.sleep(if (attempt == 0) 700L else 350L)
-                val command = chrootCommand(
-                    "export http_proxy=http://127.0.0.1:3128 https_proxy=http://127.0.0.1:3128 HTTP_PROXY=\$http_proxy HTTPS_PROXY=\$https_proxy; apk update; echo DEV1_APK_NETWORK_PASS"
-                )
-                val out = adbShell(machine, command, 90_000L)
-                if (out.contains("DEV1_APK_NETWORK_PASS")) {
+                val out = adbShell(machine, chrootCommand("apt-get update; echo DEV1_APT_NETWORK_PASS"), 120_000L)
+                if (out.contains("DEV1_APT_NETWORK_PASS")) {
                     internetReady = true
                     internetStage = "ready"
-                    append("[internet] PASS Alpine apk repositories reached through host-mediated vsock proxy")
+                    append("[internet] PASS Debian apt repositories reached through host-mediated vsock proxy")
                     return
                 }
             } catch (t: Throwable) {
@@ -431,42 +429,42 @@ class VmBridge : IVmBridge.Stub() {
         }
         internetReady = false
         internetStage = "blocked: ${AvfReflect.unwrap(last ?: IllegalStateException("proxy test failed")).message}"
-        error("Alpine Internet bridge failed: $internetStage")
+        error("Debian Internet bridge failed: $internetStage")
     }
 
     override fun debianConsole(command: String): String {
         require(command.length <= 16384) { "Command too long" }
         val machine = vm ?: return JSONObject().put("ok", false).put("error", "Linux VM is not created").toString()
-        check(vmMode == "alpine" && isRunning(machine) && adbRootReady) { "Start Alpine Linux first" }
-        stage = "alpine_console"
+        check(vmMode == "debian" && isRunning(machine) && adbRootReady) { "Start Debian Linux first" }
+        stage = "debian_console"
         return try {
             val output = adbShell(machine, chrootCommand(command), 120_000L)
-            stage = if (guestVerified) "alpine_ready" else "alpine_console_pass"
+            stage = if (guestVerified) "debian_ready" else "debian_console_pass"
             JSONObject().put("ok", true).put("output", output).toString()
         } catch (t: Throwable) {
             val e = AvfReflect.unwrap(t)
             lastError = "${e.javaClass.name}: ${e.message}"
-            stage = "blocked:alpine_console"
+            stage = "blocked:debian_console"
             append(lastError)
             JSONObject().put("ok", false).put("error", lastError).toString()
         }
     }
 
     private fun chrootCommand(command: String): String =
-        "chroot $ALPINE_ROOT /bin/sh -lc ${shellQuote(command)}"
+        "chroot $DEBIAN_ROOT /bin/bash -lc ${shellQuote(command)}"
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 
     override fun openDebianVsock(port: Int): ParcelFileDescriptor {
         require(port in 1..65535) { "Invalid vsock port" }
         val machine = vm ?: error("Linux VM is not created")
-        check(vmMode == "alpine" && isRunning(machine)) { "Alpine VM is not running" }
+        check(vmMode == "debian" && isRunning(machine)) { "Debian VM is not running" }
         return connectVsock(machine, port)
     }
 
     override fun installKde(): String {
         val machine = vm ?: error("Linux VM is not created")
-        check(vmMode == "alpine" && isRunning(machine) && guestVerified) { "Start and verify Alpine first" }
+        check(vmMode == "debian" && isRunning(machine) && guestVerified) { "Start and verify Debian first" }
         if (desktopMarker().isFile) return status()
         if (!internetReady) {
             desktopError = "Internet bridge is not ready"
@@ -475,35 +473,35 @@ class VmBridge : IVmBridge.Stub() {
         }
         if (!desktopInstalling.compareAndSet(false, true)) return status()
         desktopError = ""
-        desktopStage = "installing XFCE + TigerVNC"
+        desktopStage = "installing Plasma 6 + TigerVNC"
         Thread({
             try {
                 stage = "desktop_packages"
                 val install = """
-                    export http_proxy=http://127.0.0.1:3128
-                    export https_proxy=http://127.0.0.1:3128
-                    export HTTP_PROXY=\$http_proxy HTTPS_PROXY=\$https_proxy
-                    apk add --no-cache xfce4 xfce4-terminal dbus tigervnc font-dejavu
-                    mkdir -p /root/.vnc /root/.config/tigervnc /tmp/.X11-unix
+                    export DEBIAN_FRONTEND=noninteractive
+                    apt-get update
+                    apt-get install -y --no-install-recommends kde-plasma-desktop plasma-workspace dbus-x11 tigervnc-standalone-server tigervnc-tools xterm fonts-dejavu-core
+                    mkdir -p /root/.vnc /tmp/.X11-unix
                     chmod 1777 /tmp /tmp/.X11-unix
-                    pkill Xvnc 2>/dev/null || true
-                    pkill xfce4-session 2>/dev/null || true
-                    Xvnc :1 -SecurityTypes None -localhost yes -geometry 1200x2200 -depth 24 >/tmp/xvnc.log 2>&1 &
-                    sleep 2
-                    DISPLAY=:1 dbus-run-session -- startxfce4 >/tmp/xfce.log 2>&1 &
-                    sleep 4
-                    pgrep -a Xvnc
-                    pgrep -a xfce4-session || true
+                    pkill Xtigervnc 2>/dev/null || true
+                    pkill -f startplasma-x11 2>/dev/null || true
+                    pkill plasmashell 2>/dev/null || true
+                    Xtigervnc :1 -SecurityTypes None -localhost -geometry 1200x2200 -depth 24 >/tmp/xvnc.log 2>&1 &
+                    sleep 3
+                    DISPLAY=:1 dbus-run-session -- startplasma-x11 >/tmp/plasma.log 2>&1 &
+                    sleep 8
+                    pgrep -a Xtigervnc
+                    pgrep -af plasmashell
                     echo DEV1_DESKTOP_READY
                 """.trimIndent()
-                val out = adbShell(machine, chrootCommand(install), 30L * 60L * 1000L)
-                check(out.contains("DEV1_DESKTOP_READY")) { "Desktop did not report ready: ${out.takeLast(8000)}" }
+                val out = adbShell(machine, chrootCommand(install), 45L * 60L * 1000L)
+                check(out.contains("DEV1_DESKTOP_READY")) { "Plasma did not report ready: ${out.takeLast(12000)}" }
                 stateDir.mkdirs()
-                desktopMarker().writeText("installed-by=${BuildConfig.VERSION_NAME}\nuserspace=${alpineAssetName()}\n")
+                desktopMarker().writeText("installed-by=${BuildConfig.VERSION_NAME}\nuserspace=${debianAssetName()}\n")
                 desktopStage = "ready"
                 vncReady = true
                 stage = "desktop_ready"
-                append("XFCE + TigerVNC provisioning completed; Android-local VNC is 127.0.0.1:$ANDROID_VNC_PORT")
+                append("Debian Plasma 6 + TigerVNC provisioning completed; Android-local VNC is 127.0.0.1:$ANDROID_VNC_PORT")
             } catch (t: Throwable) {
                 val e = AvfReflect.unwrap(t)
                 desktopError = "${e.javaClass.name}: ${e.message}"
@@ -719,7 +717,7 @@ class VmBridge : IVmBridge.Stub() {
         } ?: ""
         val rawStatus = machine?.let { runCatching { vmStatus(it) }.getOrDefault(-999) } ?: -999
         return JSONObject()
-            .put("name", when (vmMode) { "alpine" -> linuxVmName; "microdroid" -> gateVmName; else -> "" })
+            .put("name", when (vmMode) { "debian" -> linuxVmName; "microdroid" -> gateVmName; else -> "" })
             .put("running", running)
             .put("rawVmStatus", rawStatus)
             .put("cid", -1)
@@ -746,9 +744,9 @@ class VmBridge : IVmBridge.Stub() {
             .put("kdeError", desktopError)
             .put("vncReady", vncReady || desktopMarker().isFile)
             .put("vncPort", ANDROID_VNC_PORT)
-            .put("guestGraphics", if (desktopMarker().isFile) "XFCE via TigerVNC software framebuffer; hardware GPU still unproven" else "Alpine pVM ready; desktop/GPU pending")
-            .put("debian", if (guestVerified) "Alpine userspace verified in trusted Microdroid pVM" else "embedded Alpine bundle ${if (bundleReady()) "ready" else "missing"}")
-            .put("alpineVersion", alpineAssetName())
+            .put("guestGraphics", if (desktopMarker().isFile) "Debian Plasma 6 via TigerVNC software framebuffer; hardware GPU still unproven" else "Debian pVM ready; desktop/GPU pending")
+            .put("debian", if (guestVerified) "Debian 13 userspace verified in trusted Microdroid pVM" else "embedded Debian bundle ${if (bundleReady()) "ready" else "missing"}")
+            .put("debianVersion", debianAssetName())
             .put("adbRootReady", adbRootReady)
             .toString()
     }
@@ -763,7 +761,7 @@ class VmBridge : IVmBridge.Stub() {
         private const val ADB_VSOCK_PORT = 5555
         private const val PROXY_VSOCK_PORT = 7777
         private const val VNC_VSOCK_PORT = 5901
-        private const val ALPINE_ROOT = "/mnt/encryptedstore/alpine"
+        private const val DEBIAN_ROOT = "/mnt/encryptedstore/debian"
         const val ANDROID_VNC_PORT = 5909
     }
 }
