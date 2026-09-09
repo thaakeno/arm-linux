@@ -274,7 +274,7 @@ echo "[venus-build] building $PKG..."
 cd "$TP_DIR"
 VENUS_KHRONOS_HEADERS="$KHRONOS_INCLUDE" \
   TERMUX_ON_DEVICE_BUILD=true \
-  ./build-package.sh -f -I "$PKG"
+  ./build-package.sh -f -r -I "$PKG"
 
 DEB="$(find "$TP_DIR/output" "$TP_DIR/debs" -maxdepth 1 -type f -name 'virglrenderer-android_*_aarch64.deb' 2>/dev/null | sort | tail -1 || true)"
 [ -n "$DEB" ] || {
