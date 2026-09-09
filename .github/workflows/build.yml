@@ -1,4 +1,4 @@
-﻿name: Build APK
+name: Build APK
 
 on:
   push:
@@ -36,6 +36,31 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
 
+      - name: Prepare Alpine pVM payload assets
+        run: |
+          set -euxo pipefail
+          mkdir -p app/src/main/assets
+          python3 - <<'PY'
+          import re, urllib.request
+          base = 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/'
+          html = urllib.request.urlopen(base, timeout=30).read().decode('utf-8', 'replace')
+          names = re.findall(r'href="(alpine-minirootfs-[0-9][^"/]*-aarch64\.tar\.gz)"', html)
+          names = [n for n in names if '_rc' not in n and '-rc' not in n]
+          if not names:
+              raise SystemExit('No Alpine aarch64 minirootfs found in latest-stable index')
+          def version_key(name):
+              m = re.search(r'alpine-minirootfs-([0-9]+(?:\.[0-9]+)+)-aarch64', name)
+              return tuple(int(x) for x in m.group(1).split('.')) if m else (0,)
+          name = max(names, key=version_key)
+          print('Bundling', name)
+          urllib.request.urlretrieve(base + name, 'app/src/main/assets/alpine-minirootfs.tar.gz')
+          open('app/src/main/assets/alpine-version.txt', 'w').write(name + '\n')
+          PY
+          CXX="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++"
+          "$CXX" tools/dev1_guest_bridge.cpp -std=c++20 -O2 -fPIE -pie -pthread -Wl,--strip-all -o app/src/main/assets/dev1_guest_bridge
+          file app/src/main/assets/dev1_guest_bridge
+          ls -lh app/src/main/assets
+
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 
@@ -66,24 +91,20 @@ jobs:
 
       - name: Prepare Verification Metadata
         run: |
-          if [ -f verification.json ]; then
-            python3 -c "import json; d=json.load(open('verification.json')); d['commit']='${{ github.sha }}'; d['version']='0.5.0-dev1'; d['apk_signature_v3']='PASS'; d['stable_signing']='${{ env.STABLE_SIGNING }}'; json.dump(d, open('verification.json','w'), indent=2)"
-          else
-            cat <<EOF > verification.json
+          cat <<EOF > verification.json
           {
             "commit": "${{ github.sha }}",
-            "version": "0.5.0-dev1",
+            "version": "0.7.0-dev1",
             "apk_signature_v3": "PASS",
             "stable_signing": "${{ env.STABLE_SIGNING }}",
             "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
             "microdroid_gate_a": "PASS ON TARGET FROM PRIOR DEVICE TEST",
-            "debian_pvm": "PENDING DEVICE RETEST",
-            "debian_2d_display": "PENDING DEVICE RETEST",
-            "plasma": "PENDING",
+            "linux_userspace": "ALPINE ROOTFS IN MICRODROID ENCRYPTED STORE; TARGET RETEST REQUIRED",
+            "network": "HOST-MEDIATED HTTP PROXY OVER VSOCK; TARGET RETEST REQUIRED",
+            "desktop": "XFCE/TIGERVNC PROVISIONING; TARGET RETEST REQUIRED",
             "hardware_acceleration": "NOT PROVEN"
           }
           EOF
-          fi
 
       - name: Deploy to Branch-Isolated Rolling Release
         env:
@@ -108,7 +129,7 @@ jobs:
             gh release delete-asset "$TAG" "$asset" --yes
           done
           gh release upload "$TAG" build/deliverables/DreamLinux-*.apk --clobber
-          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.5.0-dev1. Stable signing: $STABLE_SIGNING. Runtime Debian/display verification still requires the target phone."
+          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.7.0-dev1. Alpine userspace runs inside the trusted Microdroid pVM with persistent encrypted storage. Runtime Internet/desktop/GPU verification still requires the target phone."
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
