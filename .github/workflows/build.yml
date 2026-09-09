@@ -81,6 +81,85 @@ jobs:
       - name: Build and check APK
         run: ./gradlew stageDebugApk testDebugUnitTest lintDebug --no-daemon
 
+      - name: Normalize Alpine asset and re-sign APK
+        run: |
+          set -euxo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          TMP="app/build/outputs/apk/debug/app-repacked.apk"
+          ALIGNED="app/build/outputs/apk/debug/app-aligned.apk"
+
+          # aapt has a legacy special case for *.gz assets: it transparently ungzips them and
+          # strips the .gz suffix. Runtime expects the original gzip so rebuild that single ZIP
+          # entry after aapt, then zipalign and sign again.
+          python3 - <<'PY'
+          import gzip, os, zipfile
+          src='app/build/outputs/apk/debug/app-debug.apk'
+          dst='app/build/outputs/apk/debug/app-repacked.apk'
+          with zipfile.ZipFile(src, 'r') as zin:
+              names=set(zin.namelist())
+              root_name='assets/alpine-minirootfs.tar' if 'assets/alpine-minirootfs.tar' in names else 'assets/alpine-minirootfs.tar.gz'
+              raw=zin.read(root_name)
+              if root_name.endswith('.gz'):
+                  gz=raw
+              else:
+                  gz=gzip.compress(raw, compresslevel=9, mtime=0)
+              helper=zin.read('assets/dev1_guest_bridge')
+              version=zin.read('assets/alpine-version.txt')
+              if not helper.startswith(b'\x7fELF'):
+                  raise SystemExit('dev1_guest_bridge is not an ELF executable')
+              with zipfile.ZipFile(dst, 'w', allowZip64=True) as zout:
+                  for info in zin.infolist():
+                      name=info.filename
+                      if name in {'assets/alpine-minirootfs.tar','assets/alpine-minirootfs.tar.gz'}:
+                          continue
+                      upper=name.upper()
+                      if upper.startswith('META-INF/') and upper.endswith(('.SF','.RSA','.DSA','.EC')):
+                          continue
+                      if upper == 'META-INF/MANIFEST.MF':
+                          continue
+                      zout.writestr(info, zin.read(name))
+                  info=zipfile.ZipInfo('assets/alpine-minirootfs.tar.gz')
+                  info.compress_type=zipfile.ZIP_STORED
+                  info.external_attr=0o100644 << 16
+                  zout.writestr(info, gz)
+          print('repacked Alpine rootfs gzip bytes', len(gz), 'version', version.decode().strip())
+          PY
+
+          ZIPALIGN="$ANDROID_HOME/build-tools/36.0.0/zipalign"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          "$ZIPALIGN" -f -p 4 "$TMP" "$ALIGNED"
+          "$APKSIGNER" sign \
+            --ks "$HOME/.android/debug.keystore" \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            "$ALIGNED"
+          mv "$ALIGNED" "$APK"
+          rm -f "$TMP" "$APK.idsig"
+
+          # Overwrite the staged named APK with the normalized/re-signed package too.
+          for f in build/deliverables/DreamLinux-*.apk; do
+            cp "$APK" "$f"
+          done
+
+          unzip -l "$APK" | grep -F 'assets/alpine-minirootfs.tar.gz'
+          unzip -l "$APK" | grep -F 'assets/dev1_guest_bridge'
+          python3 - <<'PY'
+          import gzip, io, tarfile, zipfile
+          apk='app/build/outputs/apk/debug/app-debug.apk'
+          with zipfile.ZipFile(apk) as z:
+              data=z.read('assets/alpine-minirootfs.tar.gz')
+              raw=gzip.decompress(data)
+              with tarfile.open(fileobj=io.BytesIO(raw), mode='r:') as t:
+                  names=t.getnames()
+                  assert any(n.endswith('etc/alpine-release') or n == 'etc/alpine-release' for n in names)
+              assert z.read('assets/dev1_guest_bridge').startswith(b'\x7fELF')
+          print('APK Alpine bundle verification: PASS')
+          PY
+
       - name: Verify APK Signature Schemes
         run: |
           APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
@@ -94,9 +173,10 @@ jobs:
           cat <<EOF > verification.json
           {
             "commit": "${{ github.sha }}",
-            "version": "0.7.0-dev1",
+            "version": "0.7.1-dev1",
             "apk_signature_v3": "PASS",
             "stable_signing": "${{ env.STABLE_SIGNING }}",
+            "alpine_bundle": "APK ENTRY + GZIP + TAR + HELPER VERIFIED IN CI",
             "avf_api_path": "android.system.virtualmachine.VirtualMachineManager",
             "microdroid_gate_a": "PASS ON TARGET FROM PRIOR DEVICE TEST",
             "linux_userspace": "ALPINE ROOTFS IN MICRODROID ENCRYPTED STORE; TARGET RETEST REQUIRED",
@@ -129,7 +209,7 @@ jobs:
             gh release delete-asset "$TAG" "$asset" --yes
           done
           gh release upload "$TAG" build/deliverables/DreamLinux-*.apk --clobber
-          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.7.0-dev1. Alpine userspace runs inside the trusted Microdroid pVM with persistent encrypted storage. Runtime Internet/desktop/GPU verification still requires the target phone."
+          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.7.1-dev1. Alpine gzip/rootfs/helper assets are verified inside the final signed APK. Runtime Internet/desktop/GPU verification still requires the target phone."
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
