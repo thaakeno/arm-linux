@@ -1,0 +1,69 @@
+name: Build UML umshm kernel
+
+on:
+  push:
+    branches:
+      - venus-uml-poc
+    paths:
+      - 'tools/venus_poc/patches/**'
+      - 'tools/venus_poc/host_relay_direct.py'
+      - 'tools/venus_poc/guest_relay_direct.py'
+      - '.github/workflows/build-uml-umshm.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout DreamLinux branch
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm make bc bison flex libssl-dev libelf-dev file unzip wget
+
+      - name: Checkout tested UML source
+        run: |
+          git clone https://github.com/zalexdev/linux-um-arm64.git linux-um-arm64
+          cd linux-um-arm64
+          git checkout 8897487c52233cd00cf2850008ca068892f1ae91
+
+      - name: Check and apply umshm patch
+        run: |
+          cd linux-um-arm64
+          git apply --check ../tools/venus_poc/patches/0001-um-add-direct-host-shmem-bridge.patch
+          git apply ../tools/venus_poc/patches/0001-um-add-direct-host-shmem-bridge.patch
+          git diff --check
+
+      - name: Install Android NDK r27c
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q android-ndk-r27c-linux.zip
+          echo "NDK=$PWD/android-ndk-r27c" >> "$GITHUB_ENV"
+
+      - name: Build static Bionic UML kernel
+        run: |
+          mkdir -p artifacts
+          cd linux-um-arm64
+          NDK="$NDK" \
+          ART="$GITHUB_WORKSPACE/artifacts" \
+          O="$RUNNER_TEMP/uml-umshm-build" \
+          tools/um-arm64/harness/build-bionic.sh
+
+      - name: Verify outputs
+        run: |
+          file artifacts/linux-bionic
+          file artifacts/stub_exe_bionic
+          test -s artifacts/linux-bionic
+          test -s artifacts/stub_exe_bionic
+
+      - name: Upload patched UML binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: uml-umshm-bionic
+          path: |
+            artifacts/linux-bionic
+            artifacts/stub_exe_bionic
+            artifacts/build-bionic-*.log
+          if-no-files-found: error
