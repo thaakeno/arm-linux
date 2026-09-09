@@ -60,6 +60,28 @@ android {
 
 kotlin { jvmToolchain(17) }
 
+// The Debian provisioner is a shell script embedded in a Kotlin raw string. Shell variables such
+// as $ROOT must survive into the guest instead of being parsed as Kotlin string templates.
+val prepareDebianProvisionScript by tasks.registering {
+    doLast {
+        val source = file("src/main/java/com/example/dreamlinux/VmBridge.kt")
+        var text = source.readText()
+        val shellVars = listOf("ASSET", "ROOT", "GUNZIP", "TMP", "GZRC", "TRC", "DRC", "BRIDGE")
+        for (name in shellVars) {
+            val raw = "$" + name
+            val escaped = "${'$'}{'$'}" + name
+            text = text.replace(raw, escaped)
+        }
+        source.writeText(text)
+    }
+}
+
+tasks.configureEach {
+    if (name == "preBuild" || name == "compileDebugKotlin" || name == "compileReleaseKotlin") {
+        dependsOn(prepareDebianProvisionScript)
+    }
+}
+
 dependencies {
   implementation("dev.rikka.shizuku:api:13.1.5")
   implementation("dev.rikka.shizuku:provider:13.1.5")
