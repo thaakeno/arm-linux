@@ -45,7 +45,24 @@ class Relay:
         self.device = device
         self.writer = FramedWriter(tcp)
         self.stop = threading.Event()
-        self.bound_fds = []
+        self.error = None
+
+    def _worker(self, fn, label):
+        try:
+            fn()
+        except (EOFError, BrokenPipeError, ConnectionResetError, OSError) as e:
+            if not self.stop.is_set():
+                print(f"[guest-direct] {label} closed: {e}", flush=True)
+        except Exception as e:
+            self.error = e
+            print(f"[guest-direct] {label} error: {e}", flush=True)
+        finally:
+            self.stop.set()
+            for s in (self.local, self.tcp):
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
 
     def local_to_host(self):
         ancbuf = socket.CMSG_SPACE(16 * struct.calcsize("i"))
@@ -63,6 +80,8 @@ class Relay:
                     fds.extend(a.tolist())
 
             if fds:
+                for fd in fds:
+                    os.close(fd)
                 raise RuntimeError(
                     f"direct POC does not yet support guest->host SCM_RIGHTS ({len(fds)} fds)"
                 )
@@ -75,7 +94,6 @@ class Relay:
             n = os.write(fd, struct.pack("=I", obj_id))
             if n != 4:
                 raise RuntimeError(f"short bind write {n}/4 for id={obj_id}")
-            self.bound_fds.append(fd)
             return fd
         except Exception:
             os.close(fd)
@@ -99,25 +117,43 @@ class Relay:
                 raise RuntimeError("direct FD frame missing carrier byte")
 
             fd = self.make_umshm_fd(obj_id)
-            anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
-                    array.array("i", [fd]).tobytes())]
-            sent = self.local.sendmsg([data], anc)
-            if sent != len(data):
-                raise RuntimeError(f"short SCM_RIGHTS sendmsg {sent}/{len(data)}")
-
-            print(
-                f"[guest-direct] passed /dev/umshm fd={fd} id={obj_id} "
-                f"size={size} carrier={data_len}",
-                flush=True,
-            )
+            try:
+                anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                        array.array("i", [fd]).tobytes())]
+                sent = self.local.sendmsg([data], anc)
+                if sent != len(data):
+                    raise RuntimeError(f"short SCM_RIGHTS sendmsg {sent}/{len(data)}")
+                print(
+                    f"[guest-direct] passed /dev/umshm fd={fd} id={obj_id} "
+                    f"size={size} carrier={data_len}",
+                    flush=True,
+                )
+            finally:
+                # Mesa owns the SCM_RIGHTS reference now. Closing our copy lets
+                # /dev/umshm .release track the real client lifetime.
+                os.close(fd)
 
     def run(self):
-        a = threading.Thread(target=self.local_to_host, daemon=True)
-        b = threading.Thread(target=self.host_to_local, daemon=True)
-        a.start(); b.start()
+        a = threading.Thread(target=self._worker, args=(self.local_to_host, "Mesa->host"), daemon=True)
+        b = threading.Thread(target=self._worker, args=(self.host_to_local, "host->Mesa"), daemon=True)
+        a.start()
+        b.start()
         while a.is_alive() and b.is_alive():
-            time.sleep(0.1)
+            time.sleep(0.05)
         self.stop.set()
+        a.join(timeout=1)
+        b.join(timeout=1)
+        if self.error:
+            raise self.error
+
+
+def connect_host(host, port):
+    while True:
+        try:
+            return socket.create_connection((host, port), timeout=5)
+        except OSError as e:
+            print(f"[guest-direct] host not ready ({e}); retrying...", flush=True)
+            time.sleep(1)
 
 
 def main():
@@ -138,22 +174,33 @@ def main():
     except FileNotFoundError:
         pass
 
-    tcp = socket.create_connection((args.host, args.port))
-    print(f"[guest-direct] connected to host {args.host}:{args.port}", flush=True)
-
     ls = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     ls.bind(args.unix)
-    ls.listen(1)
-    print(f"[guest-direct] waiting for Mesa on {args.unix}", flush=True)
-    local, _ = ls.accept()
-    print("[guest-direct] Mesa connected", flush=True)
+    ls.listen(4)
+    print(f"[guest-direct] reusable relay listening for Mesa on {args.unix}", flush=True)
 
     try:
-        Relay(tcp, local, args.device).run()
+        while True:
+            local, _ = ls.accept()
+            print("[guest-direct] Mesa connected", flush=True)
+            tcp = connect_host(args.host, args.port)
+            tcp.settimeout(None)
+            print(f"[guest-direct] connected to host {args.host}:{args.port}", flush=True)
+            try:
+                Relay(tcp, local, args.device).run()
+            except Exception as e:
+                print(f"[guest-direct] session ended with error: {e}", flush=True)
+            finally:
+                for s in (local, tcp):
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
+            print("[guest-direct] session finished; waiting for next Mesa client", flush=True)
+    except KeyboardInterrupt:
+        print("[guest-direct] stopping", flush=True)
     finally:
-        local.close()
         ls.close()
-        tcp.close()
         try:
             os.unlink(args.unix)
         except FileNotFoundError:
