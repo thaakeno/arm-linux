@@ -15,6 +15,7 @@ CTRL_MSG = struct.Struct("=IIQ")
 CTRL_ACK = struct.Struct("=Ii")
 CTRL_REGISTER = 0
 CTRL_UNREGISTER = 1
+GUEST_PAGE_SIZE = 16 * 1024
 
 
 def recvn(sock, n):
@@ -30,6 +31,39 @@ def recvn(sock, n):
 def recv_frame(sock):
     t, n = HDR.unpack(recvn(sock, HDR.size))
     return t, recvn(sock, n)
+
+
+def round_up(value, align):
+    return (value + align - 1) & ~(align - 1)
+
+
+def pad_fd_for_guest_pages(fd, protocol_size):
+    """Grow the real Venus memfd so a 16K UML PTE never maps past EOF.
+
+    Venus can create objects whose logical size is not aligned to UML's 16K
+    guest page size (including 4K objects).  UML has to map whole guest pages,
+    so the host backing file must be at least PAGE_ALIGN(logical_size).  We
+    keep forwarding the original logical size in the vtest protocol; only the
+    backing memfd is enlarged.
+    """
+    padded = round_up(protocol_size, GUEST_PAGE_SIZE)
+    if padded == protocol_size:
+        return padded
+
+    try:
+        os.ftruncate(fd, padded)
+    except OSError as e:
+        raise RuntimeError(
+            f"cannot grow Venus memfd {protocol_size}->{padded} bytes for "
+            f"{GUEST_PAGE_SIZE}-byte UML pages: {e}"
+        ) from e
+
+    actual = os.fstat(fd).st_size
+    if actual < padded:
+        raise RuntimeError(
+            f"Venus memfd remained too small after ftruncate: {actual} < {padded}"
+        )
+    return padded
 
 
 class FramedWriter:
@@ -149,6 +183,13 @@ class Relay:
                 size = os.fstat(fd).st_size
                 if size <= 0:
                     raise RuntimeError(f"non-mappable Venus fd size={size}")
+                padded = pad_fd_for_guest_pages(fd, size)
+                if padded != size:
+                    print(
+                        f"[host-direct] padded Venus memfd backing "
+                        f"{size}->{padded} for 16K UML pages",
+                        flush=True,
+                    )
                 obj_id = self.alloc_id()
                 self.register_fd_with_uml(obj_id, fd, size)
                 payload = struct.pack("!IQI", obj_id, size, len(data)) + data
