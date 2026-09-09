@@ -153,8 +153,24 @@ int main(int argc, char **argv) {
     VK_CHECK(vkBeginCommandBuffer(cb, &cbbi));
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &ds, 0, NULL);
-    for (uint32_t i = 0; i < loops; ++i)
+
+    VkMemoryBarrier compute_barrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    };
+    for (uint32_t i = 0; i < loops; ++i) {
         vkCmdDispatch(cb, count / 64, 1, 1);
+        if (i + 1 < loops) {
+            vkCmdPipelineBarrier(cb,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0,
+                1, &compute_barrier,
+                0, NULL,
+                0, NULL);
+        }
+    }
     VK_CHECK(vkEndCommandBuffer(cb));
 
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
