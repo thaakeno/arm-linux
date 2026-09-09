@@ -113,34 +113,26 @@ class VmBridge : IVmBridge.Stub() {
         stage = "vm_create:$mode"
         var machine = mgr.javaClass.getMethod("getOrCreate", String::class.java, configClass)
             .invoke(mgr, name, config) ?: error("getOrCreate returned null")
-        try {
-            AvfReflect.call(machine, "setConfig", config)
-        } catch (t: Throwable) {
+        try { AvfReflect.call(machine, "setConfig", config) }
+        catch (t: Throwable) {
             append("setConfig rejected; recreating $name: ${AvfReflect.unwrap(t).message}")
             runCatching { AvfReflect.call(machine, "stop") }
             runCatching { AvfReflect.call(mgr, "delete", name) }
             machine = AvfReflect.call(mgr, "create", name, config) ?: error("create returned null")
         }
-        vm = machine
-        vmMode = mode
+        vm = machine; vmMode = mode
         append("managed VM acquired name=$name mode=$mode status=${runCatching { vmStatus(machine) }.getOrDefault(-999)}")
         return machine
     }
 
     private fun attachConsole(machine: Any) {
-        consoleThread?.interrupt()
-        runCatching { consoleOutput?.close() }
+        consoleThread?.interrupt(); runCatching { consoleOutput?.close() }
         val stream = runCatching { AvfReflect.callOptional(machine, "getConsoleOutput") as? InputStream }.getOrNull() ?: return
         consoleOutput = stream
         consoleThread = Thread({
             val buf = ByteArray(8192)
-            try {
-                while (!Thread.currentThread().isInterrupted) {
-                    val n = stream.read(buf)
-                    if (n <= 0) break
-                    appendRaw(String(buf, 0, n, StandardCharsets.UTF_8))
-                }
-            } catch (_: Throwable) {}
+            try { while (!Thread.currentThread().isInterrupted) { val n = stream.read(buf); if (n <= 0) break; appendRaw(String(buf, 0, n, StandardCharsets.UTF_8)) } }
+            catch (_: Throwable) {}
         }, "dev1-console").also { it.isDaemon = true; it.start() }
     }
 
@@ -159,20 +151,14 @@ class VmBridge : IVmBridge.Stub() {
 
     private fun startMachine(machine: Any, mode: String) {
         if (!isRunning(machine)) {
-            stage = "vm_start:$mode"
-            append("[$mode] invoking VirtualMachine.run()")
-            attachConsole(machine)
-            AvfReflect.call(machine, "run")
-            append("VirtualMachine.run() accepted for $mode")
+            stage = "vm_start:$mode"; append("[$mode] invoking VirtualMachine.run()"); attachConsole(machine)
+            AvfReflect.call(machine, "run"); append("VirtualMachine.run() accepted for $mode")
         }
         waitUntilRunning(machine, mode, 45_000L)
     }
 
     private fun blocked(t: Throwable, where: String = stage) {
-        val e = AvfReflect.unwrap(t)
-        lastError = "${e.javaClass.name}: ${e.message}"
-        stage = "blocked:$where"
-        append(lastError)
+        val e = AvfReflect.unwrap(t); lastError = "${e.javaClass.name}: ${e.message}"; stage = "blocked:$where"; append(lastError)
     }
 
     @Synchronized override fun startVm(): String {
@@ -186,57 +172,40 @@ class VmBridge : IVmBridge.Stub() {
     }
 
     @Synchronized override fun stopVm(): String {
-        lastError = ""
-        runCatching { stopInternal() }.onFailure { blocked(it, "stop") }
-        return status()
+        lastError = ""; runCatching { stopInternal() }.onFailure { blocked(it, "stop") }; return status()
     }
 
     private fun stopInternal() {
-        proxyRunning.set(false)
-        vncForwardRunning.set(false)
-        runCatching { vncServer?.close() }; vncServer = null
+        proxyRunning.set(false); vncForwardRunning.set(false); runCatching { vncServer?.close() }; vncServer = null
         vm?.let { if (isRunning(it)) runCatching { AvfReflect.call(it, "stop") } }
-        runCatching { consoleOutput?.close() }; consoleOutput = null
-        consoleThread?.interrupt(); consoleThread = null
+        runCatching { consoleOutput?.close() }; consoleOutput = null; consoleThread?.interrupt(); consoleThread = null
         guestVerified = false; adbRootReady = false; internetReady = false; vncReady = false
-        stage = "stopped:$vmMode"
-        append("VM stopped mode=$vmMode")
+        stage = "stopped:$vmMode"; append("VM stopped mode=$vmMode")
     }
 
     private fun classExists(name: String) = runCatching { Class.forName(name) }.isSuccess
 
     override fun inspectCapabilities(): String = try {
-        val mgr = manager(redirectedContext())
-        val caps = (AvfReflect.call(mgr, "getCapabilities") as? Number)?.toInt() ?: -1
-        val cls = mgr.javaClass
+        val mgr = manager(redirectedContext()); val caps = (AvfReflect.call(mgr, "getCapabilities") as? Number)?.toInt() ?: -1; val cls = mgr.javaClass
         val pBit = runCatching { cls.getField("CAPABILITY_PROTECTED_VM").getInt(null) }.getOrDefault(1)
         val npBit = runCatching { cls.getField("CAPABILITY_NON_PROTECTED_VM").getInt(null) }.getOrDefault(2)
         JSONObject().put("ok", true).put("capabilities", caps)
-            .put("protectedVm", caps >= 0 && caps and pBit != 0)
-            .put("nonProtectedVm", caps >= 0 && caps and npBit != 0)
+            .put("protectedVm", caps >= 0 && caps and pBit != 0).put("nonProtectedVm", caps >= 0 && caps and npBit != 0)
             .put("customImageApi", classExists("android.system.virtualmachine.VirtualMachineCustomImageConfig"))
             .put("gpuConfigApi", classExists("android.system.virtualmachine.VirtualMachineCustomImageConfig\$GpuConfig\$Builder"))
             .put("displayConfigApi", classExists("android.system.virtualmachine.VirtualMachineCustomImageConfig\$DisplayConfig\$Builder"))
-            .put("displayServiceApi", false)
-            .put("debianInstalled", bundleReady()).put("kdeInstalled", desktopMarker().isFile).toString()
-    } catch (t: Throwable) {
-        val e = AvfReflect.unwrap(t)
-        JSONObject().put("ok", false).put("error", "${e.javaClass.name}: ${e.message}").toString()
-    }
+            .put("displayServiceApi", false).put("debianInstalled", bundleReady()).put("kdeInstalled", desktopMarker().isFile).toString()
+    } catch (t: Throwable) { val e = AvfReflect.unwrap(t); JSONObject().put("ok", false).put("error", "${e.javaClass.name}: ${e.message}").toString() }
 
-    private fun bundleReady(): Boolean = runCatching {
-        baseContext().assets.open("debian-rootfs.tar.gz").use { it.read() >= 0 }
-    }.getOrDefault(false)
+    private fun bundleReady(): Boolean = runCatching { baseContext().assets.open("debian-rootfs.ext4").use { it.read() >= 0 } }.getOrDefault(false)
 
-    private fun debianAssetName(): String = runCatching {
-        baseContext().assets.open("debian-version.txt").bufferedReader().use { it.readLine().orEmpty() }
-    }.getOrDefault("Debian GNU/Linux 13 (trixie) arm64 minbase")
+    private fun debianAssetName(): String = runCatching { baseContext().assets.open("debian-version.txt").bufferedReader().use { it.readLine().orEmpty() } }
+        .getOrDefault("Debian GNU/Linux 13 (trixie) arm64 executable ext4 root")
 
     override fun installDebian(): String {
-        installError = if (bundleReady()) "" else "Embedded Debian rootfs is missing from this APK"
+        installError = if (bundleReady()) "" else "Embedded Debian ext4 rootfs is missing from this APK"
         stage = if (bundleReady()) "debian_bundle_ready" else "blocked:debian_bundle_missing"
-        append("Debian bundle ${if (bundleReady()) "ready" else "missing"}: ${debianAssetName()}")
-        return status()
+        append("Debian bundle ${if (bundleReady()) "ready" else "missing"}: ${debianAssetName()}"); return status()
     }
 
     @Synchronized override fun startDebian(width: Int, height: Int, dpi: Int, refreshRate: Int): String = startLinuxMode()
@@ -245,18 +214,16 @@ class VmBridge : IVmBridge.Stub() {
     private fun startLinuxMode(): String {
         lastError = ""; guestVerified = false; internetReady = false; internetStage = "starting"
         return try {
-            check(bundleReady()) { "Debian 13 rootfs bundle is missing from APK" }
+            check(bundleReady()) { "Debian 13 ext4 rootfs bundle is missing from APK" }
             if (isRunning(vm)) stopInternal()
-            val context = redirectedContext()
-            stage = "config:debian_pvm"
-            append("Using OEM-trusted Microdroid pVM kernel; Debian 13 userspace in encrypted storage")
+            val context = redirectedContext(); stage = "config:debian_pvm"
+            append("Using OEM-trusted Microdroid pVM kernel; encryptedstore is backing only; Debian runs from loop-mounted exec ext4")
             val machine = acquireVm(linuxVmName, buildMicrodroid(context, true), "debian")
             startMachine(machine, "debian")
             stage = "microdroid_adb_root"; ensureAdbRoot(machine)
             stage = "debian_provision"; provisionDebian(machine); guestVerified = true
             stage = "internet_bridge"; startProxyWorkers(machine); startVncForwarder(machine); verifyInternet(machine)
-            stage = "debian_ready"
-            append("[debian] PASS Debian 13 arm64 userspace running on trusted Microdroid kernel")
+            stage = "debian_ready"; append("[debian] PASS Debian 13 arm64 userspace running from executable ext4 root")
             status()
         } catch (t: Throwable) { blocked(t, stage); status() }
     }
@@ -270,12 +237,9 @@ class VmBridge : IVmBridge.Stub() {
             .onFailure { append("[adb_root] adbd restart disconnected control socket as expected: ${AvfReflect.unwrap(it).message}") }
         val deadline = android.os.SystemClock.elapsedRealtime() + 30_000L
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
-            check(isRunning(machine)) { "VM powered off while waiting for adb root" }
-            Thread.sleep(350)
+            check(isRunning(machine)) { "VM powered off while waiting for adb root" }; Thread.sleep(350)
             val out = runCatching { adbShell(machine, "id -u; id; getenforce", 5_000L) }.getOrDefault("")
-            if (out.lineSequence().any { it.trim() == "0" }) {
-                adbRootReady = true; append("[adb_root] PASS Microdroid adbd restarted as VM-local root\n${out.takeLast(2000)}"); return
-            }
+            if (out.lineSequence().any { it.trim() == "0" }) { adbRootReady = true; append("[adb_root] PASS Microdroid adbd restarted as VM-local root\n${out.takeLast(2000)}"); return }
         }
         error("Microdroid adb root did not become ready")
     }
@@ -284,52 +248,51 @@ class VmBridge : IVmBridge.Stub() {
         val script = """
             set -u
             ROOT=$DEBIAN_ROOT
-            ASSET=/mnt/apk/assets/debian-rootfs.tar.gz
-            GZERR=/mnt/encryptedstore/dev1-gzip.err
-            GZRCFILE=/mnt/encryptedstore/dev1-gzip.rc
-            TARERR=/mnt/encryptedstore/dev1-tar.err
+            ASSET=/mnt/apk/assets/debian-rootfs.ext4
+            IMAGE=/mnt/encryptedstore/dev1-debian-root.ext4
+            IMAGE_TMP=/mnt/encryptedstore/dev1-debian-root.ext4.partial
             echo DEV1_PROVISION_BEGIN
             echo UID=${'$'}(id -u)
             echo ASSET_INFO
-            ls -l "${'$'}ASSET" 2>&1 || true
+            ls -lh "${'$'}ASSET" 2>&1 || exit 30
             echo STORAGE_INFO
             df -h /mnt/encryptedstore 2>&1 || true
             mount | grep ' /mnt/encryptedstore ' || true
-            echo TOOL_INFO
-            toybox gzip --help 2>&1 | head -5 || true
-            toybox tar --help 2>&1 | head -8 || true
             mkdir -p "${'$'}ROOT"
-            if [ ! -f "${'$'}ROOT/.dev1-rootfs-ready" ]; then
-              echo DEV1_DEBIAN_UNPACK_START
-              rm -rf "${'$'}ROOT"/* "${'$'}ROOT"/.[!.]* "${'$'}ROOT"/..?* 2>/dev/null || true
-              rm -f "${'$'}GZERR" "${'$'}GZRCFILE" "${'$'}TARERR"
-              if ! toybox gzip --help >/dev/null 2>&1; then
-                echo DEV1_GZIP_UNAVAILABLE
-                exit 31
-              fi
-              if ! toybox tar --help >/dev/null 2>&1; then
-                echo DEV1_TAR_UNAVAILABLE
-                exit 32
-              fi
-              echo DEV1_EXTRACT_PATH=toybox_stream
-              ( toybox gzip -dc "${'$'}ASSET" 2>"${'$'}GZERR"; echo ${'$'}? > "${'$'}GZRCFILE" ) | toybox tar -xomf - -C "${'$'}ROOT" 2>"${'$'}TARERR"
-              TRC=${'$'}?
-              GZRC=${'$'}(cat "${'$'}GZRCFILE" 2>/dev/null || echo 99)
-              echo DEV1_GUNZIP_RC=${'$'}GZRC
-              echo DEV1_TAR_RC=${'$'}TRC
-              if [ -s "${'$'}GZERR" ]; then echo DEV1_GZIP_STDERR; cat "${'$'}GZERR"; fi
-              if [ -s "${'$'}TARERR" ]; then echo DEV1_TAR_STDERR; cat "${'$'}TARERR"; fi
-              [ "${'$'}GZRC" -eq 0 ] || exit 33
-              [ "${'$'}TRC" -eq 0 ] || exit 34
-              test -x "${'$'}ROOT/bin/sh" || { echo DEV1_ROOTFS_SANITY_FAIL=/bin/sh; exit 35; }
-              echo DEV1_DEBIAN_UNPACK_DONE
+
+            if [ ! -f "${'$'}IMAGE" ]; then
+              echo DEV1_EXT4_COPY_START
+              rm -f "${'$'}IMAGE_TMP"
+              cat "${'$'}ASSET" > "${'$'}IMAGE_TMP" || { echo DEV1_EXT4_COPY_FAIL rc=${'$'}?; exit 31; }
+              sync
+              mv "${'$'}IMAGE_TMP" "${'$'}IMAGE" || { echo DEV1_EXT4_RENAME_FAIL rc=${'$'}?; exit 32; }
+              echo DEV1_EXT4_COPY_DONE
+            else
+              echo DEV1_EXT4_IMAGE_REUSE
             fi
+            ls -lh "${'$'}IMAGE" 2>&1 || true
+
+            if ! grep -q " ${'$'}ROOT " /proc/mounts; then
+              echo DEV1_EXT4_MOUNT_START
+              mount -t ext4 -o loop,rw,suid,dev,exec "${'$'}IMAGE" "${'$'}ROOT" 2>&1
+              MRC=${'$'}?
+              echo DEV1_EXT4_MOUNT_RC=${'$'}MRC
+              [ "${'$'}MRC" -eq 0 ] || exit 33
+            fi
+            echo DEV1_EXT4_MOUNT_INFO
+            grep " ${'$'}ROOT " /proc/mounts || { echo DEV1_EXT4_MOUNT_MISSING; exit 34; }
+            if grep " ${'$'}ROOT " /proc/mounts | grep -q noexec; then echo DEV1_EXT4_STILL_NOEXEC; exit 35; fi
+
+            echo DEV1_EXEC_TEST_START
+            chroot "${'$'}ROOT" /bin/sh -c 'echo DEV1_EXEC_ROOT_PASS' 2>&1 || { echo DEV1_EXEC_ROOT_FAIL rc=${'$'}?; exit 36; }
+
             mkdir -p "${'$'}ROOT/dev" "${'$'}ROOT/proc" "${'$'}ROOT/sys" "${'$'}ROOT/tmp" "${'$'}ROOT/run" "${'$'}ROOT/dev/pts"
             chmod 1777 "${'$'}ROOT/tmp" || true
             grep -q " ${'$'}ROOT/dev " /proc/mounts || mount --bind /dev "${'$'}ROOT/dev" 2>&1 || { echo DEV1_BIND_DEV_FAIL rc=${'$'}?; exit 41; }
             grep -q " ${'$'}ROOT/proc " /proc/mounts || mount --bind /proc "${'$'}ROOT/proc" 2>&1 || { echo DEV1_BIND_PROC_FAIL rc=${'$'}?; exit 42; }
             grep -q " ${'$'}ROOT/sys " /proc/mounts || mount --bind /sys "${'$'}ROOT/sys" 2>&1 || { echo DEV1_BIND_SYS_FAIL rc=${'$'}?; exit 43; }
             printf '%s\n' 'nameserver 1.1.1.1' 'nameserver 8.8.8.8' > "${'$'}ROOT/etc/resolv.conf"
+
             if [ -x "${'$'}ROOT/debootstrap/debootstrap" ]; then
               echo DEV1_DEBOOTSTRAP_SECOND_STAGE
               chroot "${'$'}ROOT" /debootstrap/debootstrap --second-stage 2>&1
@@ -337,6 +300,7 @@ class VmBridge : IVmBridge.Stub() {
               echo DEV1_DEBOOTSTRAP_RC=${'$'}DRC
               [ "${'$'}DRC" -eq 0 ] || exit 44
             fi
+
             cat > "${'$'}ROOT/etc/apt/sources.list" <<'EOF'
             deb http://deb.debian.org/debian trixie main
             deb http://deb.debian.org/debian trixie-updates main
@@ -347,20 +311,30 @@ class VmBridge : IVmBridge.Stub() {
             Acquire::http::Proxy "http://127.0.0.1:3128";
             Acquire::https::Proxy "http://127.0.0.1:3128";
             EOF
+
+            echo DEV1_BRIDGE_START
+            if [ -f "${'$'}ROOT/run/dev1-bridge.pid" ]; then kill ${'$'}(cat "${'$'}ROOT/run/dev1-bridge.pid") 2>/dev/null || true; fi
+            chroot "${'$'}ROOT" /bin/sh -c '/usr/local/bin/dev1_guest_bridge >/run/dev1-bridge.log 2>&1 & echo $! >/run/dev1-bridge.pid'
+            sleep 1
+            cat "${'$'}ROOT/run/dev1-bridge.log" 2>/dev/null || true
+            BPID=${'$'}(cat "${'$'}ROOT/run/dev1-bridge.pid" 2>/dev/null || echo '')
+            [ -n "${'$'}BPID" ] && kill -0 "${'$'}BPID" 2>/dev/null || { echo DEV1_BRIDGE_NOT_RUNNING; exit 45; }
+            echo DEV1_BRIDGE_READY pid=${'$'}BPID
+
             touch "${'$'}ROOT/.dev1-rootfs-ready"
             echo DEV1_VERIFY_START
             chroot "${'$'}ROOT" /bin/bash -lc 'cat /etc/os-release; echo ARCH=$(dpkg --print-architecture); apt-get --version | head -1; uname -a; id' 2>&1
             echo DEV1_PROVISION_DONE
         """.trimIndent()
-        val out = adbShell(machine, script, 10L * 60L * 1000L)
-        append("[debian_provision_output]\n${out.takeLast(20000)}")
-        check(out.contains("DEV1_DEBIAN_UNPACK_DONE") || out.contains("DEV1_PROVISION_DONE")) {
-            "Debian extraction failed. Guest output:\n${out.takeLast(18000)}"
+        val out = adbShell(machine, script, 20L * 60L * 1000L)
+        append("[debian_provision_output]\n${out.takeLast(24000)}")
+        check(out.contains("DEV1_EXEC_ROOT_PASS") && out.contains("DEV1_PROVISION_DONE")) {
+            "Debian ext4 provisioning failed. Guest output:\n${out.takeLast(22000)}"
         }
-        check(out.contains("Debian GNU/Linux 13") && out.contains("ARCH=arm64") && out.contains("DEV1_PROVISION_DONE")) {
-            "Debian rootfs verification failed. Guest output:\n${out.takeLast(18000)}"
+        check(out.contains("Debian GNU/Linux 13") && out.contains("ARCH=arm64") && out.contains("DEV1_BRIDGE_READY")) {
+            "Debian rootfs verification failed. Guest output:\n${out.takeLast(22000)}"
         }
-        append("[debian_rootfs] PASS ${debianAssetName()}")
+        append("[debian_rootfs] PASS executable ext4 · ${debianAssetName()}")
     }
 
     private fun verifyInternet(machine: Any) {
@@ -431,18 +405,12 @@ class VmBridge : IVmBridge.Stub() {
     }
 
     private fun serveProxyWorker(pfd: ParcelFileDescriptor) {
-        val dup = ParcelFileDescriptor.dup(pfd.fileDescriptor)
-        val input = FileInputStream(pfd.fileDescriptor)
-        val output = FileOutputStream(dup.fileDescriptor)
+        val dup = ParcelFileDescriptor.dup(pfd.fileDescriptor); val input = FileInputStream(pfd.fileDescriptor); val output = FileOutputStream(dup.fileDescriptor)
         try {
-            val parts = readAsciiLine(input, 4096).trim().split(' ')
-            check(parts.size == 3 && parts[0] == "CONNECT")
+            val parts = readAsciiLine(input, 4096).trim().split(' '); check(parts.size == 3 && parts[0] == "CONNECT")
             val remote = Socket()
-            try {
-                remote.tcpNoDelay = true; remote.connect(InetSocketAddress(parts[1], parts[2].toInt()), 15_000)
-                output.write("OK\n".toByteArray()); output.flush()
-                relayDuplex(input, output, remote.getInputStream(), remote.getOutputStream())
-            } finally { runCatching { remote.close() } }
+            try { remote.tcpNoDelay = true; remote.connect(InetSocketAddress(parts[1], parts[2].toInt()), 15_000); output.write("OK\n".toByteArray()); output.flush(); relayDuplex(input, output, remote.getInputStream(), remote.getOutputStream()) }
+            finally { runCatching { remote.close() } }
         } finally { runCatching { input.close() }; runCatching { output.close() }; runCatching { pfd.close() }; runCatching { dup.close() } }
     }
 
@@ -455,11 +423,8 @@ class VmBridge : IVmBridge.Stub() {
                 while (vncForwardRunning.get() && isRunning(machine)) {
                     val client = server.accept()
                     Thread({
-                        try {
-                            val pfd = connectVsockRetry(machine, VNC_VSOCK_PORT, 10_000L)
-                            val dup = ParcelFileDescriptor.dup(pfd.fileDescriptor)
-                            relayDuplex(client.getInputStream(), client.getOutputStream(), FileInputStream(pfd.fileDescriptor), FileOutputStream(dup.fileDescriptor))
-                        } catch (_: Throwable) {} finally { runCatching { client.close() } }
+                        try { val pfd = connectVsockRetry(machine, VNC_VSOCK_PORT, 10_000L); val dup = ParcelFileDescriptor.dup(pfd.fileDescriptor); relayDuplex(client.getInputStream(), client.getOutputStream(), FileInputStream(pfd.fileDescriptor), FileOutputStream(dup.fileDescriptor)) }
+                        catch (_: Throwable) {} finally { runCatching { client.close() } }
                     }, "dev1-vnc-session").also { it.isDaemon = true; it.start() }
                 }
             } catch (t: Throwable) { if (vncForwardRunning.get()) append("VNC forwarder failed: ${AvfReflect.unwrap(t).message}") }
@@ -474,27 +439,18 @@ class VmBridge : IVmBridge.Stub() {
     }
 
     private fun connectVsockRetry(machine: Any, port: Int, timeoutMs: Long): ParcelFileDescriptor {
-        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
-        var attempt = 0; var last: Throwable? = null
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs; var attempt = 0; var last: Throwable? = null
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
             check(isRunning(machine)) { "VM left STATUS_RUNNING while waiting for vsock port=$port; rawStatus=${runCatching { vmStatus(machine) }.getOrDefault(-999)}" }
             attempt++
-            try {
-                val pfd = connectVsock(machine, port)
-                if (attempt > 1) append("[connect_vsock] PASS port=$port attempt=$attempt")
-                return pfd
-            } catch (t: Throwable) {
-                last = AvfReflect.unwrap(t)
-                if (attempt == 1 || attempt % 8 == 0) append("[connect_vsock] waiting port=$port attempt=$attempt: ${last.message}")
-                Thread.sleep(if (attempt < 6) 250L else 500L)
-            }
+            try { val pfd = connectVsock(machine, port); if (attempt > 1) append("[connect_vsock] PASS port=$port attempt=$attempt"); return pfd }
+            catch (t: Throwable) { last = AvfReflect.unwrap(t); if (attempt == 1 || attempt % 8 == 0) append("[connect_vsock] waiting port=$port attempt=$attempt: ${last.message}"); Thread.sleep(if (attempt < 6) 250L else 500L) }
         }
         throw last ?: IllegalStateException("connectVsock($port) timed out")
     }
 
     private fun adbShell(machine: Any, command: String, timeoutMs: Long = 40_000L): String {
-        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
-        var last: Throwable? = null
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs; var last: Throwable? = null
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
             check(isRunning(machine)) { "VM left STATUS_RUNNING during ADB shell" }
             try { return connectVsockRetry(machine, ADB_VSOCK_PORT, minOf(8_000L, timeoutMs)).use { NativeTransport.shellFd(it.fd, command) } }
@@ -504,9 +460,7 @@ class VmBridge : IVmBridge.Stub() {
     }
 
     private fun readAsciiLine(input: InputStream, max: Int): String {
-        val out = java.io.ByteArrayOutputStream()
-        while (out.size() < max) { val b = input.read(); if (b < 0 || b == '\n'.code) break; if (b != '\r'.code) out.write(b) }
-        return out.toString(StandardCharsets.UTF_8.name())
+        val out = java.io.ByteArrayOutputStream(); while (out.size() < max) { val b = input.read(); if (b < 0 || b == '\n'.code) break; if (b != '\r'.code) out.write(b) }; return out.toString(StandardCharsets.UTF_8.name())
     }
 
     private fun relayDuplex(aIn: InputStream, aOut: OutputStream, bIn: InputStream, bOut: OutputStream) {
@@ -514,10 +468,7 @@ class VmBridge : IVmBridge.Stub() {
         try { copy(bIn, aOut) } finally { runCatching { aIn.close() }; runCatching { bIn.close() }; t.join(1500) }
     }
 
-    private fun copy(input: InputStream, output: OutputStream) {
-        val buf = ByteArray(32768)
-        while (true) { val n = input.read(buf); if (n <= 0) return; output.write(buf, 0, n); output.flush() }
-    }
+    private fun copy(input: InputStream, output: OutputStream) { val buf = ByteArray(32768); while (true) { val n = input.read(buf); if (n <= 0) return; output.write(buf, 0, n); output.flush() } }
 
     @Synchronized override fun guestShell(command: String): String {
         val machine = vm ?: return JSONObject().put("ok", false).put("error", "Managed VM is not created").toString()
@@ -526,9 +477,7 @@ class VmBridge : IVmBridge.Stub() {
     }
 
     override fun openDebianVsock(port: Int): ParcelFileDescriptor {
-        val machine = vm ?: error("Linux VM is not created")
-        check(vmMode == "debian" && isRunning(machine)) { "Debian VM is not running" }
-        return connectVsock(machine, port)
+        val machine = vm ?: error("Linux VM is not created"); check(vmMode == "debian" && isRunning(machine)) { "Debian VM is not running" }; return connectVsock(machine, port)
     }
 
     override fun setDisplaySurface(surface: Surface) = Unit
@@ -538,12 +487,10 @@ class VmBridge : IVmBridge.Stub() {
 
     override fun status(): String {
         val machine = vm
-        return JSONObject()
-            .put("name", when (vmMode) { "debian" -> linuxVmName; "microdroid" -> gateVmName; else -> "" })
-            .put("running", isRunning(machine))
-            .put("rawVmStatus", machine?.let { runCatching { vmStatus(it) }.getOrDefault(-999) } ?: -999)
+        return JSONObject().put("name", when (vmMode) { "debian" -> linuxVmName; "microdroid" -> gateVmName; else -> "" })
+            .put("running", isRunning(machine)).put("rawVmStatus", machine?.let { runCatching { vmStatus(it) }.getOrDefault(-999) } ?: -999)
             .put("cid", -1).put("managed", machine != null).put("mode", vmMode).put("stage", stage)
-            .put("api", "VirtualMachineManager/connectVsock/Microdroid encrypted storage")
+            .put("api", "VirtualMachineManager/connectVsock/Microdroid encrypted storage + executable loop ext4")
             .put("vmRoot", machine?.let { runCatching { (AvfReflect.callOptional(it, "getRootDir") as? File)?.path ?: "" }.getOrDefault("") } ?: "")
             .put("dataDir", vmData.path).put("error", lastError).put("log", logSnapshot())
             .put("debianInstalled", bundleReady()).put("debianInstalling", installing.get()).put("installBytes", 0L).put("installTotal", -1L).put("installProgress", -1.0).put("installError", installError)
@@ -551,7 +498,7 @@ class VmBridge : IVmBridge.Stub() {
             .put("kdeInstalled", desktopMarker().isFile).put("kdeInstalling", desktopInstalling.get()).put("kdeStage", desktopStage).put("kdeError", desktopError)
             .put("vncReady", vncReady || desktopMarker().isFile).put("vncPort", ANDROID_VNC_PORT)
             .put("guestGraphics", if (desktopMarker().isFile) "Debian Plasma 6 via TigerVNC software framebuffer; hardware GPU still unproven" else "Debian pVM ready; desktop/GPU pending")
-            .put("debian", if (guestVerified) "Debian 13 userspace verified in trusted Microdroid pVM" else "embedded Debian bundle ${if (bundleReady()) "ready" else "missing"}")
+            .put("debian", if (guestVerified) "Debian 13 userspace verified on executable loop-mounted ext4" else "embedded Debian ext4 bundle ${if (bundleReady()) "ready" else "missing"}")
             .put("debianVersion", debianAssetName()).put("adbRootReady", adbRootReady).toString()
     }
 
@@ -562,7 +509,7 @@ class VmBridge : IVmBridge.Stub() {
         private const val ADB_VSOCK_PORT = 5555
         private const val PROXY_VSOCK_PORT = 7777
         private const val VNC_VSOCK_PORT = 5901
-        private const val DEBIAN_ROOT = "/mnt/encryptedstore/debian"
+        private const val DEBIAN_ROOT = "/mnt/dev1-debian"
         const val ANDROID_VNC_PORT = 5909
     }
 }
