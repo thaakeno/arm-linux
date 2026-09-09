@@ -39,6 +39,8 @@ int uml_shm_get(__u32 id, unsigned long *phys_out,
                 unsigned long *len_out);
 void uml_shm_put(__u32 id);
 int uml_shm_unregister(__u32 id);
+unsigned long uml_shm_host_map_len(unsigned long phys,
+                                   unsigned long requested);
 
 struct uml_shm_host_msg {
     __u32 id;
@@ -71,6 +73,7 @@ struct uml_shm_map {
     unsigned int users;
     unsigned long phys;
     unsigned long len;
+    unsigned long backing_len;
 };
 
 static struct uml_shm_map uml_shm_maps[UML_SHM_MAX_MAPS];
@@ -112,6 +115,7 @@ int uml_shm_register(__u32 id, int host_fd, unsigned long len,
     uml_shm_maps[free_slot].users = 0;
     uml_shm_maps[free_slot].phys = uml_shm_next_phys;
     uml_shm_maps[free_slot].len = rounded;
+    uml_shm_maps[free_slot].backing_len = len;
     *phys_out = uml_shm_next_phys;
     uml_shm_next_phys += rounded;
 
@@ -119,6 +123,38 @@ int uml_shm_register(__u32 id, int host_fd, unsigned long len,
     return 0;
 }
 EXPORT_SYMBOL_GPL(uml_shm_register);
+
+unsigned long uml_shm_host_map_len(unsigned long phys,
+                                   unsigned long requested)
+{
+    unsigned long flags;
+    unsigned long result = requested;
+    int i;
+
+    spin_lock_irqsave(&uml_shm_lock, flags);
+    for (i = 0; i < UML_SHM_MAX_MAPS; i++) {
+        struct uml_shm_map *m = &uml_shm_maps[i];
+        unsigned long off;
+        unsigned long available;
+
+        if (!m->used || phys < m->phys || phys >= m->phys + m->len)
+            continue;
+
+        off = phys - m->phys;
+        if (off >= m->backing_len) {
+            result = 0;
+        } else {
+            available = m->backing_len - off;
+            if (available < result)
+                result = available;
+        }
+        break;
+    }
+    spin_unlock_irqrestore(&uml_shm_lock, flags);
+
+    return result;
+}
+EXPORT_SYMBOL_GPL(uml_shm_host_map_len);
 
 int uml_shm_lookup(__u32 id, unsigned long *phys_out,
                    unsigned long *len_out)
@@ -269,6 +305,18 @@ new_phys_mapping = r'''int phys_mapping(unsigned long phys, unsigned long long *
     return fd;
 }'''
 replace_once(phys, old_phys_mapping, new_phys_mapping)
+
+tlb = root / "arch/um/kernel/tlb.c"
+replace_once(
+    tlb,
+    "#include <os.h>\n#include <skas.h>\n",
+    "#include <os.h>\n#include <skas.h>\n#include <umshm.h>\n",
+)
+replace_once(
+    tlb,
+    "\t\t\tret = ops->mmap(ops->mm_idp, addr, PAGE_SIZE,\n\t\t\t\t\tprot, fd, offset);",
+    "\t\t\t{\n\t\t\t\tunsigned long host_len;\n\n\t\t\t\thost_len = uml_shm_host_map_len(phys, PAGE_SIZE);\n\t\t\t\tif (!host_len)\n\t\t\t\t\tret = -EINVAL;\n\t\t\t\telse\n\t\t\t\t\tret = ops->mmap(ops->mm_idp, addr, host_len,\n\t\t\t\t\t\t\tprot, fd, offset);\n\t\t\t}",
+)
 
 driver = root / "arch/um/drivers/umshm_kern.c"
 driver.write_text(r'''// SPDX-License-Identifier: GPL-2.0
