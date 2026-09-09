@@ -5,7 +5,7 @@ on:
     branches:
       - venus-uml-poc
     paths:
-      - 'tools/venus_poc/patches/**'
+      - 'tools/venus_poc/apply_umshm.py'
       - 'tools/venus_poc/host_relay_direct.py'
       - 'tools/venus_poc/guest_relay_direct.py'
       - '.github/workflows/build-uml-umshm.yml'
@@ -29,12 +29,12 @@ jobs:
           cd linux-um-arm64
           git checkout 8897487c52233cd00cf2850008ca068892f1ae91
 
-      - name: Check and apply umshm patch
+      - name: Apply umshm source transform
         run: |
+          python3 tools/venus_poc/apply_umshm.py linux-um-arm64
           cd linux-um-arm64
-          git apply --check ../tools/venus_poc/patches/0001-um-add-direct-host-shmem-bridge.patch
-          git apply ../tools/venus_poc/patches/0001-um-add-direct-host-shmem-bridge.patch
           git diff --check
+          git diff -- arch/um/drivers/Makefile arch/um/kernel/physmem.c arch/um/drivers/umshm_kern.c arch/um/include/shared/umshm.h
 
       - name: Install Android NDK r27c
         run: |
