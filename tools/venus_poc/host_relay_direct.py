@@ -13,6 +13,8 @@ DATA_G2H = 2
 FD_DIRECT_H2G = 6
 CTRL_MSG = struct.Struct("=IIQ")
 CTRL_ACK = struct.Struct("=Ii")
+CTRL_REGISTER = 0
+CTRL_UNREGISTER = 1
 
 
 def recvn(sock, n):
@@ -40,16 +42,49 @@ class FramedWriter:
             self.sock.sendall(HDR.pack(t, len(payload)) + payload)
 
 
+class Control:
+    def __init__(self, sock):
+        self.sock = sock
+        self.lock = threading.Lock()
+
+    def _wait_ack(self, obj_id):
+        ack_id, status = CTRL_ACK.unpack(recvn(self.sock, CTRL_ACK.size))
+        if ack_id != obj_id:
+            raise RuntimeError(f"UML ack id mismatch {ack_id} != {obj_id}")
+        return status
+
+    def register(self, obj_id, fd, size):
+        meta = CTRL_MSG.pack(obj_id, CTRL_REGISTER, size)
+        anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                array.array("i", [fd]).tobytes())]
+        with self.lock:
+            sent = self.sock.sendmsg([meta], anc)
+            if sent != len(meta):
+                raise RuntimeError(f"short UML control sendmsg {sent}/{len(meta)}")
+            status = self._wait_ack(obj_id)
+        if status != 0:
+            raise RuntimeError(f"UML rejected shmem id={obj_id}: {status}")
+
+    def unregister(self, obj_id):
+        meta = CTRL_MSG.pack(obj_id, CTRL_UNREGISTER, 0)
+        with self.lock:
+            self.sock.sendall(meta)
+            status = self._wait_ack(obj_id)
+        if status not in (0, -2):  # -ENOENT is already clean
+            raise RuntimeError(f"UML unregister id={obj_id} failed: {status}")
+
+
 class Relay:
-    def __init__(self, venus_path, tcp, ctrl):
+    def __init__(self, venus_path, tcp, control, alloc_id):
         self.venus_path = venus_path
         self.tcp = tcp
-        self.ctrl = ctrl
+        self.control = control
+        self.alloc_id = alloc_id
         self.writer = FramedWriter(tcp)
         self.vsock = None
-        self.next_id = 1
         self.stop = threading.Event()
-        self.ctrl_lock = threading.Lock()
+        self.error = None
+        self.registered_ids = []
 
     def connect_venus(self):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -57,19 +92,28 @@ class Relay:
         self.vsock = s
         print(f"[host-direct] connected to Venus {self.venus_path}", flush=True)
 
+    def _worker(self, fn, label):
+        try:
+            fn()
+        except (EOFError, BrokenPipeError, ConnectionResetError, OSError) as e:
+            if not self.stop.is_set():
+                print(f"[host-direct] {label} closed: {e}", flush=True)
+        except Exception as e:
+            self.error = e
+            print(f"[host-direct] {label} error: {e}", flush=True)
+        finally:
+            self.stop.set()
+            for s in (self.tcp, self.vsock):
+                if s is None:
+                    continue
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
     def register_fd_with_uml(self, obj_id, fd, size):
-        meta = CTRL_MSG.pack(obj_id, 0, size)
-        anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
-                array.array("i", [fd]).tobytes())]
-        with self.ctrl_lock:
-            sent = self.ctrl.sendmsg([meta], anc)
-            if sent != len(meta):
-                raise RuntimeError(f"short UML control sendmsg {sent}/{len(meta)}")
-            ack_id, status = CTRL_ACK.unpack(recvn(self.ctrl, CTRL_ACK.size))
-        if ack_id != obj_id:
-            raise RuntimeError(f"UML ack id mismatch {ack_id} != {obj_id}")
-        if status != 0:
-            raise RuntimeError(f"UML rejected shmem id={obj_id}: {status}")
+        self.control.register(obj_id, fd, size)
+        self.registered_ids.append(obj_id)
         print(f"[host-direct] UML registered id={obj_id} fd={fd} size={size}", flush=True)
 
     def venus_to_guest(self):
@@ -93,8 +137,11 @@ class Relay:
                 continue
 
             if len(fds) != 1:
+                for fd in fds:
+                    os.close(fd)
                 raise RuntimeError(f"expected one external Venus FD, got {len(fds)}")
             if not data:
+                os.close(fds[0])
                 raise RuntimeError("SCM_RIGHTS arrived without carrier byte")
 
             fd = fds[0]
@@ -102,8 +149,7 @@ class Relay:
                 size = os.fstat(fd).st_size
                 if size <= 0:
                     raise RuntimeError(f"non-mappable Venus fd size={size}")
-                obj_id = self.next_id
-                self.next_id += 1
+                obj_id = self.alloc_id()
                 self.register_fd_with_uml(obj_id, fd, size)
                 payload = struct.pack("!IQI", obj_id, size, len(data)) + data
                 self.writer.send(FD_DIRECT_H2G, payload)
@@ -122,14 +168,29 @@ class Relay:
                 raise RuntimeError(f"unexpected guest frame type {t}")
             self.vsock.sendall(payload)
 
+    def cleanup_maps(self):
+        for obj_id in reversed(self.registered_ids):
+            try:
+                self.control.unregister(obj_id)
+                print(f"[host-direct] unregister requested id={obj_id}", flush=True)
+            except Exception as e:
+                print(f"[host-direct] unregister id={obj_id} warning: {e}", flush=True)
+        self.registered_ids.clear()
+
     def run(self):
         self.connect_venus()
-        a = threading.Thread(target=self.venus_to_guest, daemon=True)
-        b = threading.Thread(target=self.guest_to_venus, daemon=True)
-        a.start(); b.start()
+        a = threading.Thread(target=self._worker, args=(self.venus_to_guest, "Venus->guest"), daemon=True)
+        b = threading.Thread(target=self._worker, args=(self.guest_to_venus, "guest->Venus"), daemon=True)
+        a.start()
+        b.start()
         while a.is_alive() and b.is_alive():
-            time.sleep(0.1)
+            time.sleep(0.05)
         self.stop.set()
+        a.join(timeout=1)
+        b.join(timeout=1)
+        self.cleanup_maps()
+        if self.error:
+            raise self.error
 
 
 def unix_listener(path):
@@ -156,20 +217,43 @@ def main():
     tcp_ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     tcp_ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     tcp_ls.bind((args.listen, args.port))
-    tcp_ls.listen(1)
+    tcp_ls.listen(4)
 
     print(f"[host-direct] waiting for patched UML on {args.uml_control}", flush=True)
     ctrl, _ = ctrl_ls.accept()
+    control = Control(ctrl)
     print("[host-direct] patched UML control connected", flush=True)
 
-    print(f"[host-direct] waiting for Debian relay on {args.listen}:{args.port}", flush=True)
-    tcp, addr = tcp_ls.accept()
-    print(f"[host-direct] Debian relay connected from {addr}", flush=True)
+    next_id = 1
+    id_lock = threading.Lock()
+
+    def alloc_id():
+        nonlocal next_id
+        with id_lock:
+            obj_id = next_id
+            next_id += 1
+            if next_id > 0xffffffff:
+                next_id = 1
+            return obj_id
 
     try:
-        Relay(args.venus_unix, tcp, ctrl).run()
+        while True:
+            print(f"[host-direct] waiting for Debian relay on {args.listen}:{args.port}", flush=True)
+            tcp, addr = tcp_ls.accept()
+            print(f"[host-direct] Debian relay connected from {addr}", flush=True)
+            try:
+                Relay(args.venus_unix, tcp, control, alloc_id).run()
+            except Exception as e:
+                print(f"[host-direct] session ended with error: {e}", flush=True)
+            finally:
+                try:
+                    tcp.close()
+                except OSError:
+                    pass
+            print("[host-direct] session finished; ready for next Debian client", flush=True)
+    except (KeyboardInterrupt, EOFError, BrokenPipeError, ConnectionResetError):
+        print("[host-direct] stopping", flush=True)
     finally:
-        tcp.close()
         ctrl.close()
         tcp_ls.close()
         ctrl_ls.close()
