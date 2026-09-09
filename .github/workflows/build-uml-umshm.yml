@@ -6,6 +6,7 @@ on:
       - venus-uml-poc
     paths:
       - 'tools/venus_poc/apply_umshm.py'
+      - 'tools/venus_poc/fix_umshm_nonblock.py'
       - 'tools/venus_poc/host_relay_direct.py'
       - 'tools/venus_poc/guest_relay_direct.py'
       - '.github/workflows/build-uml-umshm.yml'
@@ -32,6 +33,7 @@ jobs:
       - name: Apply umshm source transform
         run: |
           python3 tools/venus_poc/apply_umshm.py linux-um-arm64
+          python3 tools/venus_poc/fix_umshm_nonblock.py linux-um-arm64
           cd linux-um-arm64
           git diff --check
           git diff -- arch/um/drivers/Makefile arch/um/kernel/physmem.c arch/um/drivers/umshm_kern.c arch/um/include/shared/umshm.h
