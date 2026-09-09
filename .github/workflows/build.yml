@@ -47,19 +47,17 @@ jobs:
           sudo debootstrap --arch=arm64 --foreign --variant=minbase trixie build/debian-rootfs http://deb.debian.org/debian
           sudo find build/debian-rootfs/dev build/debian-rootfs/proc build/debian-rootfs/sys build/debian-rootfs/run -mindepth 1 -delete 2>/dev/null || true
 
-          # This helper is a normal Debian/glibc ARM64 executable. It is launched only after
-          # the ext4 image is mounted exec by VM-local root, so Microdroid's noexec encryptedstore
-          # and microdroid_app TCP restrictions no longer apply to it.
           sudo mkdir -p build/debian-rootfs/usr/local/bin
           aarch64-linux-gnu-g++ tools/dev1_guest_bridge.cpp -std=c++20 -O2 -fPIE -pie -pthread -s -o /tmp/dev1_guest_bridge
           sudo install -m 0755 /tmp/dev1_guest_bridge build/debian-rootfs/usr/local/bin/dev1_guest_bridge
 
           printf '%s\n' 'Debian GNU/Linux 13 (trixie) arm64 minbase · executable ext4 root' > app/src/main/assets/debian-version.txt
 
-          # Build a self-contained filesystem instead of extracting a tar directly onto
-          # /mnt/encryptedstore, which the target proves is mounted noexec.
+          # Keep the single ZIP entry below 2 GiB. Android zipalign chokes on a ZIP64-sized
+          # 2.5 GiB ext4 entry even when DEFLATE makes the APK itself much smaller.
+          # 1900 MiB leaves room for Debian + initial desktop packages while staying ZIP32-safe.
           rm -f app/src/main/assets/debian-rootfs.ext4
-          truncate -s 2560M app/src/main/assets/debian-rootfs.ext4
+          truncate -s 1900M app/src/main/assets/debian-rootfs.ext4
           sudo mkfs.ext4 -F -L DEV1_DEBIAN -m 0 -d build/debian-rootfs app/src/main/assets/debian-rootfs.ext4
           sudo e2fsck -fy app/src/main/assets/debian-rootfs.ext4
           sudo chown "$USER:$USER" app/src/main/assets/debian-rootfs.ext4
@@ -133,7 +131,7 @@ jobs:
           apk='app/build/outputs/apk/debug/app-debug.apk'
           with zipfile.ZipFile(apk) as z:
               info=z.getinfo('assets/debian-rootfs.ext4')
-              assert info.file_size >= 2_000_000_000
+              assert 1_800_000_000 <= info.file_size < 2_147_483_648, info.file_size
               with tempfile.NamedTemporaryFile(delete=False) as f:
                   f.write(z.read('assets/debian-rootfs.ext4'))
                   p=f.name
@@ -161,8 +159,9 @@ jobs:
             "commit": "${{ github.sha }}",
             "version": "0.8.5-dev1",
             "apk_signature_v3": "PASS",
-            "debian_bundle": "DEBIAN 13 ARM64 MINBASE INSIDE EXT4 FILESYSTEM IMAGE",
+            "debian_bundle": "DEBIAN 13 ARM64 MINBASE INSIDE 1900 MIB EXT4 FILESYSTEM IMAGE",
             "execution": "NOEXEC ENCRYPTEDSTORE USED ONLY AS BACKING FILE; DEBIAN ROOT LOOP-MOUNTED EXEC",
+            "apk_packaging": "EXT4 ENTRY KEPT BELOW 2 GIB TO AVOID ZIPALIGN ZIP64 FAILURE",
             "network_bridge": "DEBIAN GLIBC ARM64 BRIDGE RUNS FROM EXEC ROOT; HOST INTERNET OVER VSOCK",
             "protected_vm_identity": "UNIQUE PER APK VERSION CODE",
             "runtime": "TARGET PHONE RETEST REQUIRED",
@@ -182,7 +181,7 @@ jobs:
           gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk verification.json apk-signature.txt --clobber
           gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("DreamLinux-") and endswith(".apk"))' | while IFS= read -r asset; do gh release delete-asset "$TAG" "$asset" --yes; done
           gh release upload "$TAG" build/deliverables/DreamLinux-*.apk --clobber
-          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.5-dev1. Debian is now stored in a real ext4 filesystem image. Microdroid encrypted storage remains persistent backing only; the ext4 root is loop-mounted with exec before debootstrap/chroot. Runtime verification requires the target phone."
+          gh release edit "$TAG" --notes "Branch $BRANCH; commit ${{ github.sha }}; version 0.8.5-dev1. Debian is stored in a real ext4 filesystem image. The image is 1900 MiB so the APK entry remains below the ZIP32 2 GiB boundary that broke zipalign in the previous build. Runtime verification requires the target phone."
 
       - name: Temporary Artifact (1 Day Auto-Expiry)
         uses: actions/upload-artifact@v4
