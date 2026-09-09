@@ -68,15 +68,25 @@ jobs:
         env:
           DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
+          mkdir -p "$HOME/.android"
           if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
-            mkdir -p "$HOME/.android"
             printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
             chmod 600 "$HOME/.android/debug.keystore"
             echo "STABLE_SIGNING=true" >> "$GITHUB_ENV"
           else
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA -keysize 2048 -validity 10000
+            chmod 600 "$HOME/.android/debug.keystore"
             echo "STABLE_SIGNING=false" >> "$GITHUB_ENV"
-            echo "::warning::Persistent signing key missing; publishing a test-signed APK. Android may require uninstalling an older differently-signed APK before installation. Files in /data/local/tmp/dev1-linux* are not app-private package data and are not deleted by uninstall."
+            echo "::warning::Persistent signing key missing; generated an ephemeral Android debug key for this rolling test build. Android may require uninstalling an older differently-signed APK before installation. Files in /data/local/tmp/dev1-linux* are retained."
           fi
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+          echo "Debug keystore ready for Gradle and post-build re-signing"
 
       - name: Build and check APK
         run: ./gradlew stageDebugApk testDebugUnitTest lintDebug --no-daemon
@@ -88,21 +98,15 @@ jobs:
           TMP="app/build/outputs/apk/debug/app-repacked.apk"
           ALIGNED="app/build/outputs/apk/debug/app-aligned.apk"
 
-          # aapt has a legacy special case for *.gz assets: it transparently ungzips them and
-          # strips the .gz suffix. Runtime expects the original gzip so rebuild that single ZIP
-          # entry after aapt, then zipalign and sign again.
           python3 - <<'PY'
-          import gzip, os, zipfile
+          import gzip, zipfile
           src='app/build/outputs/apk/debug/app-debug.apk'
           dst='app/build/outputs/apk/debug/app-repacked.apk'
           with zipfile.ZipFile(src, 'r') as zin:
               names=set(zin.namelist())
               root_name='assets/alpine-minirootfs.tar' if 'assets/alpine-minirootfs.tar' in names else 'assets/alpine-minirootfs.tar.gz'
               raw=zin.read(root_name)
-              if root_name.endswith('.gz'):
-                  gz=raw
-              else:
-                  gz=gzip.compress(raw, compresslevel=9, mtime=0)
+              gz=raw if root_name.endswith('.gz') else gzip.compress(raw, compresslevel=9, mtime=0)
               helper=zin.read('assets/dev1_guest_bridge')
               version=zin.read('assets/alpine-version.txt')
               if not helper.startswith(b'\x7fELF'):
@@ -140,7 +144,6 @@ jobs:
           mv "$ALIGNED" "$APK"
           rm -f "$TMP" "$APK.idsig"
 
-          # Overwrite the staged named APK with the normalized/re-signed package too.
           for f in build/deliverables/DreamLinux-*.apk; do
             cp "$APK" "$f"
           done
