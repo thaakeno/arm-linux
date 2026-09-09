@@ -327,7 +327,7 @@ static const struct file_operations uml_shm_fops = {
     .open = uml_shm_open,
     .write = uml_shm_write,
     .mmap = uml_shm_mmap,
-    .llseek = no_llseek,
+    .llseek = noop_llseek,
 };
 
 static struct miscdevice uml_shm_misc = {
