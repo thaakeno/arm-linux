@@ -66,7 +66,7 @@ class MainActivity : ComponentActivity() {
         appendLine("API: ${state.api}")
         appendLine("VM root: ${state.vmRoot}")
         appendLine("Capabilities: ${state.capabilities}")
-        appendLine("Alpine bundle: ${state.debianInstalled}")
+        appendLine("Debian bundle: ${state.debianInstalled}")
         appendLine("Internet: ${state.internetReady} / ${state.internetStage}")
         appendLine("Desktop: ${state.kdeInstalled} / ${state.kdeStage}")
         appendLine("Graphics: ${state.graphics}")
@@ -77,8 +77,8 @@ class MainActivity : ComponentActivity() {
         appendLine("=== GATE A TERMINAL ===")
         appendLine(state.terminal.ifBlank{"No Gate A commands executed."})
         appendLine()
-        appendLine("=== ALPINE TERMINAL ===")
-        appendLine(state.debianTerminal.ifBlank{"No Alpine commands executed."})
+        appendLine("=== DEBIAN TERMINAL ===")
+        appendLine(state.debianTerminal.ifBlank{"No Debian commands executed."})
     }
 
     private fun copyAllLogs(state:SessionState) {
@@ -126,9 +126,9 @@ class MainActivity : ComponentActivity() {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
             Text("About DEV 1 LINUX",style=MaterialTheme.typography.headlineSmall)
             SelectionContainer { Text("Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\nBranch ${BuildConfig.GIT_BRANCH}\nCommit ${BuildConfig.GIT_COMMIT}\nARM64 development build",fontFamily=FontFamily.Monospace) }
-            Text("Linux runs in a real protected AVF/Gunyah virtual machine. The phone's trusted Microdroid kernel stays intact, while a persistent Alpine aarch64 userspace runs from Microdroid's encrypted storage.")
-            Text("VM-local adb root is used only inside the debuggable Microdroid guest to prepare Alpine. Android itself is not rooted and the bootloader stays locked. This is not Termux, proot or CPU emulation.")
-            Text("Internet is carried through VirtualMachine.connectVsock() and a host-side proxy. The initial desktop path is XFCE over TigerVNC for reliability. Hardware GPU acceleration is still experimental and is never reported as working without renderer proof.")
+            Text("Debian 13 runs as a real ARM64 userspace inside a protected AVF/Gunyah VM. The phone's trusted Microdroid kernel stays intact and Debian persists on Microdroid encrypted storage.")
+            Text("VM-local adb root is used only inside the debuggable Microdroid guest to prepare Debian. Android itself is not rooted and the bootloader stays locked. This is not Termux, proot or CPU emulation.")
+            Text("Internet is carried through VirtualMachine.connectVsock() and a host-side proxy. Plasma 6 is displayed through TigerVNC for the reliable first path. Hardware GPU acceleration remains experimental until renderer proof exists.")
         }
     }
 
@@ -139,7 +139,7 @@ class MainActivity : ComponentActivity() {
                     Column(Modifier.weight(1f)) {
                         Text("DEV 1 LINUX",style=MaterialTheme.typography.headlineSmall)
                         Text(BuildConfig.VERSION_NAME,style=MaterialTheme.typography.labelSmall)
-                        Text("ALPINE · MICRODROID pVM · AVF · NO HOST ROOT",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary)
+                        Text("DEBIAN 13 · PLASMA 6 · MICRODROID pVM · AVF",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary)
                     }
                     StatusPill(if(state.running) "RUNNING" else if(state.connected) "READY" else "OFFLINE",state.running)
                 }
@@ -161,13 +161,13 @@ class MainActivity : ComponentActivity() {
                 !state.connected -> SetupCard("1","Connect AVF","Shizuku gives DEV 1 the shell-level bridge needed to reach Android's virtualization stack. No Android root or bootloader unlock.") {
                     Button(onClick={connect()}) { Text("Connect Shizuku") }
                 }
-                !state.debianInstalled -> SetupCard("2","Alpine bundle missing","This APK should contain an Alpine aarch64 minirootfs and the guest bridge. Reinstall the latest DEV 1 build if this remains missing.") {
+                !state.debianInstalled -> SetupCard("2","Debian bundle missing","This APK should contain a Debian 13 arm64 minbase rootfs and the guest bridge. Reinstall the latest DEV 1 build if this remains missing.") {
                     Button(onClick={VmSessionService.active?.installDebian()},enabled=!state.busy) { Text("Recheck bundle") }
                 }
-                !state.running || state.mode!="alpine" -> {
-                    SetupCard("2","Start Alpine Linux","Boots the trusted Microdroid protected VM, enables root only inside that VM, creates the persistent Alpine userspace, and proves Internet before reporting ready.") {
+                !state.running || state.mode!="debian" -> {
+                    SetupCard("2","Start Debian 13","Boots the trusted Microdroid protected VM, enables root only inside that VM, creates the persistent Debian userspace, and proves apt Internet before reporting ready.") {
                         Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                            Button(onClick={startLinux()},enabled=!state.busy) { Text(if(state.debianStarting)"Starting…" else "Start Alpine") }
+                            Button(onClick={startLinux()},enabled=!state.busy) { Text(if(state.debianStarting)"Starting…" else "Start Debian") }
                             OutlinedButton(onClick={VmSessionService.active?.probeCapabilities()},enabled=!state.busy) { Text("Probe AVF") }
                         }
                     }
@@ -176,18 +176,18 @@ class MainActivity : ComponentActivity() {
                 else -> {
                     ReadyCard(state)
                     if(!state.kdeInstalled) {
-                        SetupCard("3","Install Linux desktop","Installs XFCE and TigerVNC inside Alpine through the vsock Internet bridge. Your Alpine filesystem persists across VM restarts.") {
+                        SetupCard("3","Install KDE Plasma 6","Installs Debian's Plasma desktop and TigerVNC through the vsock Internet bridge. Your Debian filesystem persists across VM restarts.") {
                             if(state.kdeInstalling) {
                                 LinearProgressIndicator(Modifier.fillMaxWidth())
                                 Text(state.kdeStage,style=MaterialTheme.typography.bodySmall)
-                            } else Button(onClick={VmSessionService.active?.installKde()},enabled=!state.busy&&state.internetReady) { Text("Install XFCE Desktop") }
+                            } else Button(onClick={VmSessionService.active?.installKde()},enabled=!state.busy&&state.internetReady) { Text("Install KDE Plasma 6") }
                         }
                     }
                     LinuxDisplay(Modifier.weight(1f).fillMaxWidth())
                     KeyToolbar()
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
                         TextButton(onClick={VmSessionService.active?.stopVm()},enabled=!state.busy) { Text("Stop Linux") }
-                        Text(if(state.kdeInstalled) "XFCE via VNC · ${state.graphics}" else "${state.kdeStage} · ${state.graphics}",Modifier.weight(1f),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(if(state.kdeInstalled) "Plasma 6 via VNC · ${state.graphics}" else "${state.kdeStage} · ${state.graphics}",Modifier.weight(1f),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -197,7 +197,7 @@ class MainActivity : ComponentActivity() {
     @Composable private fun ReadyCard(state:SessionState) {
         Surface(Modifier.fillMaxWidth(),shape=RoundedCornerShape(16.dp),color=MaterialTheme.colorScheme.surfaceVariant) {
             Row(Modifier.fillMaxWidth().padding(14.dp),horizontalArrangement=Arrangement.SpaceBetween) {
-                Column { Text("Alpine pVM",style=MaterialTheme.typography.labelLarge); Text("Real ARM64 userspace",style=MaterialTheme.typography.bodySmall) }
+                Column { Text("Debian 13 pVM",style=MaterialTheme.typography.labelLarge); Text("Real ARM64 userspace",style=MaterialTheme.typography.bodySmall) }
                 Column(horizontalAlignment=Alignment.End) { Text(if(state.internetReady)"Internet ready" else state.internetStage,style=MaterialTheme.typography.labelLarge); Text("Persistent encrypted rootfs",style=MaterialTheme.typography.bodySmall) }
             }
         }
@@ -255,15 +255,15 @@ class MainActivity : ComponentActivity() {
 
     @Composable private fun TerminalPage(state:SessionState) {
         var gateCommand by remember { mutableStateOf("id; uname -a; cat /proc/version") }
-        var linuxCommand by remember { mutableStateOf("cat /etc/alpine-release; uname -a; id; env | grep -i proxy || true; apk update") }
+        var linuxCommand by remember { mutableStateOf("cat /etc/os-release; dpkg --print-architecture; uname -a; id; apt-get update") }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             Text("Linux consoles",style=MaterialTheme.typography.headlineSmall)
-            if(state.running&&state.mode=="alpine") {
-                Text("Alpine shell",style=MaterialTheme.typography.titleMedium)
-                Text("Commands execute inside the persistent Alpine rootfs in the protected Microdroid VM.",color=MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedTextField(value=linuxCommand,onValueChange={linuxCommand=it},label={Text("Alpine command")},modifier=Modifier.fillMaxWidth(),minLines=2)
-                Button(onClick={VmSessionService.active?.debianConsole(linuxCommand)},enabled=!state.busy&&linuxCommand.isNotBlank()) { Text("Run in Alpine") }
-                SelectionContainer { ConsoleBox(state.debianTerminal.ifBlank{"No Alpine commands executed yet."}) }
+            if(state.running&&state.mode=="debian") {
+                Text("Debian shell",style=MaterialTheme.typography.titleMedium)
+                Text("Commands execute inside the persistent Debian 13 rootfs in the protected Microdroid VM.",color=MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedTextField(value=linuxCommand,onValueChange={linuxCommand=it},label={Text("Debian command")},modifier=Modifier.fillMaxWidth(),minLines=2)
+                Button(onClick={VmSessionService.active?.debianConsole(linuxCommand)},enabled=!state.busy&&linuxCommand.isNotBlank()) { Text("Run in Debian") }
+                SelectionContainer { ConsoleBox(state.debianTerminal.ifBlank{"No Debian commands executed yet."}) }
             } else {
                 Text("Gate A · stock Microdroid",style=MaterialTheme.typography.titleMedium)
                 Text("Low-level diagnostic path proving managed AVF + connectVsock + ADB.",color=MaterialTheme.colorScheme.onSurfaceVariant)
@@ -288,8 +288,8 @@ class MainActivity : ComponentActivity() {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             Text("Diagnostics",style=MaterialTheme.typography.headlineSmall)
             Metric("Mode",state.mode); Metric("Stage",state.stage); Metric("API",state.api.ifBlank{"not connected"})
-            OutlinedButton(onClick={VmSessionService.active?.startDebianDiagnostic()},enabled=state.connected&&state.debianInstalled&&!state.busy) { Text("Test Alpine pVM + Internet") }
-            Metric("Alpine bundle",if(state.debianInstalled)"embedded" else "missing")
+            OutlinedButton(onClick={VmSessionService.active?.startDebianDiagnostic()},enabled=state.connected&&state.debianInstalled&&!state.busy) { Text("Test Debian pVM + Internet") }
+            Metric("Debian bundle",if(state.debianInstalled)"embedded" else "missing")
             Metric("Internet",if(state.internetReady)"ready" else state.internetStage)
             Metric("Desktop",if(state.kdeInstalled)"provisioned" else state.kdeStage)
             Metric("Graphics",state.graphics)
