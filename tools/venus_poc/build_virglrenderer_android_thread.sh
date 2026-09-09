@@ -45,7 +45,7 @@ if "-Drender-server-worker=thread" not in s:
 
         indent = line[: len(line) - len(line.lstrip())]
         newline = "\r\n" if line.endswith("\r\n") else "\n"
-        lines.insert(i + 1, f"{indent}-Drender-server-worker=thread \\\\{newline}")
+        lines.insert(i + 1, f"{indent}-Drender-server-worker=thread \\{newline}")
         s = "".join(lines)
         break
     else:
