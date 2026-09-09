@@ -28,10 +28,17 @@ header.write_text(r'''/* SPDX-License-Identifier: GPL-2.0 */
 
 #include <linux/types.h>
 
+#define UML_SHM_OP_REGISTER 0
+#define UML_SHM_OP_UNREGISTER 1
+
 int uml_shm_register(__u32 id, int host_fd, unsigned long len,
                      unsigned long *phys_out);
 int uml_shm_lookup(__u32 id, unsigned long *phys_out,
                    unsigned long *len_out);
+int uml_shm_get(__u32 id, unsigned long *phys_out,
+                unsigned long *len_out);
+void uml_shm_put(__u32 id);
+int uml_shm_unregister(__u32 id);
 
 struct uml_shm_host_msg {
     __u32 id;
@@ -58,8 +65,10 @@ registry = r'''
 
 struct uml_shm_map {
     bool used;
+    bool pending_remove;
     __u32 id;
     int fd;
+    unsigned int users;
     unsigned long phys;
     unsigned long len;
 };
@@ -97,8 +106,10 @@ int uml_shm_register(__u32 id, int host_fd, unsigned long len,
     }
 
     uml_shm_maps[free_slot].used = true;
+    uml_shm_maps[free_slot].pending_remove = false;
     uml_shm_maps[free_slot].id = id;
     uml_shm_maps[free_slot].fd = host_fd;
+    uml_shm_maps[free_slot].users = 0;
     uml_shm_maps[free_slot].phys = uml_shm_next_phys;
     uml_shm_maps[free_slot].len = rounded;
     *phys_out = uml_shm_next_phys;
@@ -129,6 +140,90 @@ int uml_shm_lookup(__u32 id, unsigned long *phys_out,
 }
 EXPORT_SYMBOL_GPL(uml_shm_lookup);
 
+int uml_shm_get(__u32 id, unsigned long *phys_out,
+                unsigned long *len_out)
+{
+    unsigned long flags;
+    int i, ret = -ENOENT;
+
+    spin_lock_irqsave(&uml_shm_lock, flags);
+    for (i = 0; i < UML_SHM_MAX_MAPS; i++) {
+        struct uml_shm_map *m = &uml_shm_maps[i];
+
+        if (!m->used || m->id != id)
+            continue;
+        if (m->pending_remove) {
+            ret = -ENOENT;
+            break;
+        }
+        m->users++;
+        *phys_out = m->phys;
+        *len_out = m->len;
+        ret = 0;
+        break;
+    }
+    spin_unlock_irqrestore(&uml_shm_lock, flags);
+    return ret;
+}
+EXPORT_SYMBOL_GPL(uml_shm_get);
+
+void uml_shm_put(__u32 id)
+{
+    unsigned long flags;
+    int close_fd = -1;
+    int i;
+
+    spin_lock_irqsave(&uml_shm_lock, flags);
+    for (i = 0; i < UML_SHM_MAX_MAPS; i++) {
+        struct uml_shm_map *m = &uml_shm_maps[i];
+
+        if (!m->used || m->id != id)
+            continue;
+        if (WARN_ON(!m->users))
+            break;
+        m->users--;
+        if (!m->users && m->pending_remove) {
+            close_fd = m->fd;
+            memset(m, 0, sizeof(*m));
+        }
+        break;
+    }
+    spin_unlock_irqrestore(&uml_shm_lock, flags);
+
+    if (close_fd >= 0)
+        os_close_file(close_fd);
+}
+EXPORT_SYMBOL_GPL(uml_shm_put);
+
+int uml_shm_unregister(__u32 id)
+{
+    unsigned long flags;
+    int close_fd = -1;
+    int i, ret = -ENOENT;
+
+    spin_lock_irqsave(&uml_shm_lock, flags);
+    for (i = 0; i < UML_SHM_MAX_MAPS; i++) {
+        struct uml_shm_map *m = &uml_shm_maps[i];
+
+        if (!m->used || m->id != id)
+            continue;
+        if (m->users) {
+            m->pending_remove = true;
+        } else {
+            close_fd = m->fd;
+            memset(m, 0, sizeof(*m));
+        }
+        ret = 0;
+        break;
+    }
+    spin_unlock_irqrestore(&uml_shm_lock, flags);
+
+    if (close_fd >= 0)
+        os_close_file(close_fd);
+    return ret;
+}
+EXPORT_SYMBOL_GPL(uml_shm_unregister);
+
 '''
 replace_once(
     phys,
@@ -137,14 +232,14 @@ replace_once(
 )
 old_phys_mapping = r'''int phys_mapping(unsigned long phys, unsigned long long *offset_out)
 {
-	int fd = -1;
+\tint fd = -1;
 
-	if (phys < physmem_size) {
-		fd = physmem_fd;
-		*offset_out = phys;
-	}
+\tif (phys < physmem_size) {
+\t\tfd = physmem_fd;
+\t\t*offset_out = phys;
+\t}
 
-	return fd;
+\treturn fd;
 }'''
 new_phys_mapping = r'''int phys_mapping(unsigned long phys, unsigned long long *offset_out)
 {
@@ -233,7 +328,7 @@ static int uml_shm_control(void *unused)
         for (;;) {
             struct uml_shm_host_msg msg;
             struct uml_shm_ack ack;
-            unsigned long phys;
+            unsigned long phys = 0;
             int fd = -1;
             ssize_t n;
             int ret;
@@ -247,22 +342,33 @@ static int uml_shm_control(void *unused)
                 sock = -1;
                 break;
             }
-            if (n != sizeof(msg) || fd < 0) {
+            if (n != sizeof(msg)) {
                 if (fd >= 0)
                     os_close_file(fd);
                 continue;
             }
 
-            if (!msg.size || msg.size > (u64)ULONG_MAX)
+            if (msg.reserved == UML_SHM_OP_UNREGISTER) {
+                if (fd >= 0)
+                    os_close_file(fd);
+                ret = uml_shm_unregister(msg.id);
+                if (!ret)
+                    pr_info("umshm: unregister id=%u\n", msg.id);
+            } else if (msg.reserved != UML_SHM_OP_REGISTER || fd < 0) {
+                if (fd >= 0)
+                    os_close_file(fd);
                 ret = -EINVAL;
-            else
-                ret = uml_shm_register(msg.id, fd, (unsigned long)msg.size, &phys);
-
-            if (ret)
+            } else if (!msg.size || msg.size > (u64)ULONG_MAX) {
                 os_close_file(fd);
-            else
-                pr_info("umshm: id=%u size=%llu phys=0x%lx fd=%d\n",
-                        msg.id, (unsigned long long)msg.size, phys, fd);
+                ret = -EINVAL;
+            } else {
+                ret = uml_shm_register(msg.id, fd, (unsigned long)msg.size, &phys);
+                if (ret)
+                    os_close_file(fd);
+                else
+                    pr_info("umshm: id=%u size=%llu phys=0x%lx fd=%d\n",
+                            msg.id, (unsigned long long)msg.size, phys, fd);
+            }
 
             ack.id = msg.id;
             ack.status = ret;
@@ -290,15 +396,26 @@ static ssize_t uml_shm_write(struct file *file, const char __user *buf,
 
     if (len != sizeof(id))
         return -EINVAL;
+    if (file->private_data)
+        return -EBUSY;
     if (copy_from_user(&id, buf, sizeof(id)))
         return -EFAULT;
 
-    ret = uml_shm_lookup(id, &phys, &map_len);
+    ret = uml_shm_get(id, &phys, &map_len);
     if (ret)
         return ret;
 
     file->private_data = (void *)(unsigned long)id;
     return sizeof(id);
+}
+
+static int uml_shm_release(struct inode *inode, struct file *file)
+{
+    __u32 id = (__u32)(unsigned long)file->private_data;
+
+    if (id)
+        uml_shm_put(id);
+    return 0;
 }
 
 static int uml_shm_mmap(struct file *file, struct vm_area_struct *vma)
@@ -325,6 +442,7 @@ static int uml_shm_mmap(struct file *file, struct vm_area_struct *vma)
 static const struct file_operations uml_shm_fops = {
     .owner = THIS_MODULE,
     .open = uml_shm_open,
+    .release = uml_shm_release,
     .write = uml_shm_write,
     .mmap = uml_shm_mmap,
     .llseek = noop_llseek,
