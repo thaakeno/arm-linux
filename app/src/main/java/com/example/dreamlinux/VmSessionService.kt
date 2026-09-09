@@ -35,22 +35,22 @@ data class SessionState(
     val kdeInstalling:Boolean=false,
     val kdeStage:String="not installed",
     val capabilities:String="Not checked",
-    val graphics:String="unproven"
+    val graphics:String="unproven",
+    val internetReady:Boolean=false,
+    val internetStage:String="not started"
 )
 
 class VmSessionService : Service() {
     companion object { val state=MutableStateFlow(SessionState()); var active:VmSessionService?=null }
-    private var displayRequested = true
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main)
     private var bridge:IVmBridge?=null
     private var pendingSurface:Surface?=null
     private var successfulGateACommands=0
     private var reconnectProbeArmed=false
 
-    // Use the async facade so a long Debian boot/provision transaction never monopolizes the
-    // UserService Binder and make the Android UI look frozen.
+    // New process suffix guarantees an old Debian-era UserService cannot survive an APK update.
     private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,AsyncVmBridge::class.java))
-        .daemon(false).processNameSuffix("vm_bridge_async").debuggable(true).version(BuildConfig.VERSION_CODE) }
+        .daemon(false).processNameSuffix("vm_bridge_alpine").debuggable(true).version(BuildConfig.VERSION_CODE) }
 
     private val connection=object:ServiceConnection {
         override fun onServiceConnected(name:ComponentName,binder:IBinder) {
@@ -60,7 +60,7 @@ class VmSessionService : Service() {
         }
         override fun onServiceDisconnected(name:ComponentName) {
             bridge=null
-            state.value=state.value.copy(connected=false,running=false,debianStarting=false,message="Shizuku bridge disconnected; VM files retained")
+            state.value=state.value.copy(connected=false,running=false,debianStarting=false,message="Shizuku bridge disconnected; Linux data retained")
         }
     }
 
@@ -78,16 +78,15 @@ class VmSessionService : Service() {
                 .put("commit",BuildConfig.GIT_COMMIT).put("branch",BuildConfig.GIT_BRANCH)
                 .put("running",current.running).put("name",current.name).put("mode",current.mode)
                 .put("stage",current.stage).put("api",current.api).put("vmRoot",current.vmRoot)
-                .put("debianStarting",current.debianStarting)
-                .put("debianInstalled",current.debianInstalled).put("debianInstalling",current.debianInstalling)
-                .put("kdeInstalled",current.kdeInstalled).put("kdeInstalling",current.kdeInstalling).put("kdeStage",current.kdeStage)
+                .put("linuxStarting",current.debianStarting)
+                .put("alpineBundleReady",current.debianInstalled)
+                .put("desktopInstalled",current.kdeInstalled).put("desktopInstalling",current.kdeInstalling).put("desktopStage",current.kdeStage)
+                .put("internetReady",current.internetReady).put("internetStage",current.internetStage)
                 .put("graphics",current.graphics).put("capabilities",current.capabilities)
                 .put("message",current.message).put("reconnect",if(reconnectProbeArmed)"PENDING" else if(successfulGateACommands>1)"PASS" else "NOT TESTED")
                 .toString(2))
         } } }
-        // Always refresh. The async bridge's status() is deliberately non-blocking during Debian
-        // startup, so progress remains visible even while an operation owns the UI busy flag.
-        scope.launch { while(isActive) { delay(800); if(bridge!=null) refresh() } }
+        scope.launch { while(isActive) { delay(700); if(bridge!=null) refresh() } }
     }
 
     override fun onStartCommand(intent:Intent?,flags:Int,startId:Int):Int {
@@ -102,30 +101,43 @@ class VmSessionService : Service() {
         val obj=JSONObject(raw)
         val error=obj.optString("error")
         val installError=obj.optString("installError")
-        val kdeError=obj.optString("kdeError")
-        val debianStarting=obj.optBoolean("debianStarting")
+        val desktopError=obj.optString("kdeError")
+        val linuxStarting=obj.optBoolean("debianStarting")
         val msg=when {
-            debianStarting -> "Starting Debian in background · ${obj.optLong("startupElapsedSeconds",0L)}s · UI remains responsive"
-            kdeError.isNotBlank() -> kdeError
-            installError.isNotBlank() -> installError
             error.isNotBlank() -> error
-            obj.optBoolean("kdeInstalling") -> "KDE: ${obj.optString("kdeStage","working")}"
-            obj.optBoolean("debianInstalling") -> {
-                val p=obj.optDouble("installProgress",-1.0)
-                if(p>=0) "Installing Debian ${(p*100).toInt()}%" else "Installing Debian"
-            }
-            else -> "Stage: ${obj.optString("stage","unknown")}"
+            desktopError.isNotBlank() -> desktopError
+            installError.isNotBlank() -> installError
+            linuxStarting -> "Starting Alpine pVM · ${obj.optLong("startupElapsedSeconds",0L)}s · ${humanStage(obj.optString("stage"))}"
+            obj.optBoolean("kdeInstalling") -> "Desktop: ${obj.optString("kdeStage","working")}"
+            else -> humanStage(obj.optString("stage","unknown"))
         }
         state.value=state.value.copy(
             running=obj.optBoolean("running"),cid=obj.optInt("cid",-1),name=obj.optString("name"),
             mode=obj.optString("mode","none"),stage=obj.optString("stage","unknown"),api=obj.optString("api"),
             vmRoot=obj.optString("vmRoot"),console=obj.optString("log"),message=msg,
-            debianStarting=debianStarting,
+            debianStarting=linuxStarting,
             debianInstalled=obj.optBoolean("debianInstalled"),debianInstalling=obj.optBoolean("debianInstalling"),
             installProgress=obj.optDouble("installProgress",-1.0),installBytes=obj.optLong("installBytes",0L),
             installTotal=obj.optLong("installTotal",-1L),kdeInstalled=obj.optBoolean("kdeInstalled"),
             kdeInstalling=obj.optBoolean("kdeInstalling"),kdeStage=obj.optString("kdeStage","not installed"),
-            graphics=obj.optString("guestGraphics","unproven"))
+            graphics=obj.optString("guestGraphics","unproven"),
+            internetReady=obj.optBoolean("internetReady"),internetStage=obj.optString("internetStage","not started"))
+    }
+
+    private fun humanStage(stage:String):String = when(stage) {
+        "config:alpine_pvm" -> "Preparing trusted Microdroid pVM"
+        "vm_create:alpine" -> "Creating Alpine pVM"
+        "vm_start:alpine" -> "Starting protected VM"
+        "vm_wait_running:alpine" -> "Waiting for AVF"
+        "running:alpine" -> "Microdroid running"
+        "microdroid_adb_root" -> "Enabling VM-local root"
+        "alpine_provision" -> "Preparing Alpine userspace"
+        "internet_bridge" -> "Connecting Alpine to phone Internet"
+        "alpine_ready" -> "Alpine Linux ready"
+        "desktop_packages" -> "Installing XFCE desktop"
+        "desktop_ready" -> "XFCE desktop ready"
+        "guest_command_pass" -> "Gate A guest command passed"
+        else -> if(stage.startsWith("blocked:")) "Blocked: ${stage.removePrefix("blocked:")}" else "Stage: $stage"
     }
 
     private suspend fun refresh() {
@@ -135,30 +147,21 @@ class VmSessionService : Service() {
 
     private suspend fun waitForVmRunning(b:IVmBridge, timeoutMs:Long=30_000L):String {
         val deadline=SystemClock.elapsedRealtime()+timeoutMs
-        var lastRaw=""
         var lastStage="unknown"
         while(SystemClock.elapsedRealtime()<deadline) {
             val raw=withContext(Dispatchers.IO){b.status()}
-            lastRaw=raw
             val obj=JSONObject(raw)
             lastStage=obj.optString("stage","unknown")
             applyStatus(raw)
             if(obj.optBoolean("running")) return raw
-
             val error=obj.optString("error")
-            if(error.isNotBlank() || lastStage.startsWith("blocked:")) {
-                throw IllegalStateException(if(error.isNotBlank()) error else "VM startup blocked at $lastStage")
-            }
-            if(lastStage.startsWith("stopped:") || lastStage.startsWith("deleted:")) {
-                throw IllegalStateException("VM stopped before becoming ready (stage=$lastStage)")
-            }
+            if(error.isNotBlank() || lastStage.startsWith("blocked:")) throw IllegalStateException(if(error.isNotBlank()) error else "VM blocked at $lastStage")
             delay(200)
         }
-        val suffix=if(lastRaw.isBlank()) "" else "; last status=$lastStage"
-        throw IllegalStateException("Timed out waiting for AVF VM to reach STATUS_RUNNING$suffix")
+        throw IllegalStateException("Timed out waiting for AVF VM; last stage=$lastStage")
     }
 
-    private suspend fun waitForDebianStartup(b:IVmBridge, timeoutMs:Long=12L*60L*1000L) {
+    private suspend fun waitForLinuxStartup(b:IVmBridge, timeoutMs:Long=12L*60L*1000L) {
         val deadline=SystemClock.elapsedRealtime()+timeoutMs
         while(SystemClock.elapsedRealtime()<deadline) {
             val raw=withContext(Dispatchers.IO){b.status()}
@@ -167,58 +170,64 @@ class VmSessionService : Service() {
             if(!obj.optBoolean("debianStarting")) {
                 val error=obj.optString("error")
                 if(error.isNotBlank() || obj.optString("stage").startsWith("blocked:")) {
-                    throw IllegalStateException(if(error.isNotBlank()) error else "Debian startup blocked at ${obj.optString("stage")}")
+                    throw IllegalStateException(if(error.isNotBlank()) error else "Linux startup blocked at ${obj.optString("stage")}")
                 }
                 return
             }
-            delay(500)
+            delay(400)
         }
-        throw IllegalStateException("Debian startup exceeded 12 minutes; check diagnostics")
+        throw IllegalStateException("Alpine startup exceeded 12 minutes; check diagnostics")
     }
 
     fun startVm()=operation { b ->
         applyStatus(withContext(Dispatchers.IO){b.startVm()})
         waitForVmRunning(b,45_000L)
-        state.value=state.value.copy(message="Microdroid VM running; guest endpoint will be retried as needed")
+        state.value=state.value.copy(message="Microdroid Gate A running")
     }
+
     fun stopVm()=operation { b ->
         pendingSurface=null
         applyStatus(withContext(Dispatchers.IO){b.stopVm()})
         if(successfulGateACommands>0) reconnectProbeArmed=true
-        state.value=state.value.copy(message="Managed VM stopped; VM data retained")
+        state.value=state.value.copy(message="Linux VM stopped; encrypted Alpine data retained")
     }
-    fun installDebian()=operation("debian") { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
-    fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation("debian") { b ->
-        displayRequested=false
+
+    fun installDebian()=operation("linux") { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
+
+    fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation("linux") { b ->
         pendingSurface=null
-        state.value=state.value.copy(message="Launching Debian…")
+        state.value=state.value.copy(message="Launching Alpine pVM…")
         applyStatus(withContext(Dispatchers.IO){b.startDebian(width,height,dpi,refreshRate)})
-        waitForDebianStartup(b)
+        waitForLinuxStartup(b)
         refresh()
     }
-    fun startDebianDiagnostic()=operation("debian") { b ->
-        displayRequested=false
+
+    fun startDebianDiagnostic()=operation("linux") { b ->
         pendingSurface=null
-        state.value=state.value.copy(message="Launching Debian diagnostic…")
+        state.value=state.value.copy(message="Launching Alpine diagnostic…")
         applyStatus(withContext(Dispatchers.IO){b.startDebianDiagnostic()})
-        waitForDebianStartup(b)
+        waitForLinuxStartup(b)
         refresh()
     }
-    fun installKde()=operation("debian") { b ->
+
+    fun installKde()=operation("linux") { b ->
         applyStatus(withContext(Dispatchers.IO){b.installKde()})
+        // installKde starts its own guest worker; status polling shows package progress.
         refresh()
     }
-    fun debianConsole(command:String)=operation("debian") { b ->
+
+    fun debianConsole(command:String)=operation("linux") { b ->
         waitForVmRunning(b,60_000L)
         val reply=withContext(Dispatchers.IO){b.debianConsole(command)}
         val result=JSONObject(reply)
-        check(result.optBoolean("ok")) { result.optString("error","Debian command failed") }
+        check(result.optBoolean("ok")) { result.optString("error","Alpine command failed") }
         val output=result.optString("output")
         state.value=state.value.copy(
             debianTerminal=(state.value.debianTerminal+"\n# $command\n$output").takeLast(256000),
-            message="Debian command completed")
+            message="Alpine command completed")
         refresh()
     }
+
     fun probeCapabilities()=operation { b ->
         val raw=withContext(Dispatchers.IO){b.inspectCapabilities()}
         val obj=JSONObject(raw)
@@ -229,15 +238,13 @@ class VmSessionService : Service() {
             append(" · custom=").append(obj.optBoolean("customImageApi"))
             append(" · GPU API=").append(obj.optBoolean("gpuConfigApi"))
             append(" · display API=").append(obj.optBoolean("displayConfigApi"))
-            append(" · display client class=").append(obj.optBoolean("displayServiceApi"))
         } else "Capability probe failed: ${obj.optString("error")}" 
         state.value=state.value.copy(capabilities=text,message=text)
         refresh()
     }
+
     fun shell(command:String)=operation { b ->
-        if(!state.value.running || state.value.mode!="microdroid") {
-            applyStatus(withContext(Dispatchers.IO){b.startVm()})
-        }
+        if(!state.value.running || state.value.mode!="microdroid") applyStatus(withContext(Dispatchers.IO){b.startVm()})
         waitForVmRunning(b,45_000L)
         val reply=withContext(Dispatchers.IO){b.guestShell(command)}
         val result=JSONObject(reply)
@@ -248,29 +255,14 @@ class VmSessionService : Service() {
         if(reconnected) reconnectProbeArmed=false
         state.value=state.value.copy(
             terminal=(state.value.terminal+"\n$ $command\n$output").takeLast(256000),
-            message=if(reconnected)"Reconnect verified: guest command succeeded after VM restart" else "Guest command completed through sanctioned vsock FD")
+            message=if(reconnected)"Reconnect verified" else "Gate A command completed")
         refresh()
     }
 
-    fun attachSurface(surface:Surface) {
-        pendingSurface=surface
-        val b=bridge?:return
-        if(!displayRequested||state.value.mode!="debian"||!state.value.running||!surface.isValid)return
-        scope.launch { runCatching { withContext(Dispatchers.IO){b.setDisplaySurface(surface)} }
-            .onFailure { state.value=state.value.copy(message="Display attach failed: ${it.message}") }
-            refresh() }
-    }
-    fun detachSurface(surface:Surface?=null) {
-        if(surface==null||pendingSurface===surface) pendingSurface=null
-        val b=bridge?:return
-        scope.launch { runCatching { withContext(Dispatchers.IO){b.clearDisplaySurface()} }; refresh() }
-    }
-    fun sendKey(action:Int,keyCode:Int,metaState:Int):Boolean = runCatching {
-        bridge?.sendKey(action,keyCode,metaState) ?: false
-    }.getOrDefault(false)
-    fun sendTouch(action:Int,x:Float,y:Float,pointerId:Int):Boolean = runCatching {
-        bridge?.sendTouch(action,x,y,pointerId) ?: false
-    }.getOrDefault(false)
+    fun attachSurface(surface:Surface) { pendingSurface=surface }
+    fun detachSurface(surface:Surface?=null) { if(surface==null||pendingSurface===surface) pendingSurface=null }
+    fun sendKey(action:Int,keyCode:Int,metaState:Int):Boolean = false
+    fun sendTouch(action:Int,x:Float,y:Float,pointerId:Int):Boolean = false
 
     private fun operation(failureChannel:String="microdroid",block:suspend (IVmBridge)->Unit) {
         if(state.value.busy) return
@@ -278,7 +270,7 @@ class VmSessionService : Service() {
         state.value=state.value.copy(busy=true)
         scope.launch { try { block(b) } catch(e:Exception) {
             val error=e.message?:e.javaClass.simpleName
-            state.value=if(failureChannel=="debian") state.value.copy(message=error,debianTerminal=(state.value.debianTerminal+"\nERROR: $error\n").takeLast(120000))
+            state.value=if(failureChannel=="linux") state.value.copy(message=error,debianTerminal=(state.value.debianTerminal+"\nERROR: $error\n").takeLast(120000))
                 else state.value.copy(message=error,terminal=(state.value.terminal+"\nERROR: $error\n").takeLast(120000))
             refresh()
             state.value=state.value.copy(message=error)
