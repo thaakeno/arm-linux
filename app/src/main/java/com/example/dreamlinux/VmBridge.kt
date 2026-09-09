@@ -285,40 +285,43 @@ class VmBridge : IVmBridge.Stub() {
             set -u
             ROOT=$DEBIAN_ROOT
             ASSET=/mnt/apk/assets/debian-rootfs.tar.gz
-            TMP=/mnt/encryptedstore/dev1-debian-rootfs.tar
-            GUNZIP=/mnt/encryptedstore/dev1_gunzip
+            GZERR=/mnt/encryptedstore/dev1-gzip.err
+            GZRCFILE=/mnt/encryptedstore/dev1-gzip.rc
+            TARERR=/mnt/encryptedstore/dev1-tar.err
             echo DEV1_PROVISION_BEGIN
             echo UID=${'$'}(id -u)
             echo ASSET_INFO
-            ls -l "${'$'}ASSET" /mnt/apk/assets/dev1_gunzip 2>&1 || true
+            ls -l "${'$'}ASSET" 2>&1 || true
             echo STORAGE_INFO
             df -h /mnt/encryptedstore 2>&1 || true
             mount | grep ' /mnt/encryptedstore ' || true
+            echo TOOL_INFO
+            toybox gzip --help 2>&1 | head -5 || true
+            toybox tar --help 2>&1 | head -8 || true
             mkdir -p "${'$'}ROOT"
             if [ ! -f "${'$'}ROOT/.dev1-rootfs-ready" ]; then
               echo DEV1_DEBIAN_UNPACK_START
               rm -rf "${'$'}ROOT"/* "${'$'}ROOT"/.[!.]* "${'$'}ROOT"/..?* 2>/dev/null || true
-              rm -f "${'$'}TMP"
-              if toybox gzip --help >/dev/null 2>&1; then
-                echo DEV1_GUNZIP_PATH=toybox
-                toybox gzip -dc "${'$'}ASSET" > "${'$'}TMP" 2>&1
-                GZRC=${'$'}?
-              else
-                echo DEV1_GUNZIP_PATH=encryptedstore_helper
-                cp /mnt/apk/assets/dev1_gunzip "${'$'}GUNZIP" || { echo DEV1_GUNZIP_COPY_FAIL rc=${'$'}?; exit 31; }
-                chmod 755 "${'$'}GUNZIP" || { echo DEV1_GUNZIP_CHMOD_FAIL rc=${'$'}?; exit 32; }
-                "${'$'}GUNZIP" "${'$'}ASSET" "${'$'}TMP" 2>&1
-                GZRC=${'$'}?
+              rm -f "${'$'}GZERR" "${'$'}GZRCFILE" "${'$'}TARERR"
+              if ! toybox gzip --help >/dev/null 2>&1; then
+                echo DEV1_GZIP_UNAVAILABLE
+                exit 31
               fi
-              echo DEV1_GUNZIP_RC=${'$'}GZRC
-              [ "${'$'}GZRC" -eq 0 ] || exit 33
-              ls -lh "${'$'}TMP" 2>&1 || true
-              echo DEV1_TAR_EXTRACT_START
-              toybox tar -xomf "${'$'}TMP" -C "${'$'}ROOT" 2>&1
+              if ! toybox tar --help >/dev/null 2>&1; then
+                echo DEV1_TAR_UNAVAILABLE
+                exit 32
+              fi
+              echo DEV1_EXTRACT_PATH=toybox_stream
+              ( toybox gzip -dc "${'$'}ASSET" 2>"${'$'}GZERR"; echo ${'$'}? > "${'$'}GZRCFILE" ) | toybox tar -xomf - -C "${'$'}ROOT" 2>"${'$'}TARERR"
               TRC=${'$'}?
+              GZRC=${'$'}(cat "${'$'}GZRCFILE" 2>/dev/null || echo 99)
+              echo DEV1_GUNZIP_RC=${'$'}GZRC
               echo DEV1_TAR_RC=${'$'}TRC
+              if [ -s "${'$'}GZERR" ]; then echo DEV1_GZIP_STDERR; cat "${'$'}GZERR"; fi
+              if [ -s "${'$'}TARERR" ]; then echo DEV1_TAR_STDERR; cat "${'$'}TARERR"; fi
+              [ "${'$'}GZRC" -eq 0 ] || exit 33
               [ "${'$'}TRC" -eq 0 ] || exit 34
-              rm -f "${'$'}TMP"
+              test -x "${'$'}ROOT/bin/sh" || { echo DEV1_ROOTFS_SANITY_FAIL=/bin/sh; exit 35; }
               echo DEV1_DEBIAN_UNPACK_DONE
             fi
             mkdir -p "${'$'}ROOT/dev" "${'$'}ROOT/proc" "${'$'}ROOT/sys" "${'$'}ROOT/tmp" "${'$'}ROOT/run" "${'$'}ROOT/dev/pts"
@@ -349,13 +352,13 @@ class VmBridge : IVmBridge.Stub() {
             chroot "${'$'}ROOT" /bin/bash -lc 'cat /etc/os-release; echo ARCH=$(dpkg --print-architecture); apt-get --version | head -1; uname -a; id' 2>&1
             echo DEV1_PROVISION_DONE
         """.trimIndent()
-        val out = adbShell(machine, script, 300_000L)
-        append("[debian_provision_output]\n${out.takeLast(16000)}")
+        val out = adbShell(machine, script, 10L * 60L * 1000L)
+        append("[debian_provision_output]\n${out.takeLast(20000)}")
         check(out.contains("DEV1_DEBIAN_UNPACK_DONE") || out.contains("DEV1_PROVISION_DONE")) {
-            "Debian extraction failed. Guest output:\n${out.takeLast(14000)}"
+            "Debian extraction failed. Guest output:\n${out.takeLast(18000)}"
         }
         check(out.contains("Debian GNU/Linux 13") && out.contains("ARCH=arm64") && out.contains("DEV1_PROVISION_DONE")) {
-            "Debian rootfs verification failed. Guest output:\n${out.takeLast(14000)}"
+            "Debian rootfs verification failed. Guest output:\n${out.takeLast(18000)}"
         }
         append("[debian_rootfs] PASS ${debianAssetName()}")
     }
