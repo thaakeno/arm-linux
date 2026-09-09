@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <chrono>
 #include <cstdint>
+#include <algorithm>
 #include <sys/socket.h>
 
 namespace {
@@ -27,7 +28,8 @@ void ready(int fd, short events, Clock::time_point deadline) {
     do { rc=poll(&p,1,static_cast<int>(left)); } while(rc<0 && errno==EINTR);
     if(rc==0) throw std::runtime_error("Guest connection timed out");
     if(rc<0) throw std::runtime_error(std::string("poll: ")+strerror(errno));
-    if(p.revents&(POLLERR|POLLHUP|POLLNVAL)) throw std::runtime_error("Guest connection closed");
+    if(p.revents&(POLLERR|POLLNVAL)) throw std::runtime_error("Guest connection error");
+    if((p.revents&POLLHUP) && !(p.revents&events)) throw std::runtime_error("Guest connection closed");
 }
 
 void transfer(int fd, void* ptr, size_t len, bool write, Clock::time_point deadline) {
@@ -49,11 +51,12 @@ void packet(int fd,uint32_t cmd,uint32_t a,uint32_t b,const std::string& data,Cl
     if(!data.empty()) transfer(fd,const_cast<char*>(data.data()),data.size(),true,until);
 }
 
-std::string adbServiceFd(int suppliedFd,const std::string& service, int timeoutSeconds=25) {
+std::string adbServiceFd(int suppliedFd,const std::string& service, int timeoutSeconds) {
     Fd s{dup(suppliedFd)};
     if(s.fd<0) throw std::runtime_error(std::string("dup vsock fd: ")+strerror(errno));
     int flags=fcntl(s.fd,F_GETFL,0);
     if(flags>=0) fcntl(s.fd,F_SETFL,flags|O_NONBLOCK);
+    timeoutSeconds=std::max(5,std::min(timeoutSeconds,3600));
     auto until=Clock::now()+std::chrono::seconds(timeoutSeconds);
     packet(s.fd,CNXN,0x01000000,256*1024,std::string("host::\0",7),until);
     bool opened=false;
@@ -79,7 +82,7 @@ std::string adbServiceFd(int suppliedFd,const std::string& service, int timeoutS
             remoteId=h.a;
             out+=data;
             packet(s.fd,OKAY,1,h.a,"",until);
-            if(out.size()>512*1024) throw std::runtime_error("Guest output exceeded 512 KB limit");
+            if(out.size()>2*1024*1024) throw std::runtime_error("Guest output exceeded 2 MB limit");
         } else if(h.cmd==CLSE&&opened){
             packet(s.fd,CLSE,1,h.a? h.a:remoteId,"",until);
             return out;
@@ -87,19 +90,15 @@ std::string adbServiceFd(int suppliedFd,const std::string& service, int timeoutS
     }
 }
 
-std::string shellFd(int suppliedFd,const std::string& command) {
-    return adbServiceFd(suppliedFd,"shell:"+command,30);
-}
-
 jstring toJString(JNIEnv* env, const std::string& value) {
     return env->NewStringUTF(value.c_str());
 }
 }
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_example_dreamlinux_NativeTransport_shellFd(JNIEnv* env,jobject,jint fd,jstring cmd){
+extern "C" JNIEXPORT jstring JNICALL Java_com_example_dreamlinux_NativeTransport_shellFd(JNIEnv* env,jobject,jint fd,jstring cmd,jint timeoutSeconds){
     const char* value=env->GetStringUTFChars(cmd,nullptr); if(!value) return nullptr;
     std::string command(value); env->ReleaseStringUTFChars(cmd,value);
-    try { return toJString(env,shellFd(fd,command)); }
+    try { return toJString(env,adbServiceFd(fd,"shell:"+command,timeoutSeconds)); }
     catch(const std::exception& e){ env->ThrowNew(env->FindClass("java/io/IOException"),e.what()); return nullptr; }
 }
 
