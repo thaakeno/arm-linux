@@ -95,10 +95,10 @@ jstring toJString(JNIEnv* env, const std::string& value) {
 }
 }
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_example_dreamlinux_NativeTransport_shellFd(JNIEnv* env,jobject,jint fd,jstring cmd,jint timeoutSeconds){
+extern "C" JNIEXPORT jstring JNICALL Java_com_example_dreamlinux_NativeTransport_shellFd(JNIEnv* env,jobject,jint fd,jstring cmd){
     const char* value=env->GetStringUTFChars(cmd,nullptr); if(!value) return nullptr;
     std::string command(value); env->ReleaseStringUTFChars(cmd,value);
-    try { return toJString(env,adbServiceFd(fd,"shell:"+command,timeoutSeconds)); }
+    try { return toJString(env,adbServiceFd(fd,"shell:"+command,1800)); }
     catch(const std::exception& e){ env->ThrowNew(env->FindClass("java/io/IOException"),e.what()); return nullptr; }
 }
 
