@@ -49,38 +49,63 @@ void packet(int fd,uint32_t cmd,uint32_t a,uint32_t b,const std::string& data,Cl
     if(!data.empty()) transfer(fd,const_cast<char*>(data.data()),data.size(),true,until);
 }
 
-std::string shellFd(int suppliedFd,const std::string& command) {
+std::string adbServiceFd(int suppliedFd,const std::string& service, int timeoutSeconds=25) {
     Fd s{dup(suppliedFd)};
     if(s.fd<0) throw std::runtime_error(std::string("dup vsock fd: ")+strerror(errno));
     int flags=fcntl(s.fd,F_GETFL,0);
     if(flags>=0) fcntl(s.fd,F_SETFL,flags|O_NONBLOCK);
-    auto until=Clock::now()+std::chrono::seconds(25);
-    packet(s.fd,CNXN,0x01000000,4096,std::string("host::\0",7),until);
+    auto until=Clock::now()+std::chrono::seconds(timeoutSeconds);
+    packet(s.fd,CNXN,0x01000000,256*1024,std::string("host::\0",7),until);
     bool opened=false;
+    uint32_t remoteId=0;
     std::string out;
     for(;;){
-        Header h{}; transfer(s.fd,&h,sizeof(h),false,until);
-        if(h.magic!=(h.cmd^0xffffffff)||h.len>1024*1024) throw std::runtime_error("Invalid ADB packet");
+        Header h{};
+        try {
+            transfer(s.fd,&h,sizeof(h),false,until);
+        } catch(const std::exception&) {
+            if(opened && !out.empty()) return out;
+            throw;
+        }
+        if(h.magic!=(h.cmd^0xffffffff)||h.len>4*1024*1024) throw std::runtime_error("Invalid ADB packet");
         std::string data(h.len,'\0'); if(h.len) transfer(s.fd,data.data(),h.len,false,until);
         if(h.cmd==AUTH) throw std::runtime_error("Guest requested ADB authentication");
         if(h.cmd==CNXN&&!opened){
-            auto service="shell:"+command; service.push_back('\0');
-            packet(s.fd,OPEN,1,0,service,until); opened=true;
+            auto name=service; name.push_back('\0');
+            packet(s.fd,OPEN,1,0,name,until); opened=true;
+        } else if(h.cmd==OKAY&&opened&&h.b==1){
+            remoteId=h.a;
         } else if(h.cmd==WRTE&&opened&&h.b==1){
+            remoteId=h.a;
             out+=data;
             packet(s.fd,OKAY,1,h.a,"",until);
-            if(out.size()>256*1024) throw std::runtime_error("Guest output exceeded 256 KB limit");
+            if(out.size()>512*1024) throw std::runtime_error("Guest output exceeded 512 KB limit");
         } else if(h.cmd==CLSE&&opened){
-            packet(s.fd,CLSE,1,h.a,"",until);
+            packet(s.fd,CLSE,1,h.a? h.a:remoteId,"",until);
             return out;
         }
     }
+}
+
+std::string shellFd(int suppliedFd,const std::string& command) {
+    return adbServiceFd(suppliedFd,"shell:"+command,30);
+}
+
+jstring toJString(JNIEnv* env, const std::string& value) {
+    return env->NewStringUTF(value.c_str());
 }
 }
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_example_dreamlinux_NativeTransport_shellFd(JNIEnv* env,jobject,jint fd,jstring cmd){
     const char* value=env->GetStringUTFChars(cmd,nullptr); if(!value) return nullptr;
     std::string command(value); env->ReleaseStringUTFChars(cmd,value);
-    try { auto result=shellFd(fd,command); return env->NewStringUTF(result.c_str()); }
+    try { return toJString(env,shellFd(fd,command)); }
+    catch(const std::exception& e){ env->ThrowNew(env->FindClass("java/io/IOException"),e.what()); return nullptr; }
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_example_dreamlinux_NativeTransport_serviceFd(JNIEnv* env,jobject,jint fd,jstring service){
+    const char* value=env->GetStringUTFChars(service,nullptr); if(!value) return nullptr;
+    std::string name(value); env->ReleaseStringUTFChars(service,value);
+    try { return toJString(env,adbServiceFd(fd,name,30)); }
     catch(const std::exception& e){ env->ThrowNew(env->FindClass("java/io/IOException"),e.what()); return nullptr; }
 }
