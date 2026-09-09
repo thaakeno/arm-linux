@@ -11,6 +11,8 @@ HDR = struct.Struct("!BI")
 DATA_H2G = 1
 DATA_G2H = 2
 FD_DIRECT_H2G = 6
+FD_SIGNAL_H2G = 7
+SIGNAL_H2G = 8
 
 
 def recvn(sock, n):
@@ -46,6 +48,8 @@ class Relay:
         self.writer = FramedWriter(tcp)
         self.stop = threading.Event()
         self.error = None
+        self.sync_writers = {}
+        self.sync_lock = threading.Lock()
 
     def _worker(self, fn, label):
         try:
@@ -99,11 +103,76 @@ class Relay:
             os.close(fd)
             raise
 
+    def pass_fd_to_mesa(self, fd, data, label):
+        anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                array.array("i", [fd]).tobytes())]
+        sent = self.local.sendmsg([data], anc)
+        if sent != len(data):
+            raise RuntimeError(f"short SCM_RIGHTS sendmsg {sent}/{len(data)} ({label})")
+
+    def make_sync_pipe(self, sync_id, data):
+        flags = 0
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "pipe2"):
+            read_fd, write_fd = os.pipe2(flags)
+        else:
+            read_fd, write_fd = os.pipe()
+
+        try:
+            self.pass_fd_to_mesa(read_fd, data, f"sync id={sync_id}")
+            with self.sync_lock:
+                old = self.sync_writers.pop(sync_id, None)
+                if old is not None:
+                    os.close(old)
+                self.sync_writers[sync_id] = write_fd
+            write_fd = -1
+            print(
+                f"[guest-direct] passed guest sync pipe fd={read_fd} id={sync_id} "
+                f"carrier={len(data)}",
+                flush=True,
+            )
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+
+    def signal_sync(self, sync_id):
+        with self.sync_lock:
+            write_fd = self.sync_writers.pop(sync_id, None)
+        if write_fd is None:
+            # Signal can race very slightly with session teardown; otherwise it
+            # indicates a protocol bug.
+            if not self.stop.is_set():
+                raise RuntimeError(f"signal for unknown sync id={sync_id}")
+            return
+        try:
+            os.write(write_fd, b"\x01")
+            print(f"[guest-direct] signalled guest sync pipe id={sync_id}", flush=True)
+        finally:
+            os.close(write_fd)
+
     def host_to_local(self):
         while not self.stop.is_set():
             t, payload = recv_frame(self.tcp)
             if t == DATA_H2G:
                 self.local.sendall(payload)
+                continue
+
+            if t == SIGNAL_H2G:
+                if len(payload) != 4:
+                    raise RuntimeError("bad SIGNAL_H2G frame")
+                self.signal_sync(struct.unpack("!I", payload)[0])
+                continue
+
+            if t == FD_SIGNAL_H2G:
+                if len(payload) < 8:
+                    raise RuntimeError("short FD_SIGNAL_H2G frame")
+                sync_id, data_len = struct.unpack("!II", payload[:8])
+                data = payload[8:8 + data_len]
+                if len(data) != data_len or not data:
+                    raise RuntimeError("sync FD frame missing carrier byte")
+                self.make_sync_pipe(sync_id, data)
                 continue
 
             if t != FD_DIRECT_H2G:
@@ -118,11 +187,7 @@ class Relay:
 
             fd = self.make_umshm_fd(obj_id)
             try:
-                anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
-                        array.array("i", [fd]).tobytes())]
-                sent = self.local.sendmsg([data], anc)
-                if sent != len(data):
-                    raise RuntimeError(f"short SCM_RIGHTS sendmsg {sent}/{len(data)}")
+                self.pass_fd_to_mesa(fd, data, f"umshm id={obj_id}")
                 print(
                     f"[guest-direct] passed /dev/umshm fd={fd} id={obj_id} "
                     f"size={size} carrier={data_len}",
@@ -132,6 +197,16 @@ class Relay:
                 # Mesa owns the SCM_RIGHTS reference now. Closing our copy lets
                 # /dev/umshm .release track the real client lifetime.
                 os.close(fd)
+
+    def cleanup_syncs(self):
+        with self.sync_lock:
+            fds = list(self.sync_writers.values())
+            self.sync_writers.clear()
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     def run(self):
         a = threading.Thread(target=self._worker, args=(self.local_to_host, "Mesa->host"), daemon=True)
@@ -143,6 +218,7 @@ class Relay:
         self.stop.set()
         a.join(timeout=1)
         b.join(timeout=1)
+        self.cleanup_syncs()
         if self.error:
             raise self.error
 
