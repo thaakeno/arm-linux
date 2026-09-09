@@ -48,9 +48,8 @@ class Relay:
         self.tcp = tcp
         self.writer = FramedWriter(tcp)
         self.vsock = None
-        self.shmem = None
-        self.shmem_fd = None
-        self.shmem_size = 0
+        self.shmem = {}
+        self.next_id = 1
         self.stop = threading.Event()
 
     def connect_venus(self):
@@ -60,9 +59,12 @@ class Relay:
         print(f"[host] connected to {self.unix_path}", flush=True)
 
     def venus_to_guest(self):
+        # One-byte recvmsg is deliberate. SCM_RIGHTS on SOCK_STREAM is attached
+        # to a byte position. Reading large chunks can move/drop the ancillary
+        # data when the receiver consumes preceding protocol bytes with read().
         ancbuf = socket.CMSG_SPACE(16 * struct.calcsize("i"))
         while not self.stop.is_set():
-            data, anc, flags, _ = self.vsock.recvmsg(1 << 20, ancbuf)
+            data, anc, flags, _ = self.vsock.recvmsg(1, ancbuf)
             if not data and not anc:
                 raise EOFError("venus socket closed")
 
@@ -87,28 +89,39 @@ class Relay:
             if st.st_size <= 0:
                 raise RuntimeError(f"external FD has non-mappable size {st.st_size}")
 
+            obj_id = self.next_id
+            self.next_id += 1
             mm = mmap.mmap(fd, st.st_size, mmap.MAP_SHARED,
                            mmap.PROT_READ | mmap.PROT_WRITE)
-            self.shmem_fd = fd
-            self.shmem = mm
-            self.shmem_size = st.st_size
+            self.shmem[obj_id] = {
+                "fd": fd,
+                "mm": mm,
+                "size": st.st_size,
+            }
 
             image = mm[:]
-            payload = struct.pack("!QI", st.st_size, len(data)) + data + image
+            payload = struct.pack("!IQI", obj_id, st.st_size, len(data)) + data + image
             self.writer.send(FD_H2G, payload)
-            print(f"[host] captured SCM_RIGHTS fd={fd} size={st.st_size} bytes", flush=True)
+            print(
+                f"[host] captured SCM_RIGHTS id={obj_id} fd={fd} "
+                f"size={st.st_size} data_len={len(data)}",
+                flush=True,
+            )
 
             threading.Thread(target=self.sync_host_to_guest,
-                             daemon=True).start()
+                             args=(obj_id,), daemon=True).start()
 
-    def sync_host_to_guest(self):
-        prev = bytearray(self.shmem[:])
-        while not self.stop.is_set() and self.shmem is not None:
-            cur = self.shmem[:]
-            for off in range(0, self.shmem_size, PAGE):
-                end = min(off + PAGE, self.shmem_size)
+    def sync_host_to_guest(self, obj_id):
+        obj = self.shmem[obj_id]
+        mm = obj["mm"]
+        size = obj["size"]
+        prev = bytearray(mm[:])
+        while not self.stop.is_set() and obj_id in self.shmem:
+            cur = mm[:]
+            for off in range(0, size, PAGE):
+                end = min(off + PAGE, size)
                 if cur[off:end] != prev[off:end]:
-                    payload = struct.pack("!QI", off, end - off) + cur[off:end]
+                    payload = struct.pack("!IQI", obj_id, off, end - off) + cur[off:end]
                     self.writer.send(SHMEM_H2G, payload)
                     prev[off:end] = cur[off:end]
             time.sleep(0.001)
@@ -119,11 +132,12 @@ class Relay:
             if t == DATA_G2H:
                 self.vsock.sendall(payload)
             elif t == SHMEM_G2H:
-                if self.shmem is None:
+                obj_id, off, n = struct.unpack("!IQI", payload[:16])
+                obj = self.shmem.get(obj_id)
+                if obj is None:
                     continue
-                off, n = struct.unpack("!QI", payload[:12])
-                chunk = payload[12:12+n]
-                self.shmem[off:off+n] = chunk
+                chunk = payload[16:16+n]
+                obj["mm"][off:off+n] = chunk
             else:
                 raise RuntimeError(f"unexpected guest frame type {t}")
 
