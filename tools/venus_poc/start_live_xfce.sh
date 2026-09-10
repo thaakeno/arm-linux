@@ -81,7 +81,7 @@ echo "[desktop] XFCE_READY display=$DISPLAY pid=$!"
 '''
 enc = base64.b64encode(guest.encode()).decode()
 cmd = "printf '%s' '" + enc + "' | base64 -d > /root/start-xfce-live.sh\nchmod +x /root/start-xfce-live.sh\nbash /root/start-xfce-live.sh\n"
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s = socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
 s.settimeout(2)
 s.connect(sock_path)
 s.sendall(cmd.encode())
@@ -89,21 +89,59 @@ s.close()
 PY
 
 echo "[desktop] starting XFCE inside Debian"
-echo "[desktop] if XFCE is not installed yet, this first run can take a few minutes; later starts are fast"
+
+echo "[desktop] live progress below (first install is the slow part)"
+start_ts=$(date +%s)
+spin='|/-\\'
+idx=0
+last_detail=''
 
 for _ in $(seq 1 2400); do
   if grep -q '\[desktop\] XFCE_READY' "$SESSION" 2>/dev/null; then
+    printf '\r\033[K[desktop] [########################] 100%%  XFCE ready\n'
     echo "[desktop] XFCE is running inside Debian. Switch to Termux:X11 and interact with it."
     exit 0
   fi
+
   if grep -qE 'E: |dpkg: error|Temporary failure resolving|Could not resolve|Unable to fetch' "$SESSION" 2>/dev/null; then
+    printf '\r\033[K'
     echo "[desktop] install/start hit an error:" >&2
     grep -E 'E: |dpkg: error|Temporary failure resolving|Could not resolve|Unable to fetch' "$SESSION" | tail -20 >&2 || true
     exit 1
   fi
+
+  now=$(date +%s)
+  elapsed=$((now-start_ts))
+  ch=${spin:$((idx%4)):1}
+  idx=$((idx+1))
+
+  if grep -q '\[desktop\] FIRST_INSTALL_BEGIN' "$SESSION" 2>/dev/null && ! grep -q '\[desktop\] FIRST_INSTALL_DONE' "$SESSION" 2>/dev/null; then
+    stage="installing XFCE"
+    # Show the newest meaningful apt/dpkg action so it is obvious the install is moving.
+    detail=$(grep -E '^(Get:|Fetched |Selecting previously unselected package|Unpacking |Setting up |Processing triggers for )' "$SESSION" 2>/dev/null | tail -1 | sed 's/[[:space:]]\+/ /g' || true)
+    [ -n "$detail" ] && last_detail="$detail"
+  elif grep -q '\[desktop\] FIRST_INSTALL_DONE' "$SESSION" 2>/dev/null; then
+    stage="launching XFCE"
+    last_detail="starting xfce4-session"
+  else
+    stage="checking Debian packages"
+  fi
+
+  # Indeterminate bar: this is intentionally not a fake percentage because apt
+  # does not expose a reliable total package-completion percentage here.
+  pos=$((idx%24))
+  bar='........................'
+  bar="${bar:0:$pos}#${bar:$((pos+1))}"
+  printf '\r\033[K[desktop] [%s] %s  %s  %ss' "$bar" "$ch" "$stage" "$elapsed"
+  if [ -n "$last_detail" ]; then
+    short=$(printf '%s' "$last_detail" | cut -c1-70)
+    printf '  | %s' "$short"
+  fi
+
   sleep .25
 done
 
+printf '\r\033[K'
 echo "[desktop] timed out waiting for XFCE" >&2
 tail -100 "$SESSION" 2>/dev/null || true
 exit 1
