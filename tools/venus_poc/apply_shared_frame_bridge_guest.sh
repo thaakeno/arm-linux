@@ -127,10 +127,10 @@ unset VN_PERF || true
 export VK_DRIVER_FILES=/root/virtio-wsi-test.json
 export XDG_RUNTIME_DIR=/tmp
 
-echo "[frame-guest] running vkcube for 15 seconds"
+echo "[frame-guest] running vkcube continuously; close the vkcube window when you are done"
 rm -f /tmp/vkcube-local-window.log
 set +e
-timeout 15s vkcube > /tmp/vkcube-local-window.log 2>&1
+vkcube > /tmp/vkcube-local-window.log 2>&1
 rc=$?
 set -e
 cat /tmp/vkcube-local-window.log
