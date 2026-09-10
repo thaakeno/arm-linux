@@ -40,12 +40,15 @@ jobs:
       - name: Validate rootless runtime controller
         run: |
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon.py
+          python3 -m py_compile tools/venus_poc/vessel_acceptance.py
           python3 -m py_compile tools/venus_poc/host_relay_direct.py
           python3 -m py_compile tools/venus_poc/guest_relay_direct.py
           bash -n tools/venus_poc/run_venus_uml.sh
           bash -n tools/venus_poc/build_guest_mesa_venus_26_2.sh
           grep -q 'ENABLE_X11' tools/venus_poc/run_venus_uml.sh
           grep -q 'render-server-worker=thread' tools/venus_poc/build_virglrenderer_android_thread.sh
+          grep -q 'Virtio-GPU Venus' tools/venus_poc/vessel_acceptance.py
+          grep -q 'RFB 003.008' tools/venus_poc/vessel_acceptance.py
 
       - name: Compile, unit-test and lint
         run: |
