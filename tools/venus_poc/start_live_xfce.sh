@@ -22,6 +22,10 @@ mkdir -p /tmp/runtime-root
 chmod 700 /tmp/runtime-root
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 
+# Clear the persistent vkcube test window before starting the actual desktop.
+pkill -f '[v]kcube' 2>/dev/null || true
+sleep 1
+
 if ! command -v xfce4-session >/dev/null 2>&1; then
   echo "[desktop] installing XFCE (one-time; this is the slow part)"
   apt-get update
