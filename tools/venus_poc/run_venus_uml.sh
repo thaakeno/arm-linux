@@ -31,6 +31,65 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# A daemon/APK restart can lose ownership of an already-running UML process.
+# UML then keeps an advisory lock on the raw ext4 image and the next boot panics
+# with "Failed to lock debian-docker.ext4". Clean only linux-umshm processes
+# that are using THIS runtime directory/image, never unrelated UML instances.
+cleanup_stale_uml() {
+  local found=0 pid cmd cwd
+  for proc in /proc/[0-9]*; do
+    pid="${proc##*/}"
+    [ "$pid" = "$$" ] && continue
+    [ -r "$proc/cmdline" ] || continue
+    cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+    case "$cmd" in
+      *linux-umshm*ubd0=debian-docker.ext4*) ;;
+      *) continue ;;
+    esac
+    cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
+    if [ "$cwd" = "$UML_DIR" ] || [[ "$cmd" == *"$UML_DIR/linux-umshm"* ]]; then
+      echo "[venus-run] stopping stale UML pid=$pid holding $UML_DIR/debian-docker.ext4"
+      kill "$pid" 2>/dev/null || true
+      found=1
+    fi
+  done
+
+  if [ "$found" = "1" ]; then
+    for _ in $(seq 1 40); do
+      local alive=0
+      for proc in /proc/[0-9]*; do
+        [ -r "$proc/cmdline" ] || continue
+        cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+        case "$cmd" in
+          *linux-umshm*ubd0=debian-docker.ext4*)
+            cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
+            if [ "$cwd" = "$UML_DIR" ] || [[ "$cmd" == *"$UML_DIR/linux-umshm"* ]]; then alive=1; break; fi
+            ;;
+        esac
+      done
+      [ "$alive" = "0" ] && break
+      sleep 0.1
+    done
+
+    # Escalate only if a matching stale UML process ignored TERM.
+    for proc in /proc/[0-9]*; do
+      pid="${proc##*/}"
+      [ -r "$proc/cmdline" ] || continue
+      cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+      case "$cmd" in
+        *linux-umshm*ubd0=debian-docker.ext4*)
+          cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
+          if [ "$cwd" = "$UML_DIR" ] || [[ "$cmd" == *"$UML_DIR/linux-umshm"* ]]; then
+            echo "[venus-run] force-stopping stale UML pid=$pid"
+            kill -9 "$pid" 2>/dev/null || true
+          fi
+          ;;
+      esac
+    done
+    sleep 0.2
+  fi
+}
+
 for f in \
   "$POC_DIR/tools/venus_poc/host_relay_direct.py" \
   "$UML_DIR/linux-umshm" \
@@ -50,6 +109,7 @@ if [ "$REQUIRE_THREAD_WORKER" = "1" ] && [ ! -e "$THREAD_WORKER_MARKER" ]; then
   exit 1
 fi
 
+cleanup_stale_uml
 pkill -f '[h]ost_relay_direct.py' 2>/dev/null || true
 pkill -f '[v]irgl_test_server_android' 2>/dev/null || true
 rm -f "$VENUS_SOCK" "$UMSHM_SOCK"
@@ -65,11 +125,6 @@ if [ "$ENABLE_X11" = "1" ]; then
   }
 
   X11_UNIX="$PREFIX/tmp/.X11-unix/X${X11_DISPLAY_NUM}"
-
-  # A stale X socket can survive an old Termux:X11 process. Starting the
-  # launcher based only on `-S` then leaves the Android activity showing
-  # "Not connected" even though the proxy socket exists. Always establish a
-  # fresh X server for this self-contained Venus session.
   pkill -f '[t]ermux-x11' 2>/dev/null || true
   pkill -f "socat TCP-LISTEN:${X11_TCP_PORT}.*X${X11_DISPLAY_NUM}" 2>/dev/null || true
   rm -f "$X11_UNIX"
