@@ -16,7 +16,7 @@ for f in "$ROOT/console.py" "$HOST_SRC" "$PATCH" "$GUEST_SCRIPT" "$TOOLS/host_re
   [ -f "$f" ] || { echo "missing: $f" >&2; exit 1; }
 done
 
-echo "[host] preparing shared-memory local-window presenter"
+echo "[host] preparing verified local presentation proxy"
 cp "$TOOLS/host_relay_direct.py" "$TOOLS/host_relay_direct_base.py"
 sed -i 's/import host_relay_direct as base/import host_relay_direct_base as base/' "$TOOLS/host_relay_frame.py"
 cat > "$TOOLS/host_relay_direct.py" <<PY
@@ -53,19 +53,28 @@ sync
 rm -f "$CONSOLE" "$FRAME_PATH"
 : > "$SESSION"; : > "$HOST_LOG"
 
-if ! command -v clang >/dev/null 2>&1 || ! pkg-config --exists xcb 2>/dev/null; then pkg install -y clang libxcb pkg-config; fi
+if ! command -v clang >/dev/null 2>&1 || ! pkg-config --exists xcb 2>/dev/null; then
+  pkg install -y clang libxcb pkg-config
+fi
 clang -O2 "$HOST_SRC" -o "$HOST_BIN" $(pkg-config --cflags --libs xcb)
 
 echo "[host] booting isolated UML + Venus + Termux:X11"
 cd "$ROOT"
 POC_DIR="$POC_DIR" python console.py >"$SESSION" 2>&1 &
 CPID=$!
-for _ in $(seq 1 120); do [ -S "$CONSOLE" ] && break; kill -0 "$CPID" 2>/dev/null || { tail -160 "$SESSION"; exit 1; }; sleep .25; done
-for _ in $(seq 1 280); do grep -q 'root@umdebian:/#' "$SESSION" 2>/dev/null && [ -f "$FRAME_PATH" ] && break; sleep .25; done
+for _ in $(seq 1 120); do
+  [ -S "$CONSOLE" ] && break
+  kill -0 "$CPID" 2>/dev/null || { tail -160 "$SESSION"; exit 1; }
+  sleep .25
+done
+for _ in $(seq 1 280); do
+  grep -q 'root@umdebian:/#' "$SESSION" 2>/dev/null && [ -f "$FRAME_PATH" ] && break
+  sleep .25
+done
 grep -q 'root@umdebian:/#' "$SESSION" || { echo "Debian did not reach shell"; tail -200 "$SESSION"; exit 1; }
 [ -f "$FRAME_PATH" ] || { echo "shared frame file missing"; exit 1; }
 
-echo "[host] starting local presenter; it will draw into vkcube's own real X11 window"
+echo "[host] starting always-on-top local Vulkan presenter"
 DISPLAY=:0 "$HOST_BIN" "$FRAME_PATH" >"$HOST_LOG" 2>&1 &
 HPID=$!
 sleep 1
@@ -80,23 +89,28 @@ cmd=("printf '%s' '"+patch+"' | base64 -d > /root/mesa-26.2.2-x11-present-stall.
      "printf '%s' '"+script+"' | base64 -d > /root/apply_shared_frame_bridge_guest.sh\n"
      "chmod +x /root/apply_shared_frame_bridge_guest.sh\n"
      "bash /root/apply_shared_frame_bridge_guest.sh\n")
-s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sock_path); s.sendall(cmd.encode()); s.close()
+s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+s.connect(sock_path); s.sendall(cmd.encode()); s.close()
 PY
 
-echo "[host] vkcube local-window present test running"
-for _ in $(seq 1 360); do grep -q '\[frame-guest\] vkcube exit=' "$SESSION" 2>/dev/null && break; kill -0 "$CPID" 2>/dev/null || break; sleep .25; done
+echo "[host] vkcube test running; switch to Termux:X11 now"
+for _ in $(seq 1 360); do
+  grep -q '\[frame-guest\] vkcube exit=' "$SESSION" 2>/dev/null && break
+  kill -0 "$CPID" 2>/dev/null || break
+  sleep .25
+done
 sleep 1
 
 echo
-echo "========== LOCAL WINDOW PRESENT =========="
-grep -E '\[local-present\]' "$HOST_LOG" | tail -120 || true
+echo "========== VERIFIED LOCAL PRESENT =========="
+grep -E '\[local-present\]' "$HOST_LOG" | tail -160 || true
 echo
 echo "========== GUEST =========="
 grep -E 'UML-FRAME: DIRECT|\[frame-guest\]|ERROR|error|assert' "$SESSION" | tail -120 || true
 echo
 echo "========== RESULT =========="
-if grep -q 'DIAG=DIRECT_TO_REAL_WINDOW_WORKS' "$HOST_LOG"; then
-  echo "SUCCESS: rendered Vulkan frames were written locally into vkcube's own X11 window. No second overlay window exists in this test."
+if grep -q 'DIAG=VISIBLE_PROXY_PRESENT_WORKS' "$HOST_LOG" && grep -q 'VISIBLE_VERIFY=PASS' "$HOST_LOG"; then
+  echo "SUCCESS: Vulkan pixels were copied through UML shared memory, uploaded into a host-owned local Termux:X11 proxy, read back byte-for-byte correctly, and the proxy was kept above the guest window."
 else
-  echo "FAIL: local presenter did not complete direct presentation. Relevant logs are above."
+  echo "FAIL: the verified local proxy did not complete. Relevant logs are above; do not rerun older branches."
 fi
