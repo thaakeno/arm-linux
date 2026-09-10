@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import pty
+import re
 import select
 import shlex
 import signal
@@ -24,7 +25,7 @@ import time
 from collections import deque
 from typing import Any
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 HOME = pathlib.Path.home()
 POC = pathlib.Path(os.environ.get("VESSEL_POC_DIR", str(HOME / "venus-poc")))
 RUNTIME = pathlib.Path(os.environ.get("VESSEL_UML_DIR", str(HOME / "venus-wsi-local")))
@@ -164,6 +165,11 @@ class Runtime:
                 raise RuntimeError("UML exited during boot. " + self.console_text[-4000:])
             if self.guest_ready:
                 self.set_progress("debian_ready", 35, "Debian shell ready")
+                # The UML console has its own guest-side tty settings. Turning
+                # host PTY echo off is not enough: bash otherwise echoes every
+                # injected command, including our large base64 helper payloads.
+                self._write("stty -echo 2>/dev/null || true\n")
+                time.sleep(0.15)
                 self._prepare_venus_guest()
                 self.set_progress("debian_ready", 55, "Debian + Venus ready")
                 return self.state()
@@ -182,6 +188,10 @@ class Runtime:
             raise RuntimeError("Debian is not ready")
         marker = "__VESSEL_DONE_%x__" % int(time.time_ns())
         wrapped = f"{command}\nprintf '{marker}:%s\\n' $?\n"
+        # Only accept a marker followed by an actual numeric exit status. The
+        # guest tty can echo the literal `printf '<marker>:%s\\n' $?` command;
+        # treating that echoed `%s` as the result caused ValueError during boot.
+        result_re = re.compile(re.escape(marker) + r":([0-9]+)")
         with self.command_lock:
             with self.lock:
                 start = len(self.console_text)
@@ -190,11 +200,10 @@ class Runtime:
             while time.monotonic() < deadline:
                 with self.lock:
                     text = self.console_text[start:]
-                idx = text.find(marker + ":")
-                if idx >= 0:
-                    tail = text[idx:].splitlines()[0]
-                    rc = int(tail.split(":", 1)[1])
-                    output = text[:idx]
+                match = result_re.search(text)
+                if match is not None:
+                    rc = int(match.group(1))
+                    output = text[:match.start()]
                     if rc != 0:
                         raise RuntimeError(f"guest command failed rc={rc}: {output[-5000:]}")
                     return output
