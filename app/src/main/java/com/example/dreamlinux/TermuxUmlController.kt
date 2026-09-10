@@ -21,6 +21,8 @@ class TermuxUmlController(private val context: Context) {
         const val CONTROL_PORT = 47631
         const val VNC_PORT = 5901
 
+        private const val TERMUX_HOME = "/data/data/com.termux/files/home"
+        private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
         private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
         private const val EXTRA_PATH = "com.termux.RUN_COMMAND_PATH"
         private const val EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
@@ -39,10 +41,9 @@ class TermuxUmlController(private val context: Context) {
         context.checkSelfPermission(RUN_COMMAND_PERMISSION) == PackageManager.PERMISSION_GRANTED
 
     /**
-     * Keep the user's ~/venus-poc checkout untouched.  A detached runtime
+     * Keep the user's ~/venus-poc checkout untouched. A detached runtime
      * worktree is refreshed from app/vessel-final and only that worktree is
-     * used by the APK.  This avoids the branch/file mismatch that made the
-     * earlier manual tests so easy to break.
+     * used by the APK.
      */
     private fun launchDaemon() {
         check(isTermuxInstalled()) { "Termux is not installed" }
@@ -65,9 +66,9 @@ class TermuxUmlController(private val context: Context) {
         val intent = Intent().apply {
             setClassName(TERMUX_PACKAGE, "com.termux.app.RunCommandService")
             action = ACTION_RUN_COMMAND
-            putExtra(EXTRA_PATH, "\$PREFIX/bin/bash")
+            putExtra(EXTRA_PATH, TERMUX_BASH)
             putExtra(EXTRA_ARGUMENTS, arrayOf("-lc", command))
-            putExtra(EXTRA_WORKDIR, "~/")
+            putExtra(EXTRA_WORKDIR, TERMUX_HOME)
             putExtra(EXTRA_BACKGROUND, true)
         }
         context.startService(intent)
@@ -101,7 +102,10 @@ class TermuxUmlController(private val context: Context) {
                 last = t
             }
         }
-        throw IllegalStateException("Vessel runtime daemon did not start; inspect ~/vessel-daemon.log", last)
+        throw IllegalStateException(
+            "Vessel runtime daemon did not start. In Termux run tools/venus_poc/setup_vessel_termux.sh once, then inspect ~/vessel-daemon.log if needed.",
+            last
+        )
     }
 
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
