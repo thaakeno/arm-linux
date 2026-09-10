@@ -4,9 +4,19 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+    <!-- Legacy AVF compatibility only. UML + Venus is the default and does not require AVF/root. -->
     <uses-permission android:name="android.permission.MANAGE_VIRTUAL_MACHINE" />
     <uses-permission android:name="android.permission.USE_CUSTOM_VIRTUAL_MACHINE" />
-    <uses-feature android:name="android.software.virtualization_framework" android:required="true" />
+    <uses-feature android:name="android.software.virtualization_framework" android:required="false" />
+
+    <queries>
+        <package android:name="com.termux" />
+        <intent>
+            <action android:name="com.termux.RUN_COMMAND" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="false"
@@ -16,16 +26,25 @@
         android:supportsRtl="true"
         android:windowSoftInputMode="adjustResize"
         android:theme="@style/Theme.DreamLinux">
-        <provider android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku" android:exported="true"
+
+        <!-- Kept for the optional legacy backend; primary UML operation does not bind Shizuku. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
-        <service android:name=".VmSessionService" android:exported="false"
+
+        <service
+            android:name=".VmSessionService"
+            android:exported="false"
             android:foregroundServiceType="specialUse">
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-started local virtual machine session" />
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started local ARM64 Linux session" />
         </service>
+
         <activity
-            android:name=".MainActivity"
+            android:name=".VesselActivity"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
             android:exported="true">
             <intent-filter>
@@ -33,5 +52,9 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="false" />
     </application>
 </manifest>
