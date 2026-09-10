@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Vessel rootless runtime controller for the proven Termux UML + Venus stack.
+"""Vessel rootless runtime controller for the Termux-hosted UML + Venus stack.
 
 The daemon owns the UML PTY, starts the Venus renderer/umshm relay, launches a
 local TigerVNC X server in Debian, and exposes a loopback-only JSON protocol for
-the Android APK.  VNC uses a guest-initiated reverse tunnel because the stock
-umnet helper intentionally starts passt with inbound forwarding disabled.
+the Android APK. Long operations are intentionally concurrent with status/log
+requests so the APK can show live boot/install progress.
 """
 from __future__ import annotations
 
@@ -18,11 +18,13 @@ import shlex
 import signal
 import socket
 import subprocess
+import termios
 import threading
 import time
 from collections import deque
 from typing import Any
 
+PROTOCOL_VERSION = 2
 HOME = pathlib.Path.home()
 POC = pathlib.Path(os.environ.get("VESSEL_POC_DIR", str(HOME / "venus-poc")))
 RUNTIME = pathlib.Path(os.environ.get("VESSEL_UML_DIR", str(HOME / "venus-wsi-local")))
@@ -54,7 +56,16 @@ class Runtime:
         self.guest_ready = False
         self.desktop_ready = False
         self.last_error = ""
+        self.progress_phase = "idle"
+        self.progress_percent = -1
+        self.progress_detail = "Runtime ready"
         self.vnc_proxy: ReverseVncProxy | None = None
+
+    def set_progress(self, phase: str, percent: int, detail: str) -> None:
+        with self.lock:
+            self.progress_phase = phase
+            self.progress_percent = max(-1, min(percent, 100))
+            self.progress_detail = detail
 
     def append(self, text: str) -> None:
         with self.lock:
@@ -83,17 +94,21 @@ class Runtime:
             running = self.proc is not None and self.proc.poll() is None
             return {
                 "ok": True,
+                "protocolVersion": PROTOCOL_VERSION,
                 "backend": "UML_VENUS",
                 "running": running,
                 "guestReady": bool(running and self.guest_ready),
                 "desktopReady": bool(running and self.desktop_ready),
-                "vncPort": VNC_HOST_PORT if self.desktop_ready else -1,
+                "vncPort": VNC_HOST_PORT if running and self.desktop_ready else -1,
                 "pid": self.proc.pid if running and self.proc else -1,
                 "runtimeDir": str(RUNTIME),
                 "pocDir": str(POC),
                 "uptimeMs": now_ms() - self.started_ms if running else 0,
                 "lastError": self.last_error,
-                "logTail": self.console_text[-12000:],
+                "progressPhase": self.progress_phase,
+                "progressPercent": self.progress_percent,
+                "progressDetail": self.progress_detail,
+                "logTail": self.console_text[-20000:],
             }
 
     def _require_files(self) -> None:
@@ -119,7 +134,12 @@ class Runtime:
             self.last_error = ""
             self.console_text = ""
             self.console.clear()
+            self.set_progress("uml_boot", 8, "Starting UML kernel")
             master, slave = pty.openpty()
+            # Do not echo the huge base64 helper-install commands back into logs.
+            attrs = termios.tcgetattr(slave)
+            attrs[3] &= ~(termios.ECHO | termios.ECHONL)
+            termios.tcsetattr(slave, termios.TCSANOW, attrs)
             env = dict(os.environ)
             env.update({
                 "POC_DIR": str(POC),
@@ -144,7 +164,9 @@ class Runtime:
             if self.proc is None or self.proc.poll() is not None:
                 raise RuntimeError("UML exited during boot. " + self.console_text[-4000:])
             if self.guest_ready:
+                self.set_progress("debian_ready", 35, "Debian shell ready")
                 self._prepare_venus_guest()
+                self.set_progress("debian_ready", 55, "Debian + Venus ready")
                 return self.state()
             time.sleep(0.2)
         raise TimeoutError("Debian UML did not reach a shell within %.0fs" % timeout)
@@ -183,6 +205,7 @@ class Runtime:
         raise TimeoutError("Guest command timed out")
 
     def _prepare_venus_guest(self) -> None:
+        self.set_progress("venus", 40, "Preparing Mesa Venus relay")
         if not GUEST_RELAY_SOURCE.exists():
             raise RuntimeError(f"missing guest relay source: {GUEST_RELAY_SOURCE}")
         payload = base64.b64encode(GUEST_RELAY_SOURCE.read_bytes()).decode()
@@ -203,6 +226,7 @@ class Runtime:
         while time.monotonic() < deadline:
             out = self.guest("test -S /tmp/.venus_test && echo RELAY_READY || true", 3)
             if "RELAY_READY" in out:
+                self.set_progress("venus", 55, "Venus relay ready")
                 return
             time.sleep(0.2)
         raise RuntimeError("Venus guest relay did not create /tmp/.venus_test")
@@ -232,12 +256,20 @@ while True:
         width = max(800, min(width, 3840))
         height = max(600, min(height, 2160))
         dpi = max(96, min(dpi, 240))
-        install = r'''export DEBIAN_FRONTEND=noninteractive
-if ! command -v Xtigervnc >/dev/null 2>&1 || ! command -v startplasma-x11 >/dev/null 2>&1; then
-  apt-get update
-  apt-get install -y tigervnc-standalone-server tigervnc-common dbus-x11 plasma-desktop plasma-workspace xterm
-fi
-mkdir -p /root/.vnc
+        self.set_progress("desktop_check", 60, "Checking KDE Plasma and TigerVNC")
+        have = self.guest(
+            "command -v Xtigervnc >/dev/null 2>&1 && command -v startplasma-x11 >/dev/null 2>&1 && echo DESKTOP_PACKAGES_READY || true",
+            8,
+        )
+        if "DESKTOP_PACKAGES_READY" not in have:
+            self.set_progress("desktop_install", 64, "First run: installing KDE Plasma + TigerVNC. This can take several minutes")
+            self.guest(
+                "export DEBIAN_FRONTEND=noninteractive; apt-get update && "
+                "apt-get install -y tigervnc-standalone-server tigervnc-common dbus-x11 plasma-desktop plasma-workspace xterm",
+                900,
+            )
+        self.set_progress("desktop_config", 82, "Configuring Plasma session")
+        setup = r'''mkdir -p /root/.vnc /root/.config/tigervnc
 cat > /root/.vnc/xstartup <<'EOF'
 #!/bin/sh
 unset SESSION_MANAGER
@@ -252,32 +284,39 @@ mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 exec dbus-run-session -- startplasma-x11
 EOF
-chmod +x /root/.vnc/xstartup
-vncserver -kill :1 >/dev/null 2>&1 || true
+cp /root/.vnc/xstartup /root/.config/tigervnc/xstartup
+chmod +x /root/.vnc/xstartup /root/.config/tigervnc/xstartup
+(vncserver -kill :1 || tigervncserver -kill :1) >/dev/null 2>&1 || true
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 '''
-        self.guest(install, 900)
+        self.guest(setup, 30)
         self._install_reverse_vnc_helper()
-        self.guest(
-            f"vncserver :1 -localhost yes -SecurityTypes None -geometry {width}x{height} -depth 24 -dpi {dpi} "
-            ">/tmp/vessel-vnc.log 2>&1", 30
+        self.set_progress("vnc_start", 90, "Starting KDE Plasma display")
+        start_cmd = (
+            f"(command -v tigervncserver >/dev/null 2>&1 && tigervncserver :1 || vncserver :1) "
+            f"-localhost yes -SecurityTypes None -geometry {width}x{height} -depth 24 -dpi {dpi} "
+            ">/tmp/vessel-vnc.log 2>&1"
         )
-        deadline = time.monotonic() + 30
+        self.guest(start_cmd, 45)
+        deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
             out = self.guest("pgrep -f 'Xtigervnc.*:1' >/dev/null && echo VNC_READY || true", 3)
             if "VNC_READY" in out:
                 break
             time.sleep(0.4)
         else:
-            tail = self.guest("tail -80 /tmp/vessel-vnc.log 2>/dev/null || true", 5)
-            raise RuntimeError("TigerVNC failed to start: " + tail[-4000:])
+            tail = self.guest("tail -120 /tmp/vessel-vnc.log 2>/dev/null || true", 5)
+            raise RuntimeError("TigerVNC failed to start: " + tail[-6000:])
         if self.vnc_proxy is None:
             self.vnc_proxy = ReverseVncProxy(self)
             self.vnc_proxy.start()
         self.desktop_ready = True
+        self.last_error = ""
+        self.set_progress("desktop_ready", 100, "KDE Plasma is live")
         return self.state()
 
     def stop(self) -> dict[str, Any]:
+        self.set_progress("stopping", -1, "Stopping Debian safely")
         with self.lock:
             proxy = self.vnc_proxy
             self.vnc_proxy = None
@@ -301,22 +340,20 @@ rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
                 os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait(timeout=4)
             except Exception:
-                try: os.killpg(proc.pid, signal.SIGKILL)
-                except Exception: pass
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
         if master is not None:
-            try: os.close(master)
-            except OSError: pass
+            try:
+                os.close(master)
+            except OSError:
+                pass
+        self.set_progress("idle", -1, "Runtime ready")
         return self.state()
 
 
 class ReverseVncProxy:
-    """Expose localhost:5901 to the APK using an outbound guest connection.
-
-    Stock umnet intentionally starts passt with -t none, so the Android host
-    cannot dial the guest.  The guest *can* dial 10.0.2.2, which passt maps to
-    host loopback.  For each APK VNC connection we request one reverse connector
-    from Debian and splice the two host sockets together.
-    """
     def __init__(self, runtime: Runtime) -> None:
         self.runtime = runtime
         self.stop_event = threading.Event()
@@ -341,17 +378,22 @@ class ReverseVncProxy:
         self.stop_event.set()
         for s in (self.client_server, self.reverse_server):
             if s:
-                try: s.close()
-                except OSError: pass
+                try:
+                    s.close()
+                except OSError:
+                    pass
         self.client_server = None
         self.reverse_server = None
 
     def _serve(self) -> None:
         assert self.client_server is not None
         while not self.stop_event.is_set():
-            try: client, _ = self.client_server.accept()
-            except socket.timeout: continue
-            except OSError: break
+            try:
+                client, _ = self.client_server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
             threading.Thread(target=self._connect_pair, args=(client,), daemon=True).start()
 
     def _connect_pair(self, client: socket.socket) -> None:
@@ -359,17 +401,23 @@ class ReverseVncProxy:
         try:
             self.runtime.guest(
                 f"nohup python3 /root/vessel_vnc_reverse.py 10.0.2.2 {VNC_REVERSE_PORT} "
-                ">/tmp/vessel-vnc-reverse.log 2>&1 </dev/null &", 8
+                ">/tmp/vessel-vnc-reverse.log 2>&1 </dev/null &",
+                8,
             )
             assert self.reverse_server is not None
             reverse, _ = self.reverse_server.accept()
             self._pump_pair(client, reverse)
-        except Exception:
-            try: client.close()
-            except OSError: pass
+        except Exception as exc:
+            self.runtime.last_error = f"VNC proxy: {type(exc).__name__}: {exc}"
+            try:
+                client.close()
+            except OSError:
+                pass
             if reverse:
-                try: reverse.close()
-                except OSError: pass
+                try:
+                    reverse.close()
+                except OSError:
+                    pass
 
     @staticmethod
     def _pump_pair(a: socket.socket, b: socket.socket) -> None:
@@ -377,14 +425,18 @@ class ReverseVncProxy:
             try:
                 while True:
                     data = src.recv(65536)
-                    if not data: break
+                    if not data:
+                        break
                     dst.sendall(data)
-            except OSError: pass
+            except OSError:
+                pass
             finally:
-                try: dst.shutdown(socket.SHUT_WR)
-                except OSError: pass
-        t1 = threading.Thread(target=pump, args=(a,b), daemon=True)
-        t2 = threading.Thread(target=pump, args=(b,a), daemon=True)
+                try:
+                    dst.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+        t1 = threading.Thread(target=pump, args=(a, b), daemon=True)
+        t2 = threading.Thread(target=pump, args=(b, a), daemon=True)
         t1.start(); t2.start(); t1.join(); t2.join()
         a.close(); b.close()
 
@@ -395,18 +447,44 @@ runtime = Runtime()
 def handle(req: dict[str, Any]) -> dict[str, Any]:
     action = str(req.get("action", "status"))
     try:
-        if action == "status": return runtime.state()
-        if action == "start": return runtime.start(float(req.get("timeout", 75)))
-        if action == "stop": return runtime.stop()
-        if action == "desktop": return runtime.ensure_desktop(int(req.get("width", 1920)), int(req.get("height", 1080)), int(req.get("dpi", 144)))
+        if action == "status":
+            return runtime.state()
+        if action == "start":
+            return runtime.start(float(req.get("timeout", 75)))
+        if action == "stop":
+            return runtime.stop()
+        if action == "desktop":
+            return runtime.ensure_desktop(int(req.get("width", 1920)), int(req.get("height", 1080)), int(req.get("dpi", 144)))
         if action == "guest":
             output = runtime.guest(str(req.get("command", "")), float(req.get("timeout", 45)))
             result = runtime.state(); result["output"] = output; return result
-        if action == "logs": return runtime.state()
+        if action == "logs":
+            return runtime.state()
         return {"ok": False, "error": f"unknown action: {action}"}
     except Exception as exc:
         runtime.last_error = f"{type(exc).__name__}: {exc}"
+        runtime.set_progress("error", -1, runtime.last_error)
         result = runtime.state(); result.update({"ok": False, "error": runtime.last_error}); return result
+
+
+def serve_connection(conn: socket.socket) -> None:
+    with conn:
+        try:
+            conn.settimeout(5)
+            data = b""
+            while b"\n" not in data and len(data) < 1_000_000:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            req = json.loads(data.split(b"\n", 1)[0].decode() or "{}")
+            reply = handle(req)
+        except Exception as exc:
+            reply = {"ok": False, "error": f"protocol: {type(exc).__name__}: {exc}"}
+        try:
+            conn.sendall((json.dumps(reply, separators=(",", ":")) + "\n").encode())
+        except OSError:
+            pass
 
 
 def serve() -> None:
@@ -414,24 +492,14 @@ def serve() -> None:
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((CONTROL_HOST, CONTROL_PORT))
     srv.listen(16)
-    print(f"[vessel-daemon] control={CONTROL_HOST}:{CONTROL_PORT} runtime={RUNTIME}", flush=True)
+    print(f"[vessel-daemon] protocol={PROTOCOL_VERSION} control={CONTROL_HOST}:{CONTROL_PORT} runtime={RUNTIME}", flush=True)
     while True:
         conn, _ = srv.accept()
-        with conn:
-            conn.settimeout(3)
-            data = b""
-            while b"\n" not in data and len(data) < 1_000_000:
-                chunk = conn.recv(65536)
-                if not chunk: break
-                data += chunk
-            try:
-                req = json.loads(data.split(b"\n", 1)[0].decode() or "{}")
-                reply = handle(req)
-            except Exception as exc:
-                reply = {"ok": False, "error": f"protocol: {type(exc).__name__}: {exc}"}
-            conn.sendall((json.dumps(reply, separators=(",", ":")) + "\n").encode())
+        threading.Thread(target=serve_connection, args=(conn,), daemon=True, name="vessel-control").start()
 
 
 if __name__ == "__main__":
-    try: serve()
-    finally: runtime.stop()
+    try:
+        serve()
+    finally:
+        runtime.stop()
