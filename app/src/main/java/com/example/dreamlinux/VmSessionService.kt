@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
 
+enum class RuntimeBackend { UML_VENUS, AVF_LEGACY }
+
 data class SessionState(
     val connected:Boolean=false,
     val running:Boolean=false,
@@ -23,7 +25,7 @@ data class SessionState(
     val console:String="",
     val terminal:String="",
     val debianTerminal:String="",
-    val message:String="Connect Shizuku to begin",
+    val message:String="Ready to start Vessel",
     val busy:Boolean=false,
     val debianStarting:Boolean=false,
     val debianInstalled:Boolean=false,
@@ -35,9 +37,10 @@ data class SessionState(
     val kdeInstalling:Boolean=false,
     val kdeStage:String="not installed",
     val capabilities:String="Not checked",
-    val graphics:String="unproven",
+    val graphics:String="Venus transport proven; APK native presenter integration in progress",
     val internetReady:Boolean=false,
-    val internetStage:String="not started"
+    val internetStage:String="not started",
+    val backend:RuntimeBackend=RuntimeBackend.UML_VENUS
 )
 
 class VmSessionService : Service() {
@@ -49,32 +52,33 @@ class VmSessionService : Service() {
     private var reconnectProbeArmed=false
 
     private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,AsyncVmBridge::class.java))
-        .daemon(false).processNameSuffix("vm_bridge_debian08").debuggable(true).version(BuildConfig.VERSION_CODE) }
+        .daemon(false).processNameSuffix("vessel_vm_bridge").debuggable(true).version(BuildConfig.VERSION_CODE) }
 
     private val connection=object:ServiceConnection {
         override fun onServiceConnected(name:ComponentName,binder:IBinder) {
             bridge=IVmBridge.Stub.asInterface(binder)
-            state.value=state.value.copy(connected=true,message="AVF bridge connected")
+            state.value=state.value.copy(connected=true,message="System bridge connected")
             scope.launch { refresh(); probeCapabilities() }
         }
         override fun onServiceDisconnected(name:ComponentName) {
             bridge=null
-            state.value=state.value.copy(connected=false,running=false,debianStarting=false,message="Shizuku bridge disconnected; Linux data retained")
+            state.value=state.value.copy(connected=false,running=false,debianStarting=false,message="System bridge disconnected; Linux data retained")
         }
     }
 
     override fun onCreate() {
         super.onCreate(); active=this
         val manager=getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel("vm","DEV 1 LINUX session",NotificationManager.IMPORTANCE_LOW))
+        manager.createNotificationChannel(NotificationChannel("vm","Vessel Linux session",NotificationManager.IMPORTANCE_LOW))
         val intent=PendingIntent.getActivity(this,0,Intent(this,MainActivity::class.java),PendingIntent.FLAG_IMMUTABLE)
-        startForeground(1,Notification.Builder(this,"vm").setContentTitle("DEV 1 LINUX")
-            .setContentText("Local AVF Linux session").setSmallIcon(android.R.drawable.ic_menu_manage)
+        startForeground(1,Notification.Builder(this,"vm").setContentTitle("Vessel")
+            .setContentText("ARM64 Linux session").setSmallIcon(android.R.drawable.ic_menu_manage)
             .setContentIntent(intent).build())
         scope.launch { state.collect { current -> withContext(Dispatchers.IO) {
             File(filesDir,"verification-runtime.json").writeText(JSONObject()
                 .put("versionName",BuildConfig.VERSION_NAME).put("versionCode",BuildConfig.VERSION_CODE)
                 .put("commit",BuildConfig.GIT_COMMIT).put("branch",BuildConfig.GIT_BRANCH)
+                .put("backend",current.backend.name)
                 .put("running",current.running).put("name",current.name).put("mode",current.mode)
                 .put("stage",current.stage).put("api",current.api).put("vmRoot",current.vmRoot)
                 .put("linuxStarting",current.debianStarting)
@@ -106,7 +110,7 @@ class VmSessionService : Service() {
             error.isNotBlank() -> error
             desktopError.isNotBlank() -> desktopError
             installError.isNotBlank() -> installError
-            linuxStarting -> "Starting Debian pVM · ${obj.optLong("startupElapsedSeconds",0L)}s · ${humanStage(obj.optString("stage"))}"
+            linuxStarting -> "Starting Debian · ${obj.optLong("startupElapsedSeconds",0L)}s · ${humanStage(obj.optString("stage"))}"
             obj.optBoolean("kdeInstalling") -> "Desktop: ${obj.optString("kdeStage","working")}"
             else -> humanStage(obj.optString("stage","unknown"))
         }
@@ -119,23 +123,23 @@ class VmSessionService : Service() {
             installProgress=obj.optDouble("installProgress",-1.0),installBytes=obj.optLong("installBytes",0L),
             installTotal=obj.optLong("installTotal",-1L),kdeInstalled=obj.optBoolean("kdeInstalled"),
             kdeInstalling=obj.optBoolean("kdeInstalling"),kdeStage=obj.optString("kdeStage","not installed"),
-            graphics=obj.optString("guestGraphics","unproven"),
+            graphics=obj.optString("guestGraphics",state.value.graphics),
             internetReady=obj.optBoolean("internetReady"),internetStage=obj.optString("internetStage","not started"))
     }
 
     private fun humanStage(stage:String):String = when(stage) {
-        "config:debian_pvm" -> "Preparing trusted Microdroid pVM"
-        "vm_create:debian" -> "Creating Debian pVM"
-        "vm_start:debian" -> "Starting protected VM"
-        "vm_wait_running:debian" -> "Waiting for AVF"
-        "running:debian" -> "Microdroid running"
-        "microdroid_adb_root" -> "Enabling VM-local root"
-        "debian_provision" -> "Preparing Debian 13 userspace"
-        "internet_bridge" -> "Connecting Debian to phone Internet"
-        "debian_ready" -> "Debian 13 ready"
-        "desktop_packages" -> "Installing Plasma 6 desktop"
-        "desktop_ready" -> "Plasma 6 desktop ready"
-        "guest_command_pass" -> "Gate A guest command passed"
+        "config:debian_pvm" -> "Preparing Linux runtime"
+        "vm_create:debian" -> "Creating Debian runtime"
+        "vm_start:debian" -> "Starting Linux"
+        "vm_wait_running:debian" -> "Waiting for guest"
+        "running:debian" -> "Guest running"
+        "microdroid_adb_root" -> "Preparing guest permissions"
+        "debian_provision" -> "Preparing Debian ARM64 userspace"
+        "internet_bridge" -> "Connecting Linux networking"
+        "debian_ready" -> "Debian ready"
+        "desktop_packages" -> "Installing KDE Plasma"
+        "desktop_ready" -> "KDE Plasma ready"
+        "guest_command_pass" -> "Guest command passed"
         else -> if(stage.startsWith("blocked:")) "Blocked: ${stage.removePrefix("blocked:")}" else "Stage: $stage"
     }
 
@@ -157,7 +161,7 @@ class VmSessionService : Service() {
             if(error.isNotBlank() || lastStage.startsWith("blocked:")) throw IllegalStateException(if(error.isNotBlank()) error else "VM blocked at $lastStage")
             delay(200)
         }
-        throw IllegalStateException("Timed out waiting for AVF VM; last stage=$lastStage")
+        throw IllegalStateException("Timed out waiting for Linux runtime; last stage=$lastStage")
     }
 
     private suspend fun waitForLinuxStartup(b:IVmBridge, timeoutMs:Long=12L*60L*1000L) {
@@ -181,21 +185,21 @@ class VmSessionService : Service() {
     fun startVm()=operation { b ->
         applyStatus(withContext(Dispatchers.IO){b.startVm()})
         waitForVmRunning(b,45_000L)
-        state.value=state.value.copy(message="Microdroid Gate A running")
+        state.value=state.value.copy(message="Guest runtime running")
     }
 
     fun stopVm()=operation { b ->
         pendingSurface=null
         applyStatus(withContext(Dispatchers.IO){b.stopVm()})
         if(successfulGateACommands>0) reconnectProbeArmed=true
-        state.value=state.value.copy(message="Linux VM stopped; encrypted Debian data retained")
+        state.value=state.value.copy(message="Linux stopped; persistent data retained")
     }
 
     fun installDebian()=operation("linux") { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
 
     fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation("linux") { b ->
         pendingSurface=null
-        state.value=state.value.copy(message="Launching Debian 13 pVM…")
+        state.value=state.value.copy(message="Launching Debian ARM64…")
         applyStatus(withContext(Dispatchers.IO){b.startDebian(width,height,dpi,refreshRate)})
         waitForLinuxStartup(b)
         refresh()
@@ -253,7 +257,7 @@ class VmSessionService : Service() {
         if(reconnected) reconnectProbeArmed=false
         state.value=state.value.copy(
             terminal=(state.value.terminal+"\n$ $command\n$output").takeLast(256000),
-            message=if(reconnected)"Reconnect verified" else "Gate A command completed")
+            message=if(reconnected)"Reconnect verified" else "Guest command completed")
         refresh()
     }
 
