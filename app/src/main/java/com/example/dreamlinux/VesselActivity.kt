@@ -3,6 +3,7 @@ package com.example.dreamlinux
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.view.KeyEvent
@@ -10,7 +11,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,14 +47,13 @@ class VesselActivity : ComponentActivity() {
                 containerColor = MaterialTheme.colorScheme.background,
                 bottomBar = {
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                        val items = listOf(
+                        listOf(
                             Triple("Machine", Icons.Default.Computer, 0),
                             Triple("Desktop", Icons.Default.DesktopWindows, 1),
                             Triple("Terminal", Icons.Default.Terminal, 2),
                             Triple("Storage", Icons.Default.Storage, 3),
                             Triple("System", Icons.Default.Tune, 4)
-                        )
-                        items.forEach { (label, icon, index) ->
+                        ).forEach { (label, icon, index) ->
                             NavigationBarItem(
                                 selected = page == index,
                                 onClick = { page = index },
@@ -82,17 +82,20 @@ class VesselActivity : ComponentActivity() {
 
     @Composable
     private fun VesselTheme(content: @Composable () -> Unit) {
-        val scheme = darkColorScheme(
-            primary = Color(0xff8BE8BE),
-            onPrimary = Color(0xff003827),
-            primaryContainer = Color(0xff123F31),
-            secondary = Color(0xffAFC6FF),
-            background = Color(0xff070A09),
-            surface = Color(0xff0E1311),
-            surfaceVariant = Color(0xff17201C),
-            outline = Color(0xff33423C)
+        MaterialTheme(
+            colorScheme = darkColorScheme(
+                primary = Color(0xff8BE8BE),
+                onPrimary = Color(0xff003827),
+                primaryContainer = Color(0xff123F31),
+                secondary = Color(0xffAFC6FF),
+                background = Color(0xff070A09),
+                surface = Color(0xff0E1311),
+                surfaceVariant = Color(0xff17201C),
+                outline = Color(0xff33423C),
+                errorContainer = Color(0xff4A1D20)
+            ),
+            content = content
         )
-        MaterialTheme(colorScheme = scheme, content = content)
     }
 
     @Composable
@@ -110,15 +113,13 @@ class VesselActivity : ComponentActivity() {
                     Text("Vessel", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     Text("Rootless ARM64 Linux", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                StatusPill(
-                    when {
-                        state.kdeInstalled -> "DESKTOP"
-                        state.running -> "RUNNING"
-                        state.connected -> "READY"
-                        else -> "SETUP"
-                    },
-                    state.running
-                )
+                val label = when {
+                    state.kdeInstalled -> "DESKTOP"
+                    state.running -> "RUNNING"
+                    state.connected -> "READY"
+                    else -> "SETUP"
+                }
+                StatusPill(label, state.running || state.kdeInstalled)
             }
         }
     }
@@ -130,9 +131,10 @@ class VesselActivity : ComponentActivity() {
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text("Debian workstation", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            Text(state.message, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(state.message, color = if (state.lastError.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
 
             if (!state.connected) SetupCard(state)
+            if (state.lastError.isNotBlank()) ErrorCard(state.lastError)
 
             ElevatedCard(shape = RoundedCornerShape(24.dp)) {
                 Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
@@ -150,6 +152,7 @@ class VesselActivity : ComponentActivity() {
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                     Metric(Icons.Default.Wifi, "Network", state.internetStage)
                     Metric(Icons.Default.DesktopWindows, "Display", if (state.kdeInstalled) "KDE Plasma · embedded VNC" else state.kdeStage)
+                    if (state.busy || state.running && !state.kdeInstalled) ProgressBlock(state)
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
                             onClick = { if (state.running) VmSessionService.active?.stopVm() else startLinux() },
@@ -168,15 +171,57 @@ class VesselActivity : ComponentActivity() {
                             }
                         }
                     }
-                    if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
             }
 
+            RuntimeLogCard(state)
             Text("Runtime", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            FeatureCard(Icons.Default.Security, "No root hypervisor", "Runs the ARM64 UML kernel as an ordinary Android/Termux process. No /dev/kvm, Gunyah or GenieZone requirement.")
-            FeatureCard(Icons.Default.Bolt, "Real phone GPU", "Debian Vulkan uses Mesa Venus over the proven umshm relay to virglrenderer/Turnip on the Android GPU.")
-            FeatureCard(Icons.Default.DesktopWindows, "Desktop-first", "Plasma runs on a guest-local TigerVNC X server. This avoids the remote X11 PutImage failure we spent hours isolating while keeping keyboard and touch interactive.")
-            FeatureCard(Icons.Default.Folder, "Persistent machine", "The ext4 guest disk survives app restarts. Stop only powers the guest down; it does not wipe Linux.")
+            FeatureCard(Icons.Default.Security, "No root hypervisor", "Runs ARM64 UML as an ordinary Android/Termux process. No /dev/kvm, Gunyah or GenieZone requirement.")
+            FeatureCard(Icons.Default.Bolt, "Real phone GPU", "Debian Vulkan uses Mesa Venus over umshm to virglrenderer/Turnip on the Android GPU.")
+            FeatureCard(Icons.Default.DesktopWindows, "Desktop-first", "KDE Plasma runs on guest-local TigerVNC and is displayed by Vessel's embedded RFB client. Termux:X11 is not used here.")
+        }
+    }
+
+    @Composable
+    private fun ProgressBlock(state: SessionState) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(state.progressDetail.ifBlank { state.message }, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                if (state.progressPercent >= 0) Text("${state.progressPercent}%", style = MaterialTheme.typography.labelMedium)
+            }
+            if (state.progressPercent >= 0) {
+                LinearProgressIndicator(progress = { state.progressPercent / 100f }, modifier = Modifier.fillMaxWidth())
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Text(state.progressPhase, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+
+    @Composable
+    private fun RuntimeLogCard(state: SessionState) {
+        val log = state.console.takeLast(16000)
+        val scroll = rememberScrollState()
+        LaunchedEffect(log) { scroll.scrollTo(scroll.maxValue) }
+        ElevatedCard(shape = RoundedCornerShape(18.dp)) {
+            Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Live runtime log", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    TextButton(onClick = { copy(log) }, enabled = log.isNotBlank()) {
+                        Icon(Icons.Default.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(5.dp)); Text("Copy")
+                    }
+                }
+                Surface(color = Color(0xff030504), shape = RoundedCornerShape(12.dp)) {
+                    SelectionContainer {
+                        Text(
+                            log.ifBlank { "Runtime output will appear here while Debian starts." },
+                            Modifier.fillMaxWidth().heightIn(min = 100.dp, max = 260.dp).verticalScroll(scroll).padding(10.dp),
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -185,12 +230,27 @@ class VesselActivity : ComponentActivity() {
         ElevatedCard(shape = RoundedCornerShape(20.dp), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Text("One-time runtime permission", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text("Vessel controls the already-proven UML binaries in Termux. Android requires you to allow this app to run Termux commands.", style = MaterialTheme.typography.bodySmall)
+                Text("Vessel controls the proven UML binaries in Termux. RUN_COMMAND must be granted once.", style = MaterialTheme.typography.bodySmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { openAppSettings() }) { Icon(Icons.Default.Settings, null); Spacer(Modifier.width(6.dp)); Text("Permission settings") }
+                    Button(onClick = { openAppSettings() }) { Icon(Icons.Default.Settings, null); Spacer(Modifier.width(6.dp)); Text("Settings") }
                     OutlinedButton(onClick = { VmSessionService.active?.connectRuntime() }) { Icon(Icons.Default.Refresh, null); Spacer(Modifier.width(6.dp)); Text("Retry") }
                 }
                 Text(state.capabilities, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+            }
+        }
+    }
+
+    @Composable
+    private fun ErrorCard(error: String) {
+        ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.errorContainer), shape = RoundedCornerShape(18.dp)) {
+            Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Error, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Runtime error", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                }
+                SelectionContainer { Text(error, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+                OutlinedButton(onClick = { copy(error) }) { Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy error") }
             }
         }
     }
@@ -201,9 +261,18 @@ class VesselActivity : ComponentActivity() {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("KDE Plasma", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                    Text(if (state.kdeInstalled) "Interactive Debian desktop" else "Start Linux first", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        when {
+                            state.kdeInstalled -> "Interactive Debian desktop"
+                            state.running && state.kdeInstalling -> state.progressDetail
+                            state.running -> "Debian is running · Plasma not started"
+                            else -> "Start Linux first"
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
-                StatusPill(if (state.kdeInstalled) "LIVE" else "OFFLINE", state.kdeInstalled)
+                StatusPill(when { state.kdeInstalled -> "LIVE"; state.running -> "STARTING"; else -> "OFFLINE" }, state.running)
             }
             Surface(Modifier.weight(1f).fillMaxWidth(), color = Color.Black, shape = RoundedCornerShape(18.dp)) {
                 if (state.kdeInstalled) {
@@ -214,35 +283,32 @@ class VesselActivity : ComponentActivity() {
                     )
                 } else {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Icon(Icons.Default.DesktopWindows, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("Desktop is not running")
-                            Button(onClick = { startLinux() }, enabled = state.connected && !state.busy) { Text("Start Debian + Plasma") }
+                            Text(if (state.running) state.progressDetail.ifBlank { "Preparing desktop" } else "Desktop is not running")
+                            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                            Button(
+                                onClick = { if (state.running) VmSessionService.active?.installKde() else startLinux() },
+                                enabled = state.connected && !state.busy
+                            ) { Text(if (state.running) "Start Plasma" else "Start Debian + Plasma") }
+                            if (state.lastError.isNotBlank()) Text(state.lastError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
             }
-            DesktopKeys()
-        }
-    }
-
-    @Composable
-    private fun DesktopKeys() {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf(
-                "Esc" to KeyEvent.KEYCODE_ESCAPE,
-                "Ctrl" to KeyEvent.KEYCODE_CTRL_LEFT,
-                "Alt" to KeyEvent.KEYCODE_ALT_LEFT,
-                "Tab" to KeyEvent.KEYCODE_TAB,
-                "Super" to KeyEvent.KEYCODE_META_LEFT
-            ).forEach { (label, key) ->
-                OutlinedButton(
-                    onClick = {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(
+                    "Esc" to KeyEvent.KEYCODE_ESCAPE,
+                    "Ctrl" to KeyEvent.KEYCODE_CTRL_LEFT,
+                    "Alt" to KeyEvent.KEYCODE_ALT_LEFT,
+                    "Tab" to KeyEvent.KEYCODE_TAB,
+                    "Super" to KeyEvent.KEYCODE_META_LEFT
+                ).forEach { (label, key) ->
+                    OutlinedButton(onClick = {
                         VncFramebufferView.active?.sendAndroidKey(true, key)
                         VncFramebufferView.active?.sendAndroidKey(false, key)
-                    },
-                    contentPadding = PaddingValues(horizontal = 9.dp, vertical = 5.dp)
-                ) { Text(label, style = MaterialTheme.typography.labelSmall) }
+                    }) { Text(label) }
+                }
             }
         }
     }
@@ -257,7 +323,9 @@ class VesselActivity : ComponentActivity() {
                 Button(onClick = { VmSessionService.active?.debianConsole(command) }, enabled = state.running && !state.busy) {
                     Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Run")
                 }
-                OutlinedButton(onClick = { copy(state.debianTerminal) }) { Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy") }
+                OutlinedButton(onClick = { copy(state.debianTerminal) }) {
+                    Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy")
+                }
             }
             Surface(Modifier.weight(1f).fillMaxWidth(), color = Color(0xff030504), shape = RoundedCornerShape(16.dp)) {
                 SelectionContainer {
@@ -276,8 +344,8 @@ class VesselActivity : ComponentActivity() {
     private fun StoragePage(state: SessionState) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Storage", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            FeatureCard(Icons.Default.Storage, "Persistent ext4", state.vmRoot.ifBlank { "Vessel runtime directory will appear after connection." })
-            FeatureCard(Icons.Default.Save, "Safe shutdown", "Vessel asks Debian to sync and power down before terminating the UML process, reducing dirty-filesystem recovery on the next boot.")
+            FeatureCard(Icons.Default.Storage, "Persistent ext4", state.vmRoot.ifBlank { "Runtime directory appears after connection." })
+            FeatureCard(Icons.Default.Save, "Safe shutdown", "Vessel asks Debian to sync and power down before terminating UML.")
             ElevatedCard(shape = RoundedCornerShape(18.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Guest disk tools", style = MaterialTheme.typography.titleMedium)
@@ -286,7 +354,6 @@ class VesselActivity : ComponentActivity() {
                     }
                 }
             }
-            Text("VM cloning, image resize, qcow2 conversion and import/export are intentionally not faked here. DroidVM exposes those through QEMU tooling; Vessel's current persistent UML disk is raw ext4, so those operations need a dedicated safe offline manager.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
     }
 
@@ -294,11 +361,21 @@ class VesselActivity : ComponentActivity() {
     private fun SystemPage(state: SessionState) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("System", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            FeatureCard(Icons.Default.Hub, "Backend", "ARM64 UML → umshm → Venus → virglrenderer/Turnip. The legacy AVF/Shizuku code remains in-tree but is not used for normal Vessel startup.")
-            FeatureCard(Icons.Default.Wifi, "Networking", "umnet/passt provides NAT to Debian. The embedded desktop is forwarded only over 127.0.0.1, so TigerVNC is not exposed to the LAN.")
-            FeatureCard(Icons.Default.Code, "Build", "Vessel ${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_BRANCH} · ${BuildConfig.GIT_COMMIT}")
-            Button(onClick = { VmSessionService.active?.probeCapabilities() }, enabled = !state.busy) { Icon(Icons.Default.BugReport, null); Spacer(Modifier.width(7.dp)); Text("Run runtime check") }
-            OutlinedButton(onClick = { shareDiagnostics(state) }) { Icon(Icons.Default.Share, null); Spacer(Modifier.width(7.dp)); Text("Share diagnostics") }
+            FeatureCard(Icons.Default.Hub, "Backend", "ARM64 UML → umshm → Venus → virglrenderer/Turnip")
+            FeatureCard(Icons.Default.Wifi, "Networking", "umnet/passt provides NAT. The embedded desktop is forwarded only over 127.0.0.1.")
+            FeatureCard(Icons.Default.Code, "Build", "Vessel ${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_BRANCH.ifBlank { "app/vessel-final" }} · ${BuildConfig.GIT_COMMIT}")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { VmSessionService.active?.probeCapabilities() }, enabled = !state.busy) {
+                    Icon(Icons.Default.BugReport, null); Spacer(Modifier.width(7.dp)); Text("Runtime check")
+                }
+                OutlinedButton(onClick = { shareDiagnostics(state) }) {
+                    Icon(Icons.Default.Share, null); Spacer(Modifier.width(7.dp)); Text("Share")
+                }
+            }
+            RuntimeLogCard(state)
+            OutlinedButton(onClick = { copy(diagnosticsText(state)) }) {
+                Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(7.dp)); Text("Copy all diagnostics")
+            }
             Text(state.capabilities, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -322,7 +399,7 @@ class VesselActivity : ComponentActivity() {
                 Column {
                     Text(title, style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(3.dp))
-                    Text(body, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(body, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -330,45 +407,48 @@ class VesselActivity : ComponentActivity() {
 
     @Composable
     private fun StatusPill(text: String, active: Boolean) {
-        Surface(shape = RoundedCornerShape(999.dp), color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant) {
-            Text(text, Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = MaterialTheme.typography.labelSmall)
+        Surface(shape = RoundedCornerShape(99.dp), color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant) {
+            Text(text, Modifier.padding(horizontal = 12.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium)
         }
     }
 
     private fun startLinux() {
-        val m = resources.displayMetrics
-        VmSessionService.active?.startDebian(
-            m.widthPixels.coerceAtLeast(960),
-            m.heightPixels.coerceAtLeast(720),
-            m.densityDpi.coerceAtLeast(96),
-            60
-        )
+        val metrics = resources.displayMetrics
+        val width = (metrics.widthPixels * 1.35f).toInt().coerceIn(1280, 2560)
+        val height = (metrics.heightPixels * 1.1f).toInt().coerceIn(720, 1600)
+        val dpi = metrics.densityDpi.coerceIn(120, 220)
+        VmSessionService.active?.startDebian(width, height, dpi, 60)
     }
 
     private fun openAppSettings() {
-        runCatching {
-            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:$packageName")))
-        }
+        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
     }
 
     private fun copy(text: String) {
+        if (text.isBlank()) return
         getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Vessel", text))
         Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
     }
 
+    private fun diagnosticsText(state: SessionState): String = buildString {
+        appendLine("Vessel ${BuildConfig.VERSION_NAME}")
+        appendLine("${BuildConfig.GIT_BRANCH} ${BuildConfig.GIT_COMMIT}")
+        appendLine("Backend: ${state.backend}")
+        appendLine("Running: ${state.running} desktop=${state.kdeInstalled}")
+        appendLine("Stage: ${state.stage}")
+        appendLine("Progress: ${state.progressPercent}% ${state.progressPhase} · ${state.progressDetail}")
+        appendLine("Error: ${state.lastError.ifBlank { "none" }}")
+        appendLine("Graphics: ${state.graphics}")
+        appendLine("Network: ${state.internetStage}")
+        appendLine("Capabilities: ${state.capabilities}")
+        appendLine("\nRuntime log:\n${state.console.takeLast(30000)}")
+        if (state.debianTerminal.isNotBlank()) appendLine("\nTerminal:\n${state.debianTerminal.takeLast(12000)}")
+    }
+
     private fun shareDiagnostics(state: SessionState) {
-        val text = buildString {
-            appendLine("Vessel ${BuildConfig.VERSION_NAME}")
-            appendLine("${BuildConfig.GIT_BRANCH} ${BuildConfig.GIT_COMMIT}")
-            appendLine("Backend: ${state.backend}")
-            appendLine("Running: ${state.running} desktop=${state.kdeInstalled}")
-            appendLine("Stage: ${state.stage}")
-            appendLine("Graphics: ${state.graphics}")
-            appendLine("Network: ${state.internetStage}")
-            appendLine("Capabilities: ${state.capabilities}")
-            appendLine("\nRuntime:\n${state.console.takeLast(30000)}")
-            appendLine("\nTerminal:\n${state.debianTerminal.takeLast(30000)}")
-        }
-        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Share Vessel diagnostics"))
+        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, diagnosticsText(state))
+        }, "Share Vessel diagnostics"))
     }
 }
