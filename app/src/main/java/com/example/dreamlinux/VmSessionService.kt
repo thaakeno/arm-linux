@@ -39,17 +39,13 @@ data class SessionState(
     val graphics:String="Venus · virglrenderer · host Adreno GPU",
     val internetReady:Boolean=false,
     val internetStage:String="offline",
+    val progressPhase:String="idle",
+    val progressPercent:Int=-1,
+    val progressDetail:String="Runtime ready",
+    val lastError:String="",
     val backend:RuntimeBackend=RuntimeBackend.UML_VENUS
 )
 
-/**
- * Foreground owner for the rootless UML + Venus session.
- *
- * The old AVF/Shizuku implementation is intentionally left in the repository
- * for archaeology and fallback work, but it is no longer the primary runtime.
- * Vessel now controls the exact Termux UML stack that was proven on-device and
- * exposes the Debian KDE desktop through the APK's built-in VNC client.
- */
 class VmSessionService : Service() {
     companion object {
         val state = MutableStateFlow(SessionState())
@@ -72,7 +68,7 @@ class VmSessionService : Service() {
             NotificationChannel("vessel-runtime", "Vessel Linux runtime", NotificationManager.IMPORTANCE_LOW)
         )
         val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
+            this, 0, Intent(this, VesselActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         startForeground(
@@ -89,8 +85,8 @@ class VmSessionService : Service() {
         updateAvailability()
         scope.launch {
             while (isActive) {
-                if (!state.value.busy) refresh(silent = true)
-                delay(if (state.value.running) 900 else 1800)
+                refresh(silent = true)
+                delay(if (state.value.busy || state.value.running) 650 else 1600)
             }
         }
         scope.launch { persistVerificationLoop() }
@@ -104,25 +100,27 @@ class VmSessionService : Service() {
     private fun updateAvailability() {
         val installed = uml.isTermuxInstalled()
         val permission = uml.hasRunCommandPermission()
-        val message = when {
-            !installed -> "Install Termux to host the rootless UML runtime"
-            !permission -> "Grant Vessel permission to run commands in Termux"
-            else -> "Runtime ready"
+        val connected = installed && permission
+        val current = state.value
+        state.value = if (connected) {
+            current.copy(connected = true)
+        } else {
+            current.copy(
+                connected = false,
+                running = false,
+                kdeInstalled = false,
+                stage = "runtime_setup",
+                message = if (!installed) "Install Termux to host the rootless UML runtime" else "Grant Vessel permission to run commands in Termux",
+                capabilities = "Termux=${if (installed) "installed" else "missing"} · RUN_COMMAND=${if (permission) "granted" else "missing"}"
+            )
         }
-        state.value = state.value.copy(
-            connected = installed && permission,
-            stage = if (installed && permission) "runtime_ready" else "runtime_setup",
-            message = message,
-            capabilities = "Termux=${if (installed) "installed" else "missing"} · RUN_COMMAND=${if (permission) "granted" else "missing"}"
-        )
     }
 
     fun connectRuntime() {
         updateAvailability()
         if (!state.value.connected || state.value.busy) return
         operation("Connecting runtime") {
-            val raw = uml.ensureDaemon()
-            applyRuntime(raw, "Runtime connected")
+            applyRuntime(uml.ensureDaemon(), "Runtime connected")
         }
     }
 
@@ -132,12 +130,16 @@ class VmSessionService : Service() {
         val guest = obj.optBoolean("guestReady", false)
         val desktop = obj.optBoolean("desktopReady", false)
         val error = obj.optString("error").ifBlank { obj.optString("lastError") }
+        val phase = obj.optString("progressPhase", state.value.progressPhase)
+        val percent = obj.optInt("progressPercent", state.value.progressPercent)
+        val detail = obj.optString("progressDetail", state.value.progressDetail).ifBlank { state.value.progressDetail }
         val message = when {
             error.isNotBlank() -> error
-            fallbackMessage != null -> fallbackMessage
             desktop -> "KDE Plasma is live"
+            state.value.busy && detail.isNotBlank() -> detail
+            fallbackMessage != null -> fallbackMessage
             guest -> "Debian ARM64 is ready"
-            running -> "Booting Debian ARM64"
+            running -> detail.ifBlank { "Booting Debian ARM64" }
             else -> "Runtime ready"
         }
         state.value = state.value.copy(
@@ -145,14 +147,24 @@ class VmSessionService : Service() {
             running = running,
             debianStarting = running && !guest,
             kdeInstalled = desktop,
-            kdeInstalling = state.value.kdeInstalling && !desktop,
-            kdeStage = if (desktop) "KDE Plasma live · VNC ${TermuxUmlController.VNC_PORT}" else if (running) "desktop stopped" else "not started",
+            kdeInstalling = !desktop && running && phase.startsWith("desktop") || phase == "vnc_start",
+            kdeStage = when {
+                desktop -> "KDE Plasma live · VNC ${TermuxUmlController.VNC_PORT}"
+                running && (phase.startsWith("desktop") || phase == "vnc_start") -> detail
+                running -> "desktop not started"
+                else -> "not started"
+            },
             internetReady = guest,
             internetStage = if (guest) "NAT via umnet/passt" else "offline",
             vmRoot = obj.optString("runtimeDir", state.value.vmRoot),
             console = obj.optString("logTail", state.value.console).takeLast(200_000),
+            progressPhase = phase,
+            progressPercent = percent,
+            progressDetail = detail,
+            lastError = error,
             stage = when {
                 desktop -> "desktop_ready"
+                phase.isNotBlank() && phase != "idle" -> phase
                 guest -> "debian_ready"
                 running -> "uml_boot"
                 else -> "runtime_ready"
@@ -167,11 +179,14 @@ class VmSessionService : Service() {
         updateAvailability()
         if (!state.value.connected) return
         try {
-            val raw = uml.status()
-            applyRuntime(raw)
+            applyRuntime(uml.status())
         } catch (t: Throwable) {
-            if (!silent) state.value = state.value.copy(message = t.message ?: "Runtime unavailable")
-            if (state.value.running) state.value = state.value.copy(running = false, kdeInstalled = false)
+            // A transient control timeout must not invent a stopped VM. Preserve
+            // the last known runtime state until the daemon actually answers.
+            if (!silent) {
+                val msg = t.message ?: "Runtime status unavailable"
+                state.value = state.value.copy(message = msg, lastError = msg)
+            }
         }
     }
 
@@ -182,11 +197,10 @@ class VmSessionService : Service() {
         requestedHeight = height.coerceIn(600, 2160)
         requestedDpi = dpi.coerceIn(96, 240)
         operation("Starting Debian") {
-            state.value = state.value.copy(debianStarting = true, message = "Booting ARM64 UML…")
+            state.value = state.value.copy(debianStarting = true, lastError = "", message = "Booting ARM64 UML…")
             applyRuntime(uml.start(), "Debian ARM64 ready")
-            state.value = state.value.copy(kdeInstalling = true, kdeStage = "starting Plasma", message = "Starting KDE Plasma…")
-            val desktop = uml.startDesktop(requestedWidth, requestedHeight, requestedDpi)
-            applyRuntime(desktop, "KDE Plasma is live")
+            state.value = state.value.copy(kdeInstalling = true, kdeStage = "Preparing Plasma", message = "Preparing KDE Plasma…")
+            applyRuntime(uml.startDesktop(requestedWidth, requestedHeight, requestedDpi), "KDE Plasma is live")
             state.value = state.value.copy(kdeInstalling = false, kdeInstalled = true)
         }
     }
@@ -198,7 +212,7 @@ class VmSessionService : Service() {
     fun installDebian() = startDebian(requestedWidth, requestedHeight, requestedDpi, 60)
 
     fun installKde() = operation("Starting KDE Plasma") {
-        state.value = state.value.copy(kdeInstalling = true, kdeStage = "installing/starting", message = "Preparing Plasma desktop…")
+        state.value = state.value.copy(kdeInstalling = true, lastError = "", kdeStage = "Preparing Plasma", message = "Preparing Plasma desktop…")
         applyRuntime(uml.startDesktop(requestedWidth, requestedHeight, requestedDpi), "KDE Plasma is live")
         state.value = state.value.copy(kdeInstalling = false, kdeInstalled = true)
     }
@@ -222,19 +236,17 @@ class VmSessionService : Service() {
     fun shell(command: String) = debianConsole(command)
 
     fun probeCapabilities() = operation("Checking runtime") {
-        val termux = uml.isTermuxInstalled()
-        val permission = uml.hasRunCommandPermission()
-        val runtime = runCatching { uml.ensureDaemon() }.getOrNull()
+        val runtime = uml.ensureDaemon()
         val text = buildString {
             append("Rootless UML ARM64")
-            append(" · Termux=").append(if (termux) "yes" else "no")
-            append(" · command permission=").append(if (permission) "yes" else "no")
-            append(" · daemon=").append(if (runtime != null) "yes" else "no")
-            if (runtime?.optBoolean("guestReady") == true) append(" · Venus guest=ready")
-            if (runtime?.optBoolean("desktopReady") == true) append(" · Plasma=live")
+            append(" · Termux=").append(if (uml.isTermuxInstalled()) "yes" else "no")
+            append(" · command permission=").append(if (uml.hasRunCommandPermission()) "yes" else "no")
+            append(" · protocol=").append(runtime.optInt("protocolVersion", 0))
+            if (runtime.optBoolean("guestReady")) append(" · Venus guest=ready")
+            if (runtime.optBoolean("desktopReady")) append(" · Plasma=live")
         }
         state.value = state.value.copy(capabilities = text, message = text)
-        runtime?.let { applyRuntime(it, text) }
+        applyRuntime(runtime, text)
     }
 
     fun attachSurface(surface: android.view.Surface) = Unit
@@ -244,7 +256,7 @@ class VmSessionService : Service() {
 
     private fun operation(label: String, block: suspend () -> Unit) {
         if (state.value.busy) return
-        state.value = state.value.copy(busy = true, message = label)
+        state.value = state.value.copy(busy = true, lastError = "", message = label)
         scope.launch {
             try {
                 block()
@@ -252,13 +264,15 @@ class VmSessionService : Service() {
                 val msg = t.message ?: t.javaClass.simpleName
                 state.value = state.value.copy(
                     message = msg,
+                    lastError = msg,
                     debianStarting = false,
                     kdeInstalling = false,
                     debianTerminal = (state.value.debianTerminal + "\nERROR: $msg\n").takeLast(256_000)
                 )
             } finally {
                 state.value = state.value.copy(busy = false)
-                refresh(silent = true)
+                // Do not erase a useful error with a generic "Runtime ready".
+                if (state.value.lastError.isBlank()) refresh(silent = true)
             }
         }
     }
@@ -277,6 +291,8 @@ class VmSessionService : Service() {
                             .put("running", s.running)
                             .put("stage", s.stage)
                             .put("desktop", s.kdeInstalled)
+                            .put("progress", s.progressDetail)
+                            .put("error", s.lastError)
                             .put("graphics", s.graphics)
                             .put("network", s.internetStage)
                             .put("updatedElapsedMs", SystemClock.elapsedRealtime())
