@@ -29,34 +29,35 @@ ensure_x11() {
   command -v termux-x11 >/dev/null 2>&1 || { echo "[desktop] termux-x11 is missing" >&2; exit 1; }
   command -v socat >/dev/null 2>&1 || { echo "[desktop] socat is missing; run: pkg install socat" >&2; exit 1; }
 
-  if [ ! -S "$X11_UNIX" ]; then
-    echo "[desktop] starting Termux:X11"
-    mkdir -p "$PREFIX/tmp/.X11-unix"
-    rm -f "$X11_UNIX"
-    termux-x11 ":$X11_DISPLAY_NUM" >"$X11_LOG" 2>&1 &
-    for _ in $(seq 1 80); do
-      [ -S "$X11_UNIX" ] && break
-      sleep .1
-    done
-    [ -S "$X11_UNIX" ] || { echo "[desktop] Termux:X11 socket did not appear" >&2; tail -80 "$X11_LOG" >&2 || true; exit 1; }
-  fi
+  # A stale Unix socket can exist while the Android Termux:X11 activity says
+  # "Not connected".  For the desktop path always create one known-good X11
+  # server and one known-good TCP bridge instead of trusting the socket file.
+  echo "[desktop] resetting Termux:X11 host display"
+  pkill -f '[t]ermux-x11' 2>/dev/null || true
+  pkill -f "socat TCP-LISTEN:${X11_TCP_PORT}.*X${X11_DISPLAY_NUM}" 2>/dev/null || true
+  sleep .3
+  mkdir -p "$PREFIX/tmp/.X11-unix"
+  rm -f "$X11_UNIX"
 
-  # Make the Android activity visible even when the X server was already alive.
+  termux-x11 ":$X11_DISPLAY_NUM" >"$X11_LOG" 2>&1 &
+  X11PID=$!
+  for _ in $(seq 1 100); do
+    [ -S "$X11_UNIX" ] && break
+    kill -0 "$X11PID" 2>/dev/null || {
+      echo "[desktop] Termux:X11 died during startup" >&2
+      tail -80 "$X11_LOG" >&2 || true
+      exit 1
+    }
+    sleep .1
+  done
+  [ -S "$X11_UNIX" ] || { echo "[desktop] Termux:X11 socket did not appear" >&2; tail -80 "$X11_LOG" >&2 || true; exit 1; }
+
+  socat "TCP-LISTEN:${X11_TCP_PORT},bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:${X11_UNIX}" >"$SOCAT_LOG" 2>&1 &
+  SOCATPID=$!
+  sleep .35
+  kill -0 "$SOCATPID" 2>/dev/null || { echo "[desktop] X11 TCP bridge died" >&2; tail -80 "$SOCAT_LOG" >&2 || true; exit 1; }
+
   am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity >/dev/null 2>&1 || true
-
-  # Debian reaches the host as 10.0.2.2:6000. Keep exactly one TCP->Unix bridge.
-  if ! python - "$X11_TCP_PORT" <<'PY' >/dev/null 2>&1
-import socket,sys
-s=socket.socket(); s.settimeout(.2)
-try: s.connect(('127.0.0.1',int(sys.argv[1])))
-except OSError: raise SystemExit(1)
-finally: s.close()
-PY
-  then
-    pkill -f "socat TCP-LISTEN:${X11_TCP_PORT}.*X${X11_DISPLAY_NUM}" 2>/dev/null || true
-    socat "TCP-LISTEN:${X11_TCP_PORT},bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:${X11_UNIX}" >"$SOCAT_LOG" 2>&1 &
-    sleep .3
-  fi
 
   python - "$X11_TCP_PORT" <<'PY' >/dev/null 2>&1 || { echo "[desktop] X11 TCP bridge did not come up" >&2; tail -80 "$SOCAT_LOG" >&2 || true; exit 1; }
 import socket,sys
@@ -93,7 +94,7 @@ fi
 echo "[desktop] Debian console is live"
 
 python - "$CONSOLE" <<'PY'
-import base64, socket, sys
+import base64, errno, select, socket, sys, time
 sock_path=sys.argv[1]
 guest=r'''#!/bin/bash
 set -u
@@ -104,7 +105,6 @@ mkdir -p /tmp/runtime-root
 chmod 700 /tmp/runtime-root
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 
-# Prove the guest can actually reach the Android X server before claiming success.
 if ! command -v xdpyinfo >/dev/null 2>&1; then
   apt-get update
   apt-get install -y x11-utils
@@ -142,8 +142,28 @@ else
 fi
 '''
 enc=base64.b64encode(guest.encode()).decode()
-cmd="printf '%s' '"+enc+"' | base64 -d > /root/start-xfce-live.sh\nchmod +x /root/start-xfce-live.sh\nbash /root/start-xfce-live.sh\n"
-s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.settimeout(2); s.connect(sock_path); s.sendall(cmd.encode()); s.close()
+cmd=("printf '%s' '"+enc+"' | base64 -d > /root/start-xfce-live.sh\n"
+     "chmod +x /root/start-xfce-live.sh\n"
+     "bash /root/start-xfce-live.sh\n").encode()
+
+s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+s.connect(sock_path)
+# console.py exposes the PTY through a nonblocking Unix socket.  A large
+# base64 payload can fill its tiny send buffer and raise EAGAIN.  Send in
+# chunks and wait for writability instead of treating EAGAIN as a failure.
+pos=0
+deadline=time.monotonic()+30
+while pos < len(cmd):
+    if time.monotonic() > deadline:
+        raise SystemExit('[desktop] timed out injecting XFCE command into Debian console')
+    try:
+        n=s.send(cmd[pos:pos+4096])
+        if n == 0:
+            raise SystemExit('[desktop] console closed while injecting XFCE command')
+        pos += n
+    except BlockingIOError:
+        select.select([], [s], [], .25)
+s.close()
 PY
 
 echo "[desktop] starting XFCE inside Debian"
