@@ -1,0 +1,134 @@
+diff --git a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+index a51c9853200..48eaa479c69 100644
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -2879,7 +2879,12 @@ wsi_common_queue_present(const struct wsi_device *wsi,
+ #endif
+       }
+ 
+-      if (wsi->sw) {
++      /* Software WSI must wait for the blit into the linear image before the
++       * pixels can be read on the CPU, but X11 only consumes those pixels on
++       * its present-manager thread.  Let that backend defer the wait until
++       * immediately before the CPU read instead of stalling vkQueuePresentKHR.
++       */
++      if (wsi->sw && !swapchain->defers_sw_blit_wait) {
+          wsi->WaitForFences(vk_device_to_handle(dev),
+                             1, &swapchain->fences[image_index], true, ~0ull);
+       }
+diff --git a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_private.h
+index 3d2cd7d2e51..abbfe1bede5 100644
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -239,6 +239,13 @@ struct wsi_swapchain {
+    VkSemaphore present_id_timeline;
+    bool present_wait_enabled;
+ 
++   /* The backend waits on the software blit fence itself, immediately before
++    * reading the CPU-visible swapchain image.  Default false preserves normal
++    * WSI ordering for every backend that does not explicitly opt in.
++    */
++   bool defers_sw_blit_wait;
++
+    int signal_dma_buf_from_semaphore;
+    /**
+     * Optional semaphore for implicit-sync swapchains.  It will be signaled by
+diff --git a/src/vulkan/wsi/wsi_common_x11.c b/src/vulkan/wsi/wsi_common_x11.c
+index a077afeb352..1875de22796 100644
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -1252,6 +1252,10 @@ struct x11_swapchain {
+    uint32_t                                     depth;
+    VkExtent2D                                   extent;
+ 
++   bool                                         sw_geom_pending;
++   xcb_get_geometry_cookie_t                    sw_geom_cookie;
++
+    blake3_hash                                  dri3_modifier_hash;
+ 
+    xcb_present_event_t                          event_id;
+@@ -1848,10 +1852,22 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
+ {
+    assert(!chain->base.image_info.explicit_sync);
+    struct x11_image *image = &chain->images[image_index];
++   const struct wsi_device *wsi = chain->base.wsi;
++
++   /* The software image is GPU-filled and CPU-read here.  This is the first
++    * point that actually needs the blit fence to be complete.
++    */
++   if (wsi->sw) {
++      wsi->WaitForFences(chain->base.device, 1,
++                         &chain->base.fences[image_index], true, ~0ull);
++   }
+ 
+    /* Begin querying this before submitting the frame for improved async performance.
+     * In this _sw() mode we're expecting network round-trip delay, not just UNIX socket delay. */
+    xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(chain->conn, chain->window);
++   bool had_previous_geom = chain->sw_geom_pending;
++   xcb_get_geometry_cookie_t previous_geom_cookie = chain->sw_geom_cookie;
++   chain->sw_geom_cookie = geom_cookie;
++   chain->sw_geom_pending = true;
+ 
+    xcb_void_cookie_t cookie;
+    void *myptr = image->base.cpu_map;
+@@ -1910,21 +1926,26 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
+    xcb_flush(chain->conn);
+ 
+    /* We don't have queued present here.
+-    * Immediately let application acquire again, but query geometry first so
+-    * we can report OUT_OF_DATE on resize. */
+-   xcb_generic_error_t *err;
+-
+-   xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(chain->conn, geom_cookie, &err);
++    * Collect the previous frame's geometry reply.  Waiting for this frame's
++    * reply would put a synchronous round trip behind the multi-megabyte
++    * PutImage stream on the same X connection.
++    */
+    VkResult result = VK_SUCCESS;
+-   if (geom) {
+-      if (chain->extent.width != geom->width ||
+-          chain->extent.height != geom->height)
+-         result = VK_ERROR_OUT_OF_DATE_KHR;
+-   } else {
+-      result = VK_ERROR_SURFACE_LOST_KHR;
++   if (had_previous_geom) {
++      xcb_generic_error_t *err;
++      xcb_get_geometry_reply_t *geom =
++         xcb_get_geometry_reply(chain->conn, previous_geom_cookie, &err);
++      if (geom) {
++         if (chain->extent.width != geom->width ||
++             chain->extent.height != geom->height)
++            result = VK_ERROR_OUT_OF_DATE_KHR;
++      } else {
++         result = VK_ERROR_SURFACE_LOST_KHR;
++      }
++      free(err);
++      free(geom);
+    }
+-   free(err);
+-   free(geom);
+ 
+    wsi_queue_push(&chain->acquire_queue, image_index);
+    return result;
+@@ -2976,6 +2997,11 @@ x11_swapchain_destroy(struct wsi_swapchain *wsi_chain,
+    thrd_join(chain->queue_manager, NULL);
+    thrd_join(chain->event_manager, NULL);
+ 
++   if (chain->sw_geom_pending) {
++      xcb_discard_reply(chain->conn, chain->sw_geom_cookie.sequence);
++      chain->sw_geom_pending = false;
++   }
++
+    if (!chain->base.image_info.explicit_sync)
+       wsi_queue_destroy(&chain->acquire_queue);
+    wsi_queue_destroy(&chain->present_queue);
+@@ -3375,6 +3401,9 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+       goto fail_init_fifo_queue;
+    }
+ 
++   chain->base.defers_sw_blit_wait =
++      chain->base.wsi->sw && !chain->has_mit_shm;
++
+    ret = thrd_create(&chain->event_manager,
+                      x11_manage_event_queue, chain);
+    if (ret != thrd_success) {
