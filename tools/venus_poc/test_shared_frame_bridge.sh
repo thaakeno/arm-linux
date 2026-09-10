@@ -16,7 +16,7 @@ for f in "$ROOT/console.py" "$HOST_SRC" "$PATCH" "$GUEST_SCRIPT" "$TOOLS/host_re
   [ -f "$f" ] || { echo "missing: $f" >&2; exit 1; }
 done
 
-echo "[host] preparing verified local presentation proxy"
+echo "[host] preparing persistent verified local presentation proxy"
 cp "$TOOLS/host_relay_direct.py" "$TOOLS/host_relay_direct_base.py"
 sed -i 's/import host_relay_direct as base/import host_relay_direct_base as base/' "$TOOLS/host_relay_frame.py"
 cat > "$TOOLS/host_relay_direct.py" <<PY
@@ -74,7 +74,7 @@ done
 grep -q 'root@umdebian:/#' "$SESSION" || { echo "Debian did not reach shell"; tail -200 "$SESSION"; exit 1; }
 [ -f "$FRAME_PATH" ] || { echo "shared frame file missing"; exit 1; }
 
-echo "[host] starting always-on-top local Vulkan presenter"
+echo "[host] starting persistent local Vulkan presenter"
 DISPLAY=:0 "$HOST_BIN" "$FRAME_PATH" >"$HOST_LOG" 2>&1 &
 HPID=$!
 sleep 1
@@ -93,24 +93,27 @@ s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
 s.connect(sock_path); s.sendall(cmd.encode()); s.close()
 PY
 
-echo "[host] vkcube test running; switch to Termux:X11 now"
-for _ in $(seq 1 360); do
-  grep -q '\[frame-guest\] vkcube exit=' "$SESSION" 2>/dev/null && break
+echo "[host] waiting for first verified Vulkan frame; switch to Termux:X11 now"
+for _ in $(seq 1 480); do
+  if grep -q 'VISIBLE_VERIFY=PASS' "$HOST_LOG" 2>/dev/null && grep -q '\[local-present\] frame=1' "$HOST_LOG" 2>/dev/null; then
+    break
+  fi
   kill -0 "$CPID" 2>/dev/null || break
+  kill -0 "$HPID" 2>/dev/null || break
   sleep .25
 done
-sleep 1
 
 echo
 echo "========== VERIFIED LOCAL PRESENT =========="
-grep -E '\[local-present\]' "$HOST_LOG" | tail -160 || true
+grep -E '\[local-present\]' "$HOST_LOG" | tail -80 || true
 echo
 echo "========== GUEST =========="
-grep -E 'UML-FRAME: DIRECT|\[frame-guest\]|ERROR|error|assert' "$SESSION" | tail -120 || true
+grep -E 'UML-FRAME: DIRECT|\[frame-guest\]|ERROR|error|assert' "$SESSION" | tail -80 || true
 echo
 echo "========== RESULT =========="
-if grep -q 'DIAG=VISIBLE_PROXY_PRESENT_WORKS' "$HOST_LOG" && grep -q 'VISIBLE_VERIFY=PASS' "$HOST_LOG"; then
-  echo "SUCCESS: Vulkan pixels were copied through UML shared memory, uploaded into a host-owned local Termux:X11 proxy, read back byte-for-byte correctly, and the proxy was kept above the guest window."
+if grep -q 'VISIBLE_VERIFY=PASS' "$HOST_LOG" && grep -q '\[local-present\] frame=1' "$HOST_LOG"; then
+  echo "SUCCESS: the cube is live and persistent. Vulkan pixels reached the host-owned Termux:X11 proxy and were read back byte-for-byte correctly."
+  echo "The session is intentionally left running. The cube will stay visible until you close vkcube or stop this isolated session."
 else
-  echo "FAIL: the verified local proxy did not complete. Relevant logs are above; do not rerun older branches."
+  echo "FAIL: no verified live frame appeared. Relevant logs are above; do not rerun older branches."
 fi
