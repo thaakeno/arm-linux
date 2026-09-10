@@ -47,13 +47,16 @@ jobs:
           bash -n tools/venus_poc/build_guest_mesa_venus_26_2.sh
           grep -q 'ENABLE_X11' tools/venus_poc/run_venus_uml.sh
           grep -q 'render-server-worker=thread' tools/venus_poc/build_virglrenderer_android_thread.sh
+          grep -q 'PROTOCOL_VERSION = 2' tools/venus_poc/vessel_runtime_daemon.py
+          grep -q 'progressDetail' tools/venus_poc/vessel_runtime_daemon.py
+          grep -q 'termios.ECHO' tools/venus_poc/vessel_runtime_daemon.py
+          grep -q 'serve_connection' tools/venus_poc/vessel_runtime_daemon.py
           grep -q 'Virtio-GPU Venus' tools/venus_poc/vessel_acceptance.py
           grep -q 'RFB 003.008' tools/venus_poc/vessel_acceptance.py
 
       - name: Compile, unit-test and lint
         run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
+          bash ./gradlew assembleDebug testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
 
       - name: Upload debug APK
         if: success()
