@@ -48,9 +48,21 @@ start = s.index('static VkResult\nx11_present_to_x11_sw(struct x11_swapchain *ch
 end = s.index('\nstatic void\nx11_capture_trace', start)
 replacement = r'''#define UML_FRAME_ID 0x7F000001u
 #define UML_FRAME_SIZE (16u * 1024u * 1024u)
+#define UML_FRAME_PORT 6017
 static int uml_frame_notify_fd = -1;
 static int uml_frame_map_fd = -1;
 static uint8_t *uml_frame_map = NULL;
+
+static uint64_t
+uml_frame_hash(const uint8_t *p, size_t n)
+{
+   uint64_t h = 1469598103934665603ull;
+   for (size_t i = 0; i < n; i++) {
+      h ^= p[i];
+      h *= 1099511628211ull;
+   }
+   return h;
+}
 
 static bool
 uml_frame_send_all(int fd, const void *buf, size_t len)
@@ -81,14 +93,14 @@ uml_frame_connect_notify(void)
       return -1;
    struct sockaddr_in addr = {0};
    addr.sin_family = AF_INET;
-   addr.sin_port = htons(6010);
+   addr.sin_port = htons(UML_FRAME_PORT);
    if (inet_pton(AF_INET, "10.0.2.2", &addr.sin_addr) != 1 ||
        connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
       close(fd);
       return -1;
    }
    uml_frame_notify_fd = fd;
-   fprintf(stderr, "UML-FRAME: notify connected\n");
+   fprintf(stderr, "UML-FRAME: notify connected port=%d\n", UML_FRAME_PORT);
    return fd;
 }
 
@@ -145,9 +157,21 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
    if (!uml_frame_map_shared())
       return VK_ERROR_SURFACE_LOST_KHR;
 
-   fprintf(stderr, "UML-FRAME: copy-begin size=%u\n", size);
+   static uint64_t frame_no;
+   frame_no++;
+   uint64_t src_hash = uml_frame_hash(image->base.cpu_map, size);
+   const uint8_t *cp = (const uint8_t *)image->base.cpu_map +
+                       (size_t)(height / 2) * stride + (width / 2) * 4u;
    memcpy(uml_frame_map, image->base.cpu_map, size);
-   fprintf(stderr, "UML-FRAME: copy-done size=%u\n", size);
+   uint64_t dst_hash = uml_frame_hash(uml_frame_map, size);
+
+   if (frame_no <= 8 || frame_no % 20 == 0) {
+      fprintf(stderr,
+              "UML-FRAME: PIXELS frame=%" PRIu64 " src=%016" PRIx64
+              " dst=%016" PRIx64 " match=%s center=%u,%u,%u,%u %ux%u stride=%u\n",
+              frame_no, src_hash, dst_hash, src_hash == dst_hash ? "YES" : "NO",
+              cp[0], cp[1], cp[2], cp[3], width, height, stride);
+   }
 
    int fd = uml_frame_connect_notify();
    if (fd < 0)
@@ -162,19 +186,13 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
       return VK_ERROR_SURFACE_LOST_KHR;
    }
 
-   static uint64_t frame_no;
-   frame_no++;
-   if (frame_no <= 5 || frame_no % 60 == 0)
-      fprintf(stderr, "UML-FRAME: frame=%" PRIu64 " %ux%u stride=%u size=%u\n",
-              frame_no, width, height, stride, size);
-
    wsi_queue_push(&chain->acquire_queue, image_index);
    return VK_SUCCESS;
 }
 '''
 s = s[:start] + replacement + s[end:]
 x11.write_text(s)
-print('[frame-guest] replaced remote X11 PutImage with shared-memory host frame bridge')
+print('[frame-guest] installed pixel-forensics shared-memory presentation backend')
 PY
 
 echo "[frame-guest] rebuilding Mesa"
@@ -193,17 +211,17 @@ export XDG_RUNTIME_DIR=/tmp
 echo "[frame-guest] device"
 vulkaninfo --summary 2>&1 | grep -E 'deviceName|driverName|driverInfo' | head -12 || true
 
-echo "[frame-guest] running vkcube for 20 seconds"
-rm -f /tmp/vkcube-frame-bridge.log
+echo "[frame-guest] running vkcube for 12 seconds"
+rm -f /tmp/vkcube-frame-forensics.log
 set +e
-timeout 20s vkcube > /tmp/vkcube-frame-bridge.log 2>&1
+timeout 12s vkcube > /tmp/vkcube-frame-forensics.log 2>&1
 rc=$?
 set -e
-cat /tmp/vkcube-frame-bridge.log
+cat /tmp/vkcube-frame-forensics.log
 
 echo "[frame-guest] vkcube exit=$rc"
 if [ "$rc" -eq 124 ]; then
-  echo "[frame-guest] vkcube survived the full test window"
+  echo "[frame-guest] vkcube survived full forensic window"
 elif [ "$rc" -ne 0 ]; then
   echo "[frame-guest] vkcube exited early"
 fi
