@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Vessel rootless runtime controller for the proven Termux UML+Venus stack.
+"""Vessel rootless runtime controller for the proven Termux UML + Venus stack.
 
-This daemon deliberately keeps the already-working graphics architecture instead of
-reintroducing AVF/KVM/root requirements.  It owns the UML PTY, starts the Venus
-renderer/umshm relay, launches a local TigerVNC X server in Debian, and exposes a
-small loopback-only JSON protocol for the Android APK.
-
-Protocol: one JSON object per TCP connection on 127.0.0.1:47631, one JSON reply.
+The daemon owns the UML PTY, starts the Venus renderer/umshm relay, launches a
+local TigerVNC X server in Debian, and exposes a loopback-only JSON protocol for
+the Android APK.  VNC uses a guest-initiated reverse tunnel because the stock
+umnet helper intentionally starts passt with inbound forwarding disabled.
 """
 from __future__ import annotations
 
@@ -35,8 +33,7 @@ GUEST_RELAY_SOURCE = POC / "tools/venus_poc/guest_relay_direct.py"
 CONTROL_HOST = "127.0.0.1"
 CONTROL_PORT = int(os.environ.get("VESSEL_CONTROL_PORT", "47631"))
 VNC_HOST_PORT = int(os.environ.get("VESSEL_VNC_PORT", "5901"))
-GUEST_IP = os.environ.get("VESSEL_GUEST_IP", "10.0.2.15")
-GUEST_VNC_PORT = 5901
+VNC_REVERSE_PORT = int(os.environ.get("VESSEL_VNC_REVERSE_PORT", "5902"))
 PROMPT = "root@umdebian:/#"
 
 
@@ -57,7 +54,7 @@ class Runtime:
         self.guest_ready = False
         self.desktop_ready = False
         self.last_error = ""
-        self.vnc_proxy: TcpProxy | None = None
+        self.vnc_proxy: ReverseVncProxy | None = None
 
     def append(self, text: str) -> None:
         with self.lock:
@@ -127,7 +124,7 @@ class Runtime:
             env.update({
                 "POC_DIR": str(POC),
                 "UML_DIR": str(RUNTIME),
-                "ENABLE_X11": "0",  # desktop uses guest-local Xvnc; no remote PutImage path
+                "ENABLE_X11": "0",
                 "HOST_LOG": str(RUNTIME / "vessel-renderer.log"),
                 "RELAY_LOG": str(RUNTIME / "vessel-relay.log"),
                 "X11_LOG": str(RUNTIME / "vessel-x11-unused.log"),
@@ -189,9 +186,11 @@ class Runtime:
         if not GUEST_RELAY_SOURCE.exists():
             raise RuntimeError(f"missing guest relay source: {GUEST_RELAY_SOURCE}")
         payload = base64.b64encode(GUEST_RELAY_SOURCE.read_bytes()).decode()
-        cmd = f"printf '%s' {shlex.quote(payload)} | base64 -d > /root/guest_relay_direct.py"
-        self.guest(cmd, 15)
-        check = self.guest("test -s /opt/mesa-venus-26.2.2/lib/aarch64-linux-gnu/libvulkan_virtio.so && test -f /root/virtio-wsi-test.json && echo VENUS_READY", 10)
+        self.guest(f"printf '%s' {shlex.quote(payload)} | base64 -d > /root/guest_relay_direct.py", 15)
+        check = self.guest(
+            "test -s /opt/mesa-venus-26.2.2/lib/aarch64-linux-gnu/libvulkan_virtio.so && "
+            "test -f /root/virtio-wsi-test.json && echo VENUS_READY", 10
+        )
         if "VENUS_READY" not in check:
             raise RuntimeError("Mesa Venus 26.2.2 is not installed in this guest image")
         self.guest(
@@ -202,14 +201,31 @@ class Runtime:
         )
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
-            try:
-                out = self.guest("test -S /tmp/.venus_test && echo RELAY_READY || true", 3)
-                if "RELAY_READY" in out:
-                    return
-            except Exception:
-                pass
+            out = self.guest("test -S /tmp/.venus_test && echo RELAY_READY || true", 3)
+            if "RELAY_READY" in out:
+                return
             time.sleep(0.2)
         raise RuntimeError("Venus guest relay did not create /tmp/.venus_test")
+
+    def _install_reverse_vnc_helper(self) -> None:
+        helper = r'''#!/usr/bin/env python3
+import select,socket,sys
+host=sys.argv[1]; port=int(sys.argv[2])
+a=socket.create_connection((host,port),timeout=8)
+b=socket.create_connection(("127.0.0.1",5901),timeout=8)
+a.setblocking(False); b.setblocking(False)
+while True:
+    r,_,_=select.select([a,b],[],[],30)
+    if not r: continue
+    for src,dst in ((a,b),(b,a)):
+        if src not in r: continue
+        try: data=src.recv(65536)
+        except BlockingIOError: continue
+        if not data: sys.exit(0)
+        dst.sendall(data)
+'''
+        encoded = base64.b64encode(helper.encode()).decode()
+        self.guest(f"printf '%s' {shlex.quote(encoded)} | base64 -d > /root/vessel_vnc_reverse.py; chmod +x /root/vessel_vnc_reverse.py", 10)
 
     def ensure_desktop(self, width: int = 1920, height: int = 1080, dpi: int = 144) -> dict[str, Any]:
         self.start()
@@ -241,14 +257,22 @@ vncserver -kill :1 >/dev/null 2>&1 || true
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 '''
         self.guest(install, 900)
-        launch = (
-            f"vncserver :1 -localhost no -SecurityTypes None -geometry {width}x{height} "
-            f"-depth 24 -dpi {dpi} >/tmp/vessel-vnc.log 2>&1; sleep 2; "
-            "pgrep -f 'Xtigervnc.*:1' >/dev/null && pgrep -f startplasma >/dev/null"
+        self._install_reverse_vnc_helper()
+        self.guest(
+            f"vncserver :1 -localhost yes -SecurityTypes None -geometry {width}x{height} -depth 24 -dpi {dpi} "
+            ">/tmp/vessel-vnc.log 2>&1", 30
         )
-        self.guest(launch, 45)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            out = self.guest("pgrep -f 'Xtigervnc.*:1' >/dev/null && echo VNC_READY || true", 3)
+            if "VNC_READY" in out:
+                break
+            time.sleep(0.4)
+        else:
+            tail = self.guest("tail -80 /tmp/vessel-vnc.log 2>/dev/null || true", 5)
+            raise RuntimeError("TigerVNC failed to start: " + tail[-4000:])
         if self.vnc_proxy is None:
-            self.vnc_proxy = TcpProxy(CONTROL_HOST, VNC_HOST_PORT, GUEST_IP, GUEST_VNC_PORT)
+            self.vnc_proxy = ReverseVncProxy(self)
             self.vnc_proxy.start()
         self.desktop_ready = True
         return self.state()
@@ -277,73 +301,92 @@ rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
                 os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait(timeout=4)
             except Exception:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except Exception:
-                    pass
+                try: os.killpg(proc.pid, signal.SIGKILL)
+                except Exception: pass
         if master is not None:
             try: os.close(master)
             except OSError: pass
         return self.state()
 
 
-class TcpProxy:
-    def __init__(self, bind_host: str, bind_port: int, target_host: str, target_port: int) -> None:
-        self.bind_host, self.bind_port = bind_host, bind_port
-        self.target_host, self.target_port = target_host, target_port
+class ReverseVncProxy:
+    """Expose localhost:5901 to the APK using an outbound guest connection.
+
+    Stock umnet intentionally starts passt with -t none, so the Android host
+    cannot dial the guest.  The guest *can* dial 10.0.2.2, which passt maps to
+    host loopback.  For each APK VNC connection we request one reverse connector
+    from Debian and splice the two host sockets together.
+    """
+    def __init__(self, runtime: Runtime) -> None:
+        self.runtime = runtime
         self.stop_event = threading.Event()
-        self.server: socket.socket | None = None
+        self.client_server: socket.socket | None = None
+        self.reverse_server: socket.socket | None = None
 
     def start(self) -> None:
-        self.stop()
         self.stop_event.clear()
-        t = threading.Thread(target=self._serve, daemon=True, name="vessel-vnc-forward")
-        t.start()
-        deadline = time.monotonic() + 4
-        while time.monotonic() < deadline:
-            if self.server is not None: return
-            time.sleep(0.05)
-        raise RuntimeError("VNC forwarder did not start")
+        self.client_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.client_server.bind((CONTROL_HOST, VNC_HOST_PORT))
+        self.client_server.listen(4)
+        self.client_server.settimeout(0.5)
+        self.reverse_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.reverse_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.reverse_server.bind((CONTROL_HOST, VNC_REVERSE_PORT))
+        self.reverse_server.listen(4)
+        self.reverse_server.settimeout(8)
+        threading.Thread(target=self._serve, daemon=True, name="vessel-vnc-proxy").start()
 
     def stop(self) -> None:
         self.stop_event.set()
-        if self.server:
-            try: self.server.close()
-            except OSError: pass
-        self.server = None
+        for s in (self.client_server, self.reverse_server):
+            if s:
+                try: s.close()
+                except OSError: pass
+        self.client_server = None
+        self.reverse_server = None
 
     def _serve(self) -> None:
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((self.bind_host, self.bind_port))
-        srv.listen(8)
-        srv.settimeout(0.5)
-        self.server = srv
+        assert self.client_server is not None
         while not self.stop_event.is_set():
-            try: client, _ = srv.accept()
+            try: client, _ = self.client_server.accept()
             except socket.timeout: continue
             except OSError: break
-            threading.Thread(target=self._pipe_pair, args=(client,), daemon=True).start()
+            threading.Thread(target=self._connect_pair, args=(client,), daemon=True).start()
 
-    def _pipe_pair(self, client: socket.socket) -> None:
+    def _connect_pair(self, client: socket.socket) -> None:
+        reverse = None
         try:
-            guest = socket.create_connection((self.target_host, self.target_port), timeout=4)
-        except OSError:
-            client.close(); return
-        def pump(a: socket.socket, b: socket.socket) -> None:
+            self.runtime.guest(
+                f"nohup python3 /root/vessel_vnc_reverse.py 10.0.2.2 {VNC_REVERSE_PORT} "
+                ">/tmp/vessel-vnc-reverse.log 2>&1 </dev/null &", 8
+            )
+            assert self.reverse_server is not None
+            reverse, _ = self.reverse_server.accept()
+            self._pump_pair(client, reverse)
+        except Exception:
+            try: client.close()
+            except OSError: pass
+            if reverse:
+                try: reverse.close()
+                except OSError: pass
+
+    @staticmethod
+    def _pump_pair(a: socket.socket, b: socket.socket) -> None:
+        def pump(src: socket.socket, dst: socket.socket) -> None:
             try:
                 while True:
-                    data = a.recv(65536)
+                    data = src.recv(65536)
                     if not data: break
-                    b.sendall(data)
+                    dst.sendall(data)
             except OSError: pass
             finally:
-                try: b.shutdown(socket.SHUT_WR)
+                try: dst.shutdown(socket.SHUT_WR)
                 except OSError: pass
-        a = threading.Thread(target=pump, args=(client, guest), daemon=True)
-        b = threading.Thread(target=pump, args=(guest, client), daemon=True)
-        a.start(); b.start(); a.join(); b.join()
-        client.close(); guest.close()
+        t1 = threading.Thread(target=pump, args=(a,b), daemon=True)
+        t2 = threading.Thread(target=pump, args=(b,a), daemon=True)
+        t1.start(); t2.start(); t1.join(); t2.join()
+        a.close(); b.close()
 
 
 runtime = Runtime()
