@@ -82,11 +82,6 @@ export NO_AT_BRIDGE=1
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 
-# XFCE must stay completely outside the experimental Venus path.  Merely
-# unsetting the variables is not enough: the Vulkan loader then falls back to
-# scanning the system ICD directories and can still discover virtio/Venus.
-# Point both loader variables at a guaranteed nonexistent file and force GTK/
-# Mesa onto plain CPU/X11 rendering.
 export VK_DRIVER_FILES=/nonexistent/disabled-vulkan-icd.json
 export VK_ICD_FILENAMES=/nonexistent/disabled-vulkan-icd.json
 unset VN_DEBUG VTEST_SOCKET_NAME VN_PERF LD_LIBRARY_PATH
@@ -98,10 +93,9 @@ export GDK_GL=disable
 export GDK_DISABLE=vulkan
 export GSK_RENDERER=cairo
 export QT_XCB_GL_INTEGRATION=none
-export NO_AT_BRIDGE=1
 
-if ! command -v xdpyinfo >/dev/null 2>&1 || ! command -v xwininfo >/dev/null 2>&1; then
-  apt-get update && apt-get install -y x11-utils
+if ! command -v xdpyinfo >/dev/null 2>&1 || ! command -v xwininfo >/dev/null 2>&1 || ! command -v xrandr >/dev/null 2>&1; then
+  apt-get update && apt-get install -y x11-utils x11-xserver-utils
 fi
 if ! command -v xfce4-panel >/dev/null 2>&1; then
   echo '[desktop] FIRST_INSTALL_BEGIN'
@@ -112,7 +106,30 @@ fi
 if ! xdpyinfo -display "$DISPLAY" >/tmp/desktop-xdpyinfo.log 2>&1; then
   echo '[desktop] X11_GUEST_FAIL'; cat /tmp/desktop-xdpyinfo.log; exit 1
 fi
-echo '[desktop] X11_GUEST_OK'
+
+# Termux:X11 can initially expose a tiny placeholder framebuffer before its
+# Android activity has finished attaching.  XFCE then happily maps 10x10
+# windows, which is technically "success" but invisible on the phone.  Wait
+# briefly for a real size, then force a sane framebuffer if it is still tiny.
+read root_w root_h <<EOF
+$(xdpyinfo -display "$DISPLAY" 2>/dev/null | sed -n 's/.*dimensions:[[:space:]]*\([0-9][0-9]*\)x\([0-9][0-9]*\).*/\1 \2/p' | head -1)
+EOF
+for i in $(seq 1 20); do
+  if [ "${root_w:-0}" -ge 320 ] && [ "${root_h:-0}" -ge 240 ]; then break; fi
+  sleep .25
+  read root_w root_h <<EOF
+$(xdpyinfo -display "$DISPLAY" 2>/dev/null | sed -n 's/.*dimensions:[[:space:]]*\([0-9][0-9]*\)x\([0-9][0-9]*\).*/\1 \2/p' | head -1)
+EOF
+done
+if [ "${root_w:-0}" -lt 320 ] || [ "${root_h:-0}" -lt 240 ]; then
+  echo "[desktop] tiny X11 framebuffer ${root_w:-0}x${root_h:-0}; forcing 1280x720"
+  xrandr -display "$DISPLAY" --fb 1280x720 >/tmp/desktop-xrandr.log 2>&1 || true
+  sleep .5
+  read root_w root_h <<EOF
+$(xdpyinfo -display "$DISPLAY" 2>/dev/null | sed -n 's/.*dimensions:[[:space:]]*\([0-9][0-9]*\)x\([0-9][0-9]*\).*/\1 \2/p' | head -1)
+EOF
+fi
+echo "[desktop] X11_GUEST_OK size=${root_w:-unknown}x${root_h:-unknown}"
 
 pkill -f '[v]kcube' 2>/dev/null || true
 pkill -f '[x]fce4-session' 2>/dev/null || true
@@ -144,16 +161,19 @@ nohup dbus-run-session -- bash -lc '
   source /tmp/xfce-env.sh
   xfsettingsd >>/tmp/xfce-components.log 2>&1 &
   xfwm4 --replace --compositor=off >>/tmp/xfce-components.log 2>&1 &
-  sleep .5
+  sleep 1
   xfdesktop >>/tmp/xfce-components.log 2>&1 &
   xfce4-panel >>/tmp/xfce-components.log 2>&1 &
   xfce4-terminal --disable-server >>/tmp/xfce-components.log 2>&1 &
   wait
 ' >/tmp/xfce-dbus.log 2>&1 &
 
-for i in $(seq 1 50); do
+for i in $(seq 1 60); do
   tree=$(xwininfo -root -tree -display "$DISPLAY" 2>/dev/null || true)
-  if printf '%s\n' "$tree" | grep -Eqi 'xfce|terminal|panel|desktop'; then
+  # Require at least one actually visible-sized child window.  This prevents
+  # the old 10x10 placeholder windows from being reported as desktop success.
+  if printf '%s\n' "$tree" | grep -Eqi 'xfce|terminal|panel|desktop' && \
+     printf '%s\n' "$tree" | grep -E ' [3-9][0-9][0-9]x[2-9][0-9][0-9]\+' >/dev/null 2>&1; then
     touch /tmp/xfce-ready
     echo '[desktop] XFCE_WINDOWS_READY'
     printf '%s\n' "$tree" | grep -Ei 'xfce|terminal|panel|desktop' | head -12
@@ -163,14 +183,16 @@ for i in $(seq 1 50); do
 done
 
 echo '[desktop] XFCE_FAILED'
+echo '--- root geometry ---'
+xdpyinfo -display "$DISPLAY" 2>/dev/null | grep -E 'dimensions:|resolution:' | head -4 || true
+echo '--- xrandr ---'
+xrandr -display "$DISPLAY" 2>&1 | head -30 || true
 echo '--- component log ---'
 tail -120 /tmp/xfce-components.log 2>/dev/null || true
 echo '--- dbus log ---'
 tail -80 /tmp/xfce-dbus.log 2>/dev/null || true
-echo '--- recent kernel segfaults ---'
-dmesg 2>/dev/null | tail -60 || true
 echo '--- X tree ---'
-xwininfo -root -tree -display "$DISPLAY" 2>&1 | tail -80 || true
+xwininfo -root -tree -display "$DISPLAY" 2>&1 | tail -100 || true
 exit 1
 '''
 enc=base64.b64encode(guest.encode()).decode()
@@ -192,18 +214,18 @@ echo "[desktop] launching XFCE inside Debian with Vulkan hard-disabled for the d
 start=$(date +%s); spin='|/-\\'; i=0
 for _ in $(seq 1 2400); do
   if grep -q '\[desktop\] XFCE_WINDOWS_READY' "$SESSION" 2>/dev/null; then
-    printf '\r\033[K[desktop] SUCCESS: Debian XFCE windows are mapped on Termux:X11\n'
+    printf '\r\033[K[desktop] SUCCESS: Debian XFCE has visible-sized windows on Termux:X11\n'
     grep -A12 '\[desktop\] XFCE_WINDOWS_READY' "$SESSION" | head -13 || true
     echo "[desktop] switch to Termux:X11 now"
     exit 0
   fi
   if grep -q '\[desktop\] X11_GUEST_FAIL\|\[desktop\] XFCE_FAILED' "$SESSION" 2>/dev/null; then
     printf '\r\033[K[desktop] FAILED; exact Debian diagnostics:\n' >&2
-    grep -A260 -E '\[desktop\] X11_GUEST_FAIL|\[desktop\] XFCE_FAILED' "$SESSION" | tail -260 >&2 || true
+    grep -A320 -E '\[desktop\] X11_GUEST_FAIL|\[desktop\] XFCE_FAILED' "$SESSION" | tail -320 >&2 || true
     exit 1
   fi
   e=$(($(date +%s)-start)); c=${spin:$((i%4)):1}; i=$((i+1))
-  printf '\r\033[K[desktop] %s waiting for mapped XFCE windows  %ss' "$c" "$e"
+  printf '\r\033[K[desktop] %s waiting for visible XFCE desktop  %ss' "$c" "$e"
   sleep .25
 done
 printf '\r\033[K[desktop] timed out\n' >&2
