@@ -13,14 +13,7 @@ import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.Socket
 
-/**
- * Thin Android-side client for Vessel's proven unrooted UML + Venus runtime.
- *
- * The heavy Linux processes stay in Termux because that is the environment in
- * which the ARM64 UML kernel, umnet/passt and virglrenderer path were actually
- * verified on-device.  The APK owns lifecycle, UI and the interactive desktop.
- * There is no root/KVM/Gunyah requirement here.
- */
+/** Android-side client for the proven unrooted UML + Venus runtime. */
 class TermuxUmlController(private val context: Context) {
     companion object {
         const val TERMUX_PACKAGE = "com.termux"
@@ -45,12 +38,30 @@ class TermuxUmlController(private val context: Context) {
     fun hasRunCommandPermission(): Boolean =
         context.checkSelfPermission(RUN_COMMAND_PERMISSION) == PackageManager.PERMISSION_GRANTED
 
+    /**
+     * Keep the user's ~/venus-poc checkout untouched.  A detached runtime
+     * worktree is refreshed from app/vessel-final and only that worktree is
+     * used by the APK.  This avoids the branch/file mismatch that made the
+     * earlier manual tests so easy to break.
+     */
     private fun launchDaemon() {
         check(isTermuxInstalled()) { "Termux is not installed" }
         check(hasRunCommandPermission()) {
             "Grant Vessel the 'Run commands in Termux environment' permission in Android settings"
         }
-        val command = "exec python ~/venus-poc/tools/venus_poc/vessel_runtime_daemon.py >>~/vessel-daemon.log 2>&1"
+        val command = """
+            set -e
+            cd ~/venus-poc
+            git fetch origin app/vessel-final
+            if [ ! -e ~/vessel-poc-runtime/.git ]; then
+              rm -rf ~/vessel-poc-runtime
+              git worktree add --detach ~/vessel-poc-runtime origin/app/vessel-final
+            else
+              git -C ~/vessel-poc-runtime reset --hard origin/app/vessel-final
+            fi
+            export VESSEL_POC_DIR=~/vessel-poc-runtime
+            exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon.py >>~/vessel-daemon.log 2>&1
+        """.trimIndent()
         val intent = Intent().apply {
             setClassName(TERMUX_PACKAGE, "com.termux.app.RunCommandService")
             action = ACTION_RUN_COMMAND
@@ -78,10 +89,11 @@ class TermuxUmlController(private val context: Context) {
     }
 
     suspend fun ensureDaemon(): JSONObject = withContext(Dispatchers.IO) {
-        runCatching { requestBlocking(JSONObject().put("action", "status"), 700) }.getOrNull()?.let { return@withContext it }
+        runCatching { requestBlocking(JSONObject().put("action", "status"), 700) }
+            .getOrNull()?.let { return@withContext it }
         launchDaemon()
         var last: Throwable? = null
-        repeat(40) {
+        repeat(75) {
             delay(200)
             try {
                 return@withContext requestBlocking(JSONObject().put("action", "status"), 700)
@@ -89,7 +101,7 @@ class TermuxUmlController(private val context: Context) {
                 last = t
             }
         }
-        throw IllegalStateException("Vessel runtime daemon did not start", last)
+        throw IllegalStateException("Vessel runtime daemon did not start; inspect ~/vessel-daemon.log", last)
     }
 
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
@@ -103,13 +115,17 @@ class TermuxUmlController(private val context: Context) {
 
     suspend fun stop(): JSONObject = withContext(Dispatchers.IO) {
         runCatching { requestBlocking(JSONObject().put("action", "stop"), 12_000) }
-            .getOrElse { JSONObject().put("ok", true).put("running", false).put("guestReady", false).put("desktopReady", false) }
+            .getOrElse {
+                JSONObject().put("ok", true).put("running", false)
+                    .put("guestReady", false).put("desktopReady", false)
+            }
     }
 
     suspend fun startDesktop(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) {
         ensureDaemon()
         requestBlocking(
-            JSONObject().put("action", "desktop").put("width", width).put("height", height).put("dpi", dpi),
+            JSONObject().put("action", "desktop")
+                .put("width", width).put("height", height).put("dpi", dpi),
             16 * 60 * 1_000
         )
     }
@@ -117,7 +133,8 @@ class TermuxUmlController(private val context: Context) {
     suspend fun guest(command: String, timeoutSeconds: Int = 45): JSONObject = withContext(Dispatchers.IO) {
         ensureDaemon()
         requestBlocking(
-            JSONObject().put("action", "guest").put("command", command).put("timeout", timeoutSeconds),
+            JSONObject().put("action", "guest")
+                .put("command", command).put("timeout", timeoutSeconds),
             (timeoutSeconds + 10) * 1_000
         )
     }
