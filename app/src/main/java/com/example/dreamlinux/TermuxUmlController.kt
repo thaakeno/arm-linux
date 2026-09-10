@@ -48,9 +48,9 @@ class TermuxUmlController(private val context: Context) {
         }
         val command = """
             LOG=~/vessel-daemon.log
-            : > "$LOG"
+            : > "${'$'}LOG"
             {
-              echo "[vessel-launch] $(date -Iseconds) starting"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) starting"
               set -e
               cd ~/venus-poc
               echo "[vessel-launch] fetching app/vessel-final"
@@ -63,13 +63,26 @@ class TermuxUmlController(private val context: Context) {
                 echo "[vessel-launch] refreshing runtime worktree"
                 git -C ~/vessel-poc-runtime reset --hard origin/app/vessel-final
               fi
+
+              # Never use a broad `pkill -f vessel_runtime_daemon.py` here: the
+              # complete bash -lc script itself contains that text, so pgrep can
+              # kill this launcher before it reaches exec. Match only a Python
+              # process whose command line actually ends in the daemon script.
               echo "[vessel-launch] stopping stale daemon"
-              pkill -f '[v]essel_runtime_daemon.py' 2>/dev/null || true
-              sleep 0.25
+              OLD_PID="${'$'}(pgrep -f '(^|/)python(3)? .*vessel_runtime_daemon\.py${'$'}' | head -n1 || true)"
+              if [ -n "${'$'}OLD_PID" ]; then
+                kill "${'$'}OLD_PID" 2>/dev/null || true
+                for _ in 1 2 3 4 5 6 7 8 9 10; do
+                  kill -0 "${'$'}OLD_PID" 2>/dev/null || break
+                  sleep 0.1
+                done
+                kill -9 "${'$'}OLD_PID" 2>/dev/null || true
+              fi
+
               export VESSEL_POC_DIR=~/vessel-poc-runtime
               echo "[vessel-launch] exec runtime daemon"
               exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon.py
-            } >> "$LOG" 2>&1
+            } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
             setClassName(TERMUX_PACKAGE, "com.termux.app.RunCommandService")
