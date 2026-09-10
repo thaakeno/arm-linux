@@ -20,6 +20,7 @@ class TermuxUmlController(private val context: Context) {
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = 5901
+        const val REQUIRED_PROTOCOL = 2
 
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
@@ -40,11 +41,6 @@ class TermuxUmlController(private val context: Context) {
     fun hasRunCommandPermission(): Boolean =
         context.checkSelfPermission(RUN_COMMAND_PERMISSION) == PackageManager.PERMISSION_GRANTED
 
-    /**
-     * Keep the user's ~/venus-poc checkout untouched. A detached runtime
-     * worktree is refreshed from app/vessel-final and only that worktree is
-     * used by the APK.
-     */
     private fun launchDaemon() {
         check(isTermuxInstalled()) { "Termux is not installed" }
         check(hasRunCommandPermission()) {
@@ -60,6 +56,8 @@ class TermuxUmlController(private val context: Context) {
             else
               git -C ~/vessel-poc-runtime reset --hard origin/app/vessel-final
             fi
+            pkill -f '[v]essel_runtime_daemon.py' 2>/dev/null || true
+            sleep 0.25
             export VESSEL_POC_DIR=~/vessel-poc-runtime
             exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon.py >>~/vessel-daemon.log 2>&1
         """.trimIndent()
@@ -90,20 +88,28 @@ class TermuxUmlController(private val context: Context) {
     }
 
     suspend fun ensureDaemon(): JSONObject = withContext(Dispatchers.IO) {
-        runCatching { requestBlocking(JSONObject().put("action", "status"), 700) }
-            .getOrNull()?.let { return@withContext it }
+        val existing = runCatching {
+            requestBlocking(JSONObject().put("action", "status"), 900)
+        }.getOrNull()
+        if (existing != null && existing.optInt("protocolVersion", 0) >= REQUIRED_PROTOCOL) {
+            return@withContext existing
+        }
+
         launchDaemon()
         var last: Throwable? = null
-        repeat(75) {
+        repeat(100) {
             delay(200)
             try {
-                return@withContext requestBlocking(JSONObject().put("action", "status"), 700)
+                val status = requestBlocking(JSONObject().put("action", "status"), 900)
+                if (status.optInt("protocolVersion", 0) >= REQUIRED_PROTOCOL) {
+                    return@withContext status
+                }
             } catch (t: Throwable) {
                 last = t
             }
         }
         throw IllegalStateException(
-            "Vessel runtime daemon did not start. In Termux run tools/venus_poc/setup_vessel_termux.sh once, then inspect ~/vessel-daemon.log if needed.",
+            "Vessel runtime daemon did not start. Inspect ~/vessel-daemon.log in Termux.",
             last
         )
     }
