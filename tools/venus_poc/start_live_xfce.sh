@@ -82,6 +82,15 @@ export NO_AT_BRIDGE=1
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 
+# The interactive desktop is ordinary X11.  Do NOT inherit the experimental
+# Venus ICD from previous vkcube tests: GTK/XFCE probes graphics APIs and was
+# loading libvulkan_virtio.so, which made every desktop component crash at the
+# same Venus address.  Keep Venus opt-in for Vulkan applications only.
+unset VK_DRIVER_FILES VK_ICD_FILENAMES VN_DEBUG VTEST_SOCKET_NAME VN_PERF
+unset LD_LIBRARY_PATH LIBGL_DRIVERS_PATH MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER
+export LIBGL_ALWAYS_SOFTWARE=1
+export GSK_RENDERER=cairo
+
 if ! command -v xdpyinfo >/dev/null 2>&1 || ! command -v xwininfo >/dev/null 2>&1; then
   apt-get update && apt-get install -y x11-utils
 fi
@@ -104,23 +113,25 @@ pkill -f '[x]fdesktop' 2>/dev/null || true
 pkill -f '[x]fsettingsd' 2>/dev/null || true
 pkill -f '[x]fce4-terminal' 2>/dev/null || true
 sleep 1
-rm -f /tmp/xfce-components.log /tmp/xfce-ready
+rm -f /tmp/xfce-components.log /tmp/xfce-dbus.log /tmp/xfce-ready
 
-# Do not rely on xfce4-session here.  Launch the desktop pieces explicitly in
-# one persistent D-Bus session; this is much more reliable over remote X11.
 nohup dbus-run-session -- bash -lc '
   export DISPLAY=10.0.2.2:0
   export XDG_RUNTIME_DIR=/tmp/runtime-root
+  unset VK_DRIVER_FILES VK_ICD_FILENAMES VN_DEBUG VTEST_SOCKET_NAME VN_PERF
+  unset LD_LIBRARY_PATH LIBGL_DRIVERS_PATH MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER
+  export LIBGL_ALWAYS_SOFTWARE=1
+  export GSK_RENDERER=cairo
   xfsettingsd >>/tmp/xfce-components.log 2>&1 &
   xfwm4 --replace --compositor=off >>/tmp/xfce-components.log 2>&1 &
+  sleep .5
   xfdesktop >>/tmp/xfce-components.log 2>&1 &
   xfce4-panel >>/tmp/xfce-components.log 2>&1 &
   xfce4-terminal --disable-server >>/tmp/xfce-components.log 2>&1 &
   wait
 ' >/tmp/xfce-dbus.log 2>&1 &
 
-# Verify mapped X11 windows, not merely process existence.
-for i in $(seq 1 40); do
+for i in $(seq 1 50); do
   tree=$(xwininfo -root -tree -display "$DISPLAY" 2>/dev/null || true)
   if printf '%s\n' "$tree" | grep -Eqi 'xfce|terminal|panel|desktop'; then
     touch /tmp/xfce-ready
@@ -136,24 +147,28 @@ echo '--- component log ---'
 tail -120 /tmp/xfce-components.log 2>/dev/null || true
 echo '--- dbus log ---'
 tail -80 /tmp/xfce-dbus.log 2>/dev/null || true
+echo '--- recent kernel segfaults ---'
+dmesg 2>/dev/null | tail -40 || true
 echo '--- X tree ---'
 xwininfo -root -tree -display "$DISPLAY" 2>&1 | tail -80 || true
 exit 1
 '''
 enc=base64.b64encode(guest.encode()).decode()
-cmd=("printf '%s' '"+enc+"' | base64 -d > /root/start-xfce-live.sh\nchmod +x /root/start-xfce-live.sh\nbash /root/start-xfce-live.sh\n").encode()
+cmd=("stty -echo 2>/dev/null || true\nprintf '%s' '"+enc+"' | base64 -d > /root/start-xfce-live.sh\nstty echo 2>/dev/null || true\nchmod +x /root/start-xfce-live.sh\nbash /root/start-xfce-live.sh\n").encode()
 s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sock_path)
 pos=0; deadline=time.monotonic()+30
 while pos<len(cmd):
   if time.monotonic()>deadline: raise SystemExit('[desktop] console injection timed out')
   try:
-    n=s.send(cmd[pos:pos+2048]); pos+=n
+    n=s.send(cmd[pos:pos+2048])
+    if n <= 0: raise SystemExit('[desktop] console closed during injection')
+    pos+=n
   except BlockingIOError:
     select.select([], [s], [], .2)
 s.close()
 PY
 
-echo "[desktop] launching XFCE components inside Debian"
+echo "[desktop] launching XFCE inside Debian with Venus isolated from the desktop"
 start=$(date +%s); spin='|/-\\'; i=0
 for _ in $(seq 1 2400); do
   if grep -q '\[desktop\] XFCE_WINDOWS_READY' "$SESSION" 2>/dev/null; then
@@ -164,7 +179,7 @@ for _ in $(seq 1 2400); do
   fi
   if grep -q '\[desktop\] X11_GUEST_FAIL\|\[desktop\] XFCE_FAILED' "$SESSION" 2>/dev/null; then
     printf '\r\033[K[desktop] FAILED; exact Debian diagnostics:\n' >&2
-    grep -A220 -E '\[desktop\] X11_GUEST_FAIL|\[desktop\] XFCE_FAILED' "$SESSION" | tail -220 >&2 || true
+    grep -A240 -E '\[desktop\] X11_GUEST_FAIL|\[desktop\] XFCE_FAILED' "$SESSION" | tail -240 >&2 || true
     exit 1
   fi
   e=$(($(date +%s)-start)); c=${spin:$((i%4)):1}; i=$((i+1))
