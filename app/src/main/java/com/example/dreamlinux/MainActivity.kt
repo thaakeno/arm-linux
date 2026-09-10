@@ -17,16 +17,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -53,68 +51,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun fullLogReport(state:SessionState)=buildString {
-        appendLine("DEV 1 LINUX")
-        appendLine("Managed AVF diagnostic report")
-        appendLine("Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) ${BuildConfig.GIT_BRANCH} ${BuildConfig.GIT_COMMIT}")
-        appendLine()
-        appendLine("Status: ${if(state.running)"VM RUNNING" else "VM OFFLINE"}")
-        appendLine("Message: ${state.message}")
-        appendLine("VM: ${state.name.ifBlank{"not created"}}")
-        appendLine("Mode: ${state.mode}")
-        appendLine("Stage: ${state.stage}")
-        appendLine("API: ${state.api}")
-        appendLine("VM root: ${state.vmRoot}")
-        appendLine("Capabilities: ${state.capabilities}")
-        appendLine("Debian bundle: ${state.debianInstalled}")
-        appendLine("Internet: ${state.internetReady} / ${state.internetStage}")
-        appendLine("Desktop: ${state.kdeInstalled} / ${state.kdeStage}")
-        appendLine("Graphics: ${state.graphics}")
-        appendLine()
-        appendLine("=== MANAGED VM LOG ===")
-        appendLine(state.console.ifBlank{"No managed VM diagnostics yet."})
-        appendLine()
-        appendLine("=== GATE A TERMINAL ===")
-        appendLine(state.terminal.ifBlank{"No Gate A commands executed."})
-        appendLine()
-        appendLine("=== DEBIAN TERMINAL ===")
-        appendLine(state.debianTerminal.ifBlank{"No Debian commands executed."})
-    }
-
-    private fun copyAllLogs(state:SessionState) {
-        getSystemService(ClipboardManager::class.java)
-            .setPrimaryClip(ClipData.newPlainText("DEV 1 LINUX logs",fullLogReport(state)))
-        Toast.makeText(this,"All DEV 1 LINUX logs copied",Toast.LENGTH_SHORT).show()
-    }
-
-    private fun shareLogs(state:SessionState) {
-        startActivity(Intent.createChooser(
-            Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,fullLogReport(state)),
-            "Export diagnostics"))
-    }
-
     override fun onCreate(savedInstanceState:Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         Shizuku.addRequestPermissionResultListener(permissionListener)
         setContent {
             val state by VmSessionService.state.collectAsStateWithLifecycle()
-            var page by remember { mutableIntStateOf(0) }
-            MaterialTheme(colorScheme=darkColorScheme(
-                primary=Color(0xff9FE0C4),secondary=Color(0xffAFC7FF),
-                background=Color(0xff090D0C),surface=Color(0xff111715),surfaceVariant=Color(0xff18211E)
-            )) {
-                Scaffold(containerColor=MaterialTheme.colorScheme.background) { padding ->
+            VesselTheme {
+                var page by remember { mutableIntStateOf(0) }
+                Scaffold(
+                    containerColor=MaterialTheme.colorScheme.background,
+                    bottomBar={ VesselNav(page) { page=it } }
+                ) { padding ->
                     Column(Modifier.fillMaxSize().padding(padding)) {
-                        Header(state)
-                        NavigationBar(containerColor=MaterialTheme.colorScheme.surface) {
-                            NavigationBarItem(selected=page==0,onClick={page=0},icon={Icon(Icons.Default.Computer,null)},label={Text("Desktop")})
-                            NavigationBarItem(selected=page==1,onClick={page=1},icon={Icon(Icons.Default.Terminal,null)},label={Text("Terminal")})
-                            NavigationBarItem(selected=page==2,onClick={page=2},icon={Icon(Icons.Default.Memory,null)},label={Text("Diagnostics")})
-                            NavigationBarItem(selected=page==3,onClick={page=3},icon={Icon(Icons.Default.Info,null)},label={Text("About")})
-                        }
+                        VesselHeader(state)
                         Box(Modifier.weight(1f)) {
-                            when(page) { 0->DesktopPage(state); 1->TerminalPage(state); 2->DiagnosticsPage(state); else->AboutPage() }
+                            when(page) {
+                                0 -> HomePage(state)
+                                1 -> DesktopPage(state)
+                                2 -> TerminalPage(state)
+                                else -> SystemPage(state)
+                            }
                         }
                     }
                 }
@@ -122,190 +79,240 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Composable private fun AboutPage() {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
-            Text("About DEV 1 LINUX",style=MaterialTheme.typography.headlineSmall)
-            SelectionContainer { Text("Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\nBranch ${BuildConfig.GIT_BRANCH}\nCommit ${BuildConfig.GIT_COMMIT}\nARM64 development build",fontFamily=FontFamily.Monospace) }
-            Text("Debian 13 runs as a real ARM64 userspace inside a protected AVF/Gunyah VM. The phone's trusted Microdroid kernel stays intact and Debian persists on Microdroid encrypted storage.")
-            Text("VM-local adb root is used only inside the debuggable Microdroid guest to prepare Debian. Android itself is not rooted and the bootloader stays locked. This is not Termux, proot or CPU emulation.")
-            Text("Internet is carried through VirtualMachine.connectVsock() and a host-side proxy. Plasma 6 is displayed through TigerVNC for the reliable first path. Hardware GPU acceleration remains experimental until renderer proof exists.")
-        }
+    @Composable private fun VesselTheme(content:@Composable ()->Unit) {
+        val scheme=darkColorScheme(
+            primary=Color(0xff9BE8C5),
+            onPrimary=Color(0xff00382A),
+            secondary=Color(0xffA9C7FF),
+            background=Color(0xff080B0A),
+            surface=Color(0xff101513),
+            surfaceVariant=Color(0xff18201D),
+            outline=Color(0xff34413C)
+        )
+        MaterialTheme(colorScheme=scheme,content=content)
     }
 
-    @Composable private fun Header(state:SessionState) {
-        Surface(color=MaterialTheme.colorScheme.surface,tonalElevation=3.dp) {
-            Column(Modifier.fillMaxWidth().padding(horizontal=20.dp,vertical=16.dp)) {
-                Row(verticalAlignment=Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("DEV 1 LINUX",style=MaterialTheme.typography.headlineSmall)
-                        Text(BuildConfig.VERSION_NAME,style=MaterialTheme.typography.labelSmall)
-                        Text("DEBIAN 13 · PLASMA 6 · MICRODROID pVM · AVF",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary)
-                    }
-                    StatusPill(if(state.running) "RUNNING" else if(state.connected) "READY" else "OFFLINE",state.running)
+    @Composable private fun VesselHeader(state:SessionState) {
+        Surface(color=MaterialTheme.colorScheme.surface) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal=18.dp,vertical=14.dp),
+                verticalAlignment=Alignment.CenterVertically
+            ) {
+                Surface(shape=RoundedCornerShape(12.dp),color=MaterialTheme.colorScheme.primaryContainer) {
+                    Icon(Icons.Default.Terminal,null,Modifier.padding(10.dp))
                 }
-                Spacer(Modifier.height(10.dp))
-                Text(state.message,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Vessel",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold)
+                    Text("ARM64 Linux on Android",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                StatusPill(
+                    when { state.running -> "RUNNING"; state.connected -> "READY"; else -> "OFFLINE" },
+                    state.running
+                )
             }
         }
     }
 
-    @Composable private fun StatusPill(text:String,active:Boolean) {
-        Surface(shape=RoundedCornerShape(999.dp),color=if(active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant) {
-            Text(text,Modifier.padding(horizontal=12.dp,vertical=6.dp),style=MaterialTheme.typography.labelSmall)
+    @Composable private fun VesselNav(page:Int,onSelect:(Int)->Unit) {
+        NavigationBar(containerColor=MaterialTheme.colorScheme.surface) {
+            listOf(
+                Triple("Home",Icons.Default.Home,0),
+                Triple("Desktop",Icons.Default.DesktopWindows,1),
+                Triple("Terminal",Icons.Default.Terminal,2),
+                Triple("System",Icons.Default.Settings,3)
+            ).forEach { (label,icon,index) ->
+                NavigationBarItem(
+                    selected=page==index,
+                    onClick={onSelect(index)},
+                    icon={Icon(icon,null)},
+                    label={Text(label)}
+                )
+            }
+        }
+    }
+
+    @Composable private fun HomePage(state:SessionState) {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+            verticalArrangement=Arrangement.spacedBy(14.dp)
+        ) {
+            Text("Your Linux machine",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.SemiBold)
+            Text(state.message,style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
+
+            ElevatedCard(shape=RoundedCornerShape(24.dp)) {
+                Column(Modifier.fillMaxWidth().padding(18.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+                    Row(verticalAlignment=Alignment.CenterVertically) {
+                        Icon(Icons.Default.Computer,null,Modifier.size(34.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Debian ARM64",style=MaterialTheme.typography.titleLarge)
+                            Text("KDE Plasma desktop · persistent root filesystem",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        StatusPill(if(state.running)"Live" else "Stopped",state.running)
+                    }
+                    HorizontalDivider()
+                    MetricRow(Icons.Default.Memory,"Runtime",if(state.backend==RuntimeBackend.UML_VENUS)"UML + Venus" else "AVF legacy")
+                    MetricRow(Icons.Default.Bolt,"Graphics",state.graphics)
+                    MetricRow(Icons.Default.Wifi,"Network",if(state.internetReady)"Connected" else state.internetStage)
+                    MetricRow(Icons.Default.DesktopWindows,"Desktop",if(state.kdeInstalled)"KDE Plasma ready" else state.kdeStage)
+                    Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
+                        if(!state.connected) {
+                            Button(onClick={connect()},Modifier.weight(1f)) { Icon(Icons.Default.Link,null); Spacer(Modifier.width(8.dp)); Text("Connect") }
+                        } else if(!state.running) {
+                            Button(onClick={startLinux()},enabled=!state.busy,modifier=Modifier.weight(1f)) { Icon(Icons.Default.PlayArrow,null); Spacer(Modifier.width(8.dp)); Text("Start Linux") }
+                        } else {
+                            Button(onClick={VmSessionService.active?.stopVm()},enabled=!state.busy,modifier=Modifier.weight(1f)) { Icon(Icons.Default.Stop,null); Spacer(Modifier.width(8.dp)); Text("Stop") }
+                        }
+                        OutlinedButton(onClick={VmSessionService.active?.probeCapabilities()},enabled=state.connected&&!state.busy) { Icon(Icons.Default.Tune,null) }
+                    }
+                }
+            }
+
+            SectionTitle("Graphics stack")
+            InfoCard(
+                Icons.Default.Bolt,
+                "Venus acceleration",
+                "The proven path is ARM64 Debian → Mesa Venus → virglrenderer/Turnip on the phone GPU. The branch also carries the working shared-frame presenter and synchronization fixes from the Termux proof."
+            )
+            InfoCard(
+                Icons.Default.DesktopWindows,
+                "Desktop presentation",
+                if(state.kdeInstalled) "KDE Plasma is installed. The embedded viewer remains available while the native Venus presenter is moved into the APK runtime." else "Install KDE Plasma once Debian is running, then use the Desktop tab."
+            )
+            if(state.running&&!state.kdeInstalled) {
+                Button(onClick={VmSessionService.active?.installKde()},enabled=!state.busy&&state.internetReady,modifier=Modifier.fillMaxWidth()) {
+                    Text(if(state.kdeInstalling)"Installing Plasma…" else "Install KDE Plasma")
+                }
+            }
         }
     }
 
     @Composable private fun DesktopPage(state:SessionState) {
-        Column(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            when {
-                !state.connected -> SetupCard("1","Connect AVF","Shizuku gives DEV 1 the shell-level bridge needed to reach Android's virtualization stack. No Android root or bootloader unlock.") {
-                    Button(onClick={connect()}) { Text("Connect Shizuku") }
+        Column(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment=Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Desktop",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.SemiBold)
+                    Text(if(state.running)"Debian session active" else "Start Linux from Home",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                !state.debianInstalled -> SetupCard("2","Debian bundle missing","This APK should contain a Debian 13 arm64 minbase rootfs and the guest bridge. Reinstall the latest DEV 1 build if this remains missing.") {
-                    Button(onClick={VmSessionService.active?.installDebian()},enabled=!state.busy) { Text("Recheck bundle") }
-                }
-                !state.running || state.mode!="debian" -> {
-                    SetupCard("2","Start Debian 13","Boots the trusted Microdroid protected VM, enables root only inside that VM, creates the persistent Debian userspace, and proves apt Internet before reporting ready.") {
-                        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                            Button(onClick={startLinux()},enabled=!state.busy) { Text(if(state.debianStarting)"Starting…" else "Start Debian") }
-                            OutlinedButton(onClick={VmSessionService.active?.probeCapabilities()},enabled=!state.busy) { Text("Probe AVF") }
+                StatusPill(if(state.kdeInstalled)"PLASMA" else "NO DESKTOP",state.kdeInstalled)
+            }
+            Surface(Modifier.weight(1f).fillMaxWidth(),shape=RoundedCornerShape(18.dp),color=Color.Black) {
+                if(state.running&&state.kdeInstalled) {
+                    AndroidView(
+                        modifier=Modifier.fillMaxSize(),
+                        factory={context->VncFramebufferView(context).apply{requestFocus()}},
+                        update={if(!it.hasFocus())it.requestFocus()}
+                    )
+                } else {
+                    Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) {
+                        Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Default.DesktopWindows,null,Modifier.size(44.dp),tint=MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(if(!state.running)"Linux is stopped" else "KDE Plasma is not installed")
                         }
                     }
-                    CapabilityCard(state)
-                }
-                else -> {
-                    ReadyCard(state)
-                    if(!state.kdeInstalled) {
-                        SetupCard("3","Install KDE Plasma 6","Installs Debian's Plasma desktop and TigerVNC through the vsock Internet bridge. Your Debian filesystem persists across VM restarts.") {
-                            if(state.kdeInstalling) {
-                                LinearProgressIndicator(Modifier.fillMaxWidth())
-                                Text(state.kdeStage,style=MaterialTheme.typography.bodySmall)
-                            } else Button(onClick={VmSessionService.active?.installKde()},enabled=!state.busy&&state.internetReady) { Text("Install KDE Plasma 6") }
-                        }
-                    }
-                    LinuxDisplay(Modifier.weight(1f).fillMaxWidth())
-                    KeyToolbar()
-                    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
-                        TextButton(onClick={VmSessionService.active?.stopVm()},enabled=!state.busy) { Text("Stop Linux") }
-                        Text(if(state.kdeInstalled) "Plasma 6 via VNC · ${state.graphics}" else "${state.kdeStage} · ${state.graphics}",Modifier.weight(1f),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
                 }
             }
+            KeyToolbar()
         }
     }
 
-    @Composable private fun ReadyCard(state:SessionState) {
-        Surface(Modifier.fillMaxWidth(),shape=RoundedCornerShape(16.dp),color=MaterialTheme.colorScheme.surfaceVariant) {
-            Row(Modifier.fillMaxWidth().padding(14.dp),horizontalArrangement=Arrangement.SpaceBetween) {
-                Column { Text("Debian 13 pVM",style=MaterialTheme.typography.labelLarge); Text("Real ARM64 userspace",style=MaterialTheme.typography.bodySmall) }
-                Column(horizontalAlignment=Alignment.End) { Text(if(state.internetReady)"Internet ready" else state.internetStage,style=MaterialTheme.typography.labelLarge); Text("Persistent encrypted rootfs",style=MaterialTheme.typography.bodySmall) }
+    @Composable private fun TerminalPage(state:SessionState) {
+        var command by remember { mutableStateOf("uname -a; cat /etc/os-release; vulkaninfo --summary 2>/dev/null | head -40") }
+        Column(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+            Text("Terminal",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.SemiBold)
+            OutlinedTextField(command,{command=it},Modifier.fillMaxWidth(),label={Text("Debian command")},singleLine=true)
+            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                Button(onClick={VmSessionService.active?.debianConsole(command)},enabled=state.running&&!state.busy) { Icon(Icons.Default.PlayArrow,null); Spacer(Modifier.width(6.dp)); Text("Run") }
+                OutlinedButton(onClick={copyText(state.debianTerminal,"Terminal output")}) { Icon(Icons.Default.ContentCopy,null); Spacer(Modifier.width(6.dp)); Text("Copy") }
             }
-        }
-    }
-
-    private fun startLinux() {
-        val metrics=resources.displayMetrics
-        val refresh=(if(android.os.Build.VERSION.SDK_INT>=30) display?.refreshRate?:60f else windowManager.defaultDisplay.refreshRate).toInt()
-        VmSessionService.active?.startDebian(metrics.widthPixels.coerceAtLeast(640),metrics.heightPixels.coerceAtLeast(480),metrics.densityDpi,refresh)
-    }
-
-    @Composable private fun SetupCard(step:String,title:String,body:String,content:@Composable ColumnScope.()->Unit) {
-        ElevatedCard(Modifier.fillMaxWidth(),shape=RoundedCornerShape(20.dp)) {
-            Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(10.dp)) {
-                    Surface(shape=RoundedCornerShape(8.dp),color=MaterialTheme.colorScheme.primaryContainer) { Text(step,Modifier.padding(horizontal=9.dp,vertical=5.dp),style=MaterialTheme.typography.labelLarge) }
-                    Text(title,style=MaterialTheme.typography.titleLarge)
+            Surface(Modifier.weight(1f).fillMaxWidth(),shape=RoundedCornerShape(16.dp),color=Color(0xff050706)) {
+                SelectionContainer {
+                    Text(state.debianTerminal.ifBlank{"Debian terminal output will appear here."},Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp),fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.bodySmall)
                 }
-                Text(body,style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                content()
             }
         }
     }
 
-    @Composable private fun CapabilityCard(state:SessionState) {
-        Surface(Modifier.fillMaxWidth(),shape=RoundedCornerShape(16.dp),color=MaterialTheme.colorScheme.surfaceVariant) {
-            Column(Modifier.padding(14.dp)) {
-                Text("Device capability probe",style=MaterialTheme.typography.labelLarge)
-                Spacer(Modifier.height(4.dp))
-                Text(state.capabilities,style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace)
+    @Composable private fun SystemPage(state:SessionState) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+            Text("System",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.SemiBold)
+            InfoCard(Icons.Default.Memory,"Runtime architecture","Primary target: unrooted ARM64 UML with the proven umshm transport and Venus GPU path. The existing AVF bridge remains in-tree as a compatibility backend while the APK-native UML launcher is integrated.")
+            InfoCard(Icons.Default.Security,"Isolation","No Android root is required by the UML path. Linux runs as an ordinary Android process with its own guest kernel and persistent disk image.")
+            InfoCard(Icons.Default.Storage,"Storage","Persistent Debian image with a separate runtime layer. Disk management, snapshots, cloning and import/export are next in the manager layer.")
+            ElevatedCard(shape=RoundedCornerShape(18.dp)) {
+                Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    Text("Build",style=MaterialTheme.typography.titleMedium)
+                    Text("Vessel ${BuildConfig.VERSION_NAME}\n${BuildConfig.GIT_BRANCH}\n${BuildConfig.GIT_COMMIT}",fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.bodySmall)
+                    Text("Backend ${state.backend.name}",style=MaterialTheme.typography.bodySmall)
+                }
+            }
+            OutlinedButton(onClick={shareDiagnostics(state)},Modifier.fillMaxWidth()) { Icon(Icons.Default.Share,null); Spacer(Modifier.width(8.dp)); Text("Share diagnostics") }
+        }
+    }
+
+    @Composable private fun MetricRow(icon:androidx.compose.ui.graphics.vector.ImageVector,label:String,value:String) {
+        Row(verticalAlignment=Alignment.CenterVertically) {
+            Icon(icon,null,Modifier.size(18.dp),tint=MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(10.dp)); Text(label,Modifier.width(82.dp),style=MaterialTheme.typography.labelMedium)
+            Text(value,Modifier.weight(1f),style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+
+    @Composable private fun InfoCard(icon:androidx.compose.ui.graphics.vector.ImageVector,title:String,body:String) {
+        Surface(shape=RoundedCornerShape(18.dp),color=MaterialTheme.colorScheme.surfaceVariant) {
+            Row(Modifier.fillMaxWidth().padding(16.dp)) {
+                Icon(icon,null,Modifier.size(22.dp),tint=MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(12.dp))
+                Column { Text(title,style=MaterialTheme.typography.titleMedium); Spacer(Modifier.height(4.dp)); Text(body,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
     }
 
-    @Composable private fun LinuxDisplay(modifier:Modifier=Modifier) {
-        Surface(modifier,shape=RoundedCornerShape(16.dp),color=Color.Black) {
-            AndroidView(
-                modifier=Modifier.fillMaxSize(),
-                factory={ context -> VncFramebufferView(context).apply { requestFocus() } },
-                update={ if(!it.hasFocus()) it.requestFocus() },
-            )
+    @Composable private fun SectionTitle(text:String) { Text(text,style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold) }
+
+    @Composable private fun StatusPill(text:String,active:Boolean) {
+        Surface(shape=RoundedCornerShape(999.dp),color=if(active)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant) {
+            Text(text,Modifier.padding(horizontal=10.dp,vertical=5.dp),style=MaterialTheme.typography.labelSmall)
         }
     }
 
     @Composable private fun KeyToolbar() {
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
             listOf("Esc" to KeyEvent.KEYCODE_ESCAPE,"Ctrl" to KeyEvent.KEYCODE_CTRL_LEFT,"Alt" to KeyEvent.KEYCODE_ALT_LEFT,"Tab" to KeyEvent.KEYCODE_TAB).forEach { (label,key) ->
-                OutlinedButton(onClick={
-                    VncFramebufferView.active?.sendAndroidKey(true,key)
-                    VncFramebufferView.active?.sendAndroidKey(false,key)
-                },contentPadding=PaddingValues(horizontal=12.dp,vertical=8.dp)) { Text(label) }
+                OutlinedButton(
+                    onClick={VncFramebufferView.active?.sendAndroidKey(true,key);VncFramebufferView.active?.sendAndroidKey(false,key)},
+                    contentPadding=PaddingValues(horizontal=11.dp,vertical=7.dp)
+                ) { Text(label) }
             }
         }
     }
 
-    @Composable private fun TerminalPage(state:SessionState) {
-        var gateCommand by remember { mutableStateOf("id; uname -a; cat /proc/version") }
-        var linuxCommand by remember { mutableStateOf("cat /etc/os-release; dpkg --print-architecture; uname -a; id; apt-get update") }
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            Text("Linux consoles",style=MaterialTheme.typography.headlineSmall)
-            if(state.running&&state.mode=="debian") {
-                Text("Debian shell",style=MaterialTheme.typography.titleMedium)
-                Text("Commands execute inside the persistent Debian 13 rootfs in the protected Microdroid VM.",color=MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedTextField(value=linuxCommand,onValueChange={linuxCommand=it},label={Text("Debian command")},modifier=Modifier.fillMaxWidth(),minLines=2)
-                Button(onClick={VmSessionService.active?.debianConsole(linuxCommand)},enabled=!state.busy&&linuxCommand.isNotBlank()) { Text("Run in Debian") }
-                SelectionContainer { ConsoleBox(state.debianTerminal.ifBlank{"No Debian commands executed yet."}) }
-            } else {
-                Text("Gate A · stock Microdroid",style=MaterialTheme.typography.titleMedium)
-                Text("Low-level diagnostic path proving managed AVF + connectVsock + ADB.",color=MaterialTheme.colorScheme.onSurfaceVariant)
-                Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    if(!state.connected) Button(onClick={connect()}) { Text("Connect") }
-                    else if(!(state.running&&state.mode=="microdroid")) Button(onClick={VmSessionService.active?.startVm()},enabled=!state.busy) { Text("Start test VM") }
-                    if(state.running) OutlinedButton(onClick={VmSessionService.active?.stopVm()},enabled=!state.busy) { Text("Stop") }
-                    OutlinedButton(onClick={copyAllLogs(state)}) { Text("Copy logs") }
-                }
-                OutlinedTextField(value=gateCommand,onValueChange={gateCommand=it},label={Text("Guest command")},modifier=Modifier.fillMaxWidth(),minLines=2)
-                Button(onClick={VmSessionService.active?.shell(gateCommand)},enabled=state.connected&&!state.busy&&gateCommand.isNotBlank()) { Text("Run in guest") }
-                SelectionContainer { ConsoleBox(state.terminal.ifBlank{"No commands executed yet."}) }
-            }
-        }
+    private fun startLinux() {
+        val metrics=resources.displayMetrics
+        val refresh=(if(android.os.Build.VERSION.SDK_INT>=30)display?.refreshRate?:60f else @Suppress("DEPRECATION") windowManager.defaultDisplay.refreshRate).toInt()
+        VmSessionService.active?.startDebian(metrics.widthPixels.coerceAtLeast(640),metrics.heightPixels.coerceAtLeast(480),metrics.densityDpi,refresh)
     }
 
-    @Composable private fun ConsoleBox(text:String) {
-        Text(text,Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface,RoundedCornerShape(12.dp)).padding(12.dp),fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.bodySmall)
+    private fun copyText(text:String,label:String) {
+        getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(label,text))
+        Toast.makeText(this,"Copied",Toast.LENGTH_SHORT).show()
     }
 
-    @Composable private fun DiagnosticsPage(state:SessionState) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            Text("Diagnostics",style=MaterialTheme.typography.headlineSmall)
-            Metric("Mode",state.mode); Metric("Stage",state.stage); Metric("API",state.api.ifBlank{"not connected"})
-            OutlinedButton(onClick={VmSessionService.active?.startDebianDiagnostic()},enabled=state.connected&&state.debianInstalled&&!state.busy) { Text("Test Debian pVM + Internet") }
-            Metric("Debian bundle",if(state.debianInstalled)"embedded" else "missing")
-            Metric("Internet",if(state.internetReady)"ready" else state.internetStage)
-            Metric("Desktop",if(state.kdeInstalled)"provisioned" else state.kdeStage)
-            Metric("Graphics",state.graphics)
-            CapabilityCard(state)
-            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                Button(onClick={VmSessionService.active?.probeCapabilities()},enabled=state.connected&&!state.busy) { Text("Probe AVF") }
-                OutlinedButton(onClick={copyAllLogs(state)}) { Text("Copy all logs") }
-                OutlinedButton(onClick={shareLogs(state)}) { Text("Share") }
-            }
-            SelectionContainer { ConsoleBox(state.console.ifBlank{"No VM output yet."}) }
-        }
+    private fun diagnostics(state:SessionState)=buildString {
+        appendLine("Vessel ${BuildConfig.VERSION_NAME}")
+        appendLine("Branch ${BuildConfig.GIT_BRANCH} · ${BuildConfig.GIT_COMMIT}")
+        appendLine("Backend ${state.backend}")
+        appendLine("Running ${state.running} · mode ${state.mode} · stage ${state.stage}")
+        appendLine("Graphics ${state.graphics}")
+        appendLine("Network ${state.internetReady} · ${state.internetStage}")
+        appendLine("KDE ${state.kdeInstalled} · ${state.kdeStage}")
+        appendLine("Capabilities ${state.capabilities}")
+        appendLine("\n=== Debian ===\n${state.debianTerminal}")
+        appendLine("\n=== Runtime ===\n${state.console}")
     }
 
-    @Composable private fun Metric(label:String,value:String) {
-        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) { Text(label,color=MaterialTheme.colorScheme.onSurfaceVariant); Text(value,Modifier.widthIn(max=260.dp),fontFamily=FontFamily.Monospace) }
+    private fun shareDiagnostics(state:SessionState) {
+        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,diagnostics(state)),"Share Vessel diagnostics"))
     }
-
-    override fun onDestroy() { Shizuku.removeRequestPermissionResultListener(permissionListener); super.onDestroy() }
 }
