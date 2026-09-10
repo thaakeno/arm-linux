@@ -31,7 +31,6 @@ def main():
     args = ap.parse_args()
 
     ctrl_ls = unix_listener(args.uml_control)
-
     tcp_ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     tcp_ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     tcp_ls.bind((args.listen, args.port))
@@ -49,7 +48,6 @@ def main():
 
     next_id = 1
     id_lock = threading.Lock()
-
     def alloc_id():
         nonlocal next_id
         with id_lock:
@@ -91,7 +89,6 @@ def main():
             os.unlink(args.uml_control)
         except FileNotFoundError:
             pass
-
 
 if __name__ == '__main__':
     main()
