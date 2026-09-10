@@ -15,13 +15,13 @@ android {
     namespace = "com.example.dreamlinux"
     compileSdk = 36
     defaultConfig {
-        applicationId = if (localTest) "com.example.dreamlinux.localdev1" else "com.example.dreamlinux"
-        manifestPlaceholders["appLabel"] = if (localTest) "DEV 1 LINUX Local" else "DEV 1 LINUX"
+        applicationId = if (localTest) "com.example.dreamlinux.localvessel" else "com.example.dreamlinux"
+        manifestPlaceholders["appLabel"] = if (localTest) "Vessel Local" else "Vessel"
         buildConfigField("boolean", "LOCAL_TEST", localTest.toString())
         minSdk = 29
         targetSdk = 36
-        versionCode = 1000 + buildRevision
-        versionName = "0.8.6-dev1"
+        versionCode = 2000 + buildRevision
+        versionName = "1.0.0-alpha1"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
         ndk { abiFilters += "arm64-v8a" }
@@ -92,7 +92,7 @@ dependencies {
 }
 
 val testLabel = if (localTest) "localtest-" else ""
-val stagedApkName = "DreamLinux-${testLabel}${android.defaultConfig.versionName}-${displayRevision}-arm64.apk"
+val stagedApkName = "Vessel-${testLabel}${android.defaultConfig.versionName}-${displayRevision}-arm64.apk"
 tasks.register<Copy>("stageDebugApk") {
     dependsOn("assembleDebug")
     from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
