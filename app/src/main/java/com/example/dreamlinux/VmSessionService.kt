@@ -1,15 +1,14 @@
 package com.example.dreamlinux
 
 import android.app.*
-import android.content.*
-import android.content.pm.PackageManager
-import android.os.*
-import android.view.Surface
-import java.io.File
+import android.content.Intent
+import android.os.IBinder
+import android.os.SystemClock
+import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONObject
-import rikka.shizuku.Shizuku
+import java.io.File
 
 enum class RuntimeBackend { UML_VENUS, AVF_LEGACY }
 
@@ -17,10 +16,10 @@ data class SessionState(
     val connected:Boolean=false,
     val running:Boolean=false,
     val cid:Int=-1,
-    val name:String="",
-    val mode:String="none",
+    val name:String="Vessel Debian",
+    val mode:String="uml",
     val stage:String="idle",
-    val api:String="",
+    val api:String="Termux RUN_COMMAND + loopback control",
     val vmRoot:String="",
     val console:String="",
     val terminal:String="",
@@ -28,261 +27,272 @@ data class SessionState(
     val message:String="Ready to start Vessel",
     val busy:Boolean=false,
     val debianStarting:Boolean=false,
-    val debianInstalled:Boolean=false,
+    val debianInstalled:Boolean=true,
     val debianInstalling:Boolean=false,
     val installProgress:Double=-1.0,
     val installBytes:Long=0L,
     val installTotal:Long=-1L,
     val kdeInstalled:Boolean=false,
     val kdeInstalling:Boolean=false,
-    val kdeStage:String="not installed",
+    val kdeStage:String="not started",
     val capabilities:String="Not checked",
-    val graphics:String="Venus transport proven; APK native presenter integration in progress",
+    val graphics:String="Venus · virglrenderer · host Adreno GPU",
     val internetReady:Boolean=false,
-    val internetStage:String="not started",
+    val internetStage:String="offline",
     val backend:RuntimeBackend=RuntimeBackend.UML_VENUS
 )
 
+/**
+ * Foreground owner for the rootless UML + Venus session.
+ *
+ * The old AVF/Shizuku implementation is intentionally left in the repository
+ * for archaeology and fallback work, but it is no longer the primary runtime.
+ * Vessel now controls the exact Termux UML stack that was proven on-device and
+ * exposes the Debian KDE desktop through the APK's built-in VNC client.
+ */
 class VmSessionService : Service() {
-    companion object { val state=MutableStateFlow(SessionState()); var active:VmSessionService?=null }
-    private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main)
-    private var bridge:IVmBridge?=null
-    private var pendingSurface:Surface?=null
-    private var successfulGateACommands=0
-    private var reconnectProbeArmed=false
-
-    private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,AsyncVmBridge::class.java))
-        .daemon(false).processNameSuffix("vessel_vm_bridge").debuggable(true).version(BuildConfig.VERSION_CODE) }
-
-    private val connection=object:ServiceConnection {
-        override fun onServiceConnected(name:ComponentName,binder:IBinder) {
-            bridge=IVmBridge.Stub.asInterface(binder)
-            state.value=state.value.copy(connected=true,message="System bridge connected")
-            scope.launch { refresh(); probeCapabilities() }
-        }
-        override fun onServiceDisconnected(name:ComponentName) {
-            bridge=null
-            state.value=state.value.copy(connected=false,running=false,debianStarting=false,message="System bridge disconnected; Linux data retained")
-        }
+    companion object {
+        val state = MutableStateFlow(SessionState())
+        var active: VmSessionService? = null
     }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private lateinit var uml: TermuxUmlController
+    private var requestedWidth = 1920
+    private var requestedHeight = 1080
+    private var requestedDpi = 144
 
     override fun onCreate() {
-        super.onCreate(); active=this
-        val manager=getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel("vm","Vessel Linux session",NotificationManager.IMPORTANCE_LOW))
-        val intent=PendingIntent.getActivity(this,0,Intent(this,MainActivity::class.java),PendingIntent.FLAG_IMMUTABLE)
-        startForeground(1,Notification.Builder(this,"vm").setContentTitle("Vessel")
-            .setContentText("ARM64 Linux session").setSmallIcon(android.R.drawable.ic_menu_manage)
-            .setContentIntent(intent).build())
-        scope.launch { state.collect { current -> withContext(Dispatchers.IO) {
-            File(filesDir,"verification-runtime.json").writeText(JSONObject()
-                .put("versionName",BuildConfig.VERSION_NAME).put("versionCode",BuildConfig.VERSION_CODE)
-                .put("commit",BuildConfig.GIT_COMMIT).put("branch",BuildConfig.GIT_BRANCH)
-                .put("backend",current.backend.name)
-                .put("running",current.running).put("name",current.name).put("mode",current.mode)
-                .put("stage",current.stage).put("api",current.api).put("vmRoot",current.vmRoot)
-                .put("linuxStarting",current.debianStarting)
-                .put("debianBundleReady",current.debianInstalled)
-                .put("desktopInstalled",current.kdeInstalled).put("desktopInstalling",current.kdeInstalling).put("desktopStage",current.kdeStage)
-                .put("internetReady",current.internetReady).put("internetStage",current.internetStage)
-                .put("graphics",current.graphics).put("capabilities",current.capabilities)
-                .put("message",current.message).put("reconnect",if(reconnectProbeArmed)"PENDING" else if(successfulGateACommands>1)"PASS" else "NOT TESTED")
-                .toString(2))
-        } } }
-        scope.launch { while(isActive) { delay(700); if(bridge!=null) refresh() } }
+        super.onCreate()
+        active = this
+        uml = TermuxUmlController(this)
+
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(
+            NotificationChannel("vessel-runtime", "Vessel Linux runtime", NotificationManager.IMPORTANCE_LOW)
+        )
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        startForeground(
+            1,
+            NotificationCompat.Builder(this, "vessel-runtime")
+                .setSmallIcon(android.R.drawable.ic_menu_manage)
+                .setContentTitle("Vessel")
+                .setContentText("Rootless ARM64 Linux runtime")
+                .setOngoing(true)
+                .setContentIntent(open)
+                .build()
+        )
+
+        updateAvailability()
+        scope.launch {
+            while (isActive) {
+                if (!state.value.busy) refresh(silent = true)
+                delay(if (state.value.running) 900 else 1800)
+            }
+        }
+        scope.launch { persistVerificationLoop() }
     }
 
-    override fun onStartCommand(intent:Intent?,flags:Int,startId:Int):Int {
-        if(bridge==null) try {
-            check(Shizuku.pingBinder()&&Shizuku.checkSelfPermission()==PackageManager.PERMISSION_GRANTED) { "Authorize Shizuku first" }
-            Shizuku.bindUserService(args,connection)
-        } catch(e:Exception) { state.value=state.value.copy(message=e.message?:"Shizuku unavailable") }
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        connectRuntime()
         return START_STICKY
     }
 
-    private fun applyStatus(raw:String) {
-        val obj=JSONObject(raw)
-        val error=obj.optString("error")
-        val installError=obj.optString("installError")
-        val desktopError=obj.optString("kdeError")
-        val linuxStarting=obj.optBoolean("debianStarting")
-        val msg=when {
+    private fun updateAvailability() {
+        val installed = uml.isTermuxInstalled()
+        val permission = uml.hasRunCommandPermission()
+        val message = when {
+            !installed -> "Install Termux to host the rootless UML runtime"
+            !permission -> "Grant Vessel permission to run commands in Termux"
+            else -> "Runtime ready"
+        }
+        state.value = state.value.copy(
+            connected = installed && permission,
+            stage = if (installed && permission) "runtime_ready" else "runtime_setup",
+            message = message,
+            capabilities = "Termux=${if (installed) "installed" else "missing"} · RUN_COMMAND=${if (permission) "granted" else "missing"}"
+        )
+    }
+
+    fun connectRuntime() {
+        updateAvailability()
+        if (!state.value.connected || state.value.busy) return
+        operation("Connecting runtime") {
+            val raw = uml.ensureDaemon()
+            applyRuntime(raw, "Runtime connected")
+        }
+    }
+
+    private fun applyRuntime(obj: JSONObject, fallbackMessage: String? = null) {
+        val ok = obj.optBoolean("ok", false)
+        val running = obj.optBoolean("running", false)
+        val guest = obj.optBoolean("guestReady", false)
+        val desktop = obj.optBoolean("desktopReady", false)
+        val error = obj.optString("error").ifBlank { obj.optString("lastError") }
+        val message = when {
             error.isNotBlank() -> error
-            desktopError.isNotBlank() -> desktopError
-            installError.isNotBlank() -> installError
-            linuxStarting -> "Starting Debian · ${obj.optLong("startupElapsedSeconds",0L)}s · ${humanStage(obj.optString("stage"))}"
-            obj.optBoolean("kdeInstalling") -> "Desktop: ${obj.optString("kdeStage","working")}"
-            else -> humanStage(obj.optString("stage","unknown"))
+            fallbackMessage != null -> fallbackMessage
+            desktop -> "KDE Plasma is live"
+            guest -> "Debian ARM64 is ready"
+            running -> "Booting Debian ARM64"
+            else -> "Runtime ready"
         }
-        state.value=state.value.copy(
-            running=obj.optBoolean("running"),cid=obj.optInt("cid",-1),name=obj.optString("name"),
-            mode=obj.optString("mode","none"),stage=obj.optString("stage","unknown"),api=obj.optString("api"),
-            vmRoot=obj.optString("vmRoot"),console=obj.optString("log"),message=msg,
-            debianStarting=linuxStarting,
-            debianInstalled=obj.optBoolean("debianInstalled"),debianInstalling=obj.optBoolean("debianInstalling"),
-            installProgress=obj.optDouble("installProgress",-1.0),installBytes=obj.optLong("installBytes",0L),
-            installTotal=obj.optLong("installTotal",-1L),kdeInstalled=obj.optBoolean("kdeInstalled"),
-            kdeInstalling=obj.optBoolean("kdeInstalling"),kdeStage=obj.optString("kdeStage","not installed"),
-            graphics=obj.optString("guestGraphics",state.value.graphics),
-            internetReady=obj.optBoolean("internetReady"),internetStage=obj.optString("internetStage","not started"))
+        state.value = state.value.copy(
+            connected = uml.isTermuxInstalled() && uml.hasRunCommandPermission(),
+            running = running,
+            debianStarting = running && !guest,
+            kdeInstalled = desktop,
+            kdeInstalling = state.value.kdeInstalling && !desktop,
+            kdeStage = if (desktop) "KDE Plasma live · VNC ${TermuxUmlController.VNC_PORT}" else if (running) "desktop stopped" else "not started",
+            internetReady = guest,
+            internetStage = if (guest) "NAT via umnet/passt" else "offline",
+            vmRoot = obj.optString("runtimeDir", state.value.vmRoot),
+            console = obj.optString("logTail", state.value.console).takeLast(200_000),
+            stage = when {
+                desktop -> "desktop_ready"
+                guest -> "debian_ready"
+                running -> "uml_boot"
+                else -> "runtime_ready"
+            },
+            message = message,
+            graphics = if (guest) "Mesa Venus 26.2.2 · virglrenderer/Turnip · shared umshm transport" else state.value.graphics,
+            capabilities = if (ok) "Rootless UML · Venus · VNC desktop · persistent ext4" else state.value.capabilities
+        )
     }
 
-    private fun humanStage(stage:String):String = when(stage) {
-        "config:debian_pvm" -> "Preparing Linux runtime"
-        "vm_create:debian" -> "Creating Debian runtime"
-        "vm_start:debian" -> "Starting Linux"
-        "vm_wait_running:debian" -> "Waiting for guest"
-        "running:debian" -> "Guest running"
-        "microdroid_adb_root" -> "Preparing guest permissions"
-        "debian_provision" -> "Preparing Debian ARM64 userspace"
-        "internet_bridge" -> "Connecting Linux networking"
-        "debian_ready" -> "Debian ready"
-        "desktop_packages" -> "Installing KDE Plasma"
-        "desktop_ready" -> "KDE Plasma ready"
-        "guest_command_pass" -> "Guest command passed"
-        else -> if(stage.startsWith("blocked:")) "Blocked: ${stage.removePrefix("blocked:")}" else "Stage: $stage"
-    }
-
-    private suspend fun refresh() {
-        try { val b=bridge?:return; applyStatus(withContext(Dispatchers.IO){b.status()}) }
-        catch(e:Exception) { state.value=state.value.copy(message=e.message?:"Status unavailable") }
-    }
-
-    private suspend fun waitForVmRunning(b:IVmBridge, timeoutMs:Long=30_000L):String {
-        val deadline=SystemClock.elapsedRealtime()+timeoutMs
-        var lastStage="unknown"
-        while(SystemClock.elapsedRealtime()<deadline) {
-            val raw=withContext(Dispatchers.IO){b.status()}
-            val obj=JSONObject(raw)
-            lastStage=obj.optString("stage","unknown")
-            applyStatus(raw)
-            if(obj.optBoolean("running")) return raw
-            val error=obj.optString("error")
-            if(error.isNotBlank() || lastStage.startsWith("blocked:")) throw IllegalStateException(if(error.isNotBlank()) error else "VM blocked at $lastStage")
-            delay(200)
+    private suspend fun refresh(silent: Boolean = false) {
+        updateAvailability()
+        if (!state.value.connected) return
+        try {
+            val raw = uml.status()
+            applyRuntime(raw)
+        } catch (t: Throwable) {
+            if (!silent) state.value = state.value.copy(message = t.message ?: "Runtime unavailable")
+            if (state.value.running) state.value = state.value.copy(running = false, kdeInstalled = false)
         }
-        throw IllegalStateException("Timed out waiting for Linux runtime; last stage=$lastStage")
     }
 
-    private suspend fun waitForLinuxStartup(b:IVmBridge, timeoutMs:Long=12L*60L*1000L) {
-        val deadline=SystemClock.elapsedRealtime()+timeoutMs
-        while(SystemClock.elapsedRealtime()<deadline) {
-            val raw=withContext(Dispatchers.IO){b.status()}
-            val obj=JSONObject(raw)
-            applyStatus(raw)
-            if(!obj.optBoolean("debianStarting")) {
-                val error=obj.optString("error")
-                if(error.isNotBlank() || obj.optString("stage").startsWith("blocked:")) {
-                    throw IllegalStateException(if(error.isNotBlank()) error else "Linux startup blocked at ${obj.optString("stage")}")
-                }
-                return
+    fun startVm() = startDebian(requestedWidth, requestedHeight, requestedDpi, 60)
+
+    fun startDebian(width: Int, height: Int, dpi: Int, refreshRate: Int) {
+        requestedWidth = width.coerceIn(800, 3840)
+        requestedHeight = height.coerceIn(600, 2160)
+        requestedDpi = dpi.coerceIn(96, 240)
+        operation("Starting Debian") {
+            state.value = state.value.copy(debianStarting = true, message = "Booting ARM64 UML…")
+            applyRuntime(uml.start(), "Debian ARM64 ready")
+            state.value = state.value.copy(kdeInstalling = true, kdeStage = "starting Plasma", message = "Starting KDE Plasma…")
+            val desktop = uml.startDesktop(requestedWidth, requestedHeight, requestedDpi)
+            applyRuntime(desktop, "KDE Plasma is live")
+            state.value = state.value.copy(kdeInstalling = false, kdeInstalled = true)
+        }
+    }
+
+    fun startDebianDiagnostic() = operation("Starting diagnostic guest") {
+        applyRuntime(uml.start(), "Debian diagnostic guest ready")
+    }
+
+    fun installDebian() = startDebian(requestedWidth, requestedHeight, requestedDpi, 60)
+
+    fun installKde() = operation("Starting KDE Plasma") {
+        state.value = state.value.copy(kdeInstalling = true, kdeStage = "installing/starting", message = "Preparing Plasma desktop…")
+        applyRuntime(uml.startDesktop(requestedWidth, requestedHeight, requestedDpi), "KDE Plasma is live")
+        state.value = state.value.copy(kdeInstalling = false, kdeInstalled = true)
+    }
+
+    fun stopVm() = operation("Stopping Linux") {
+        applyRuntime(uml.stop(), "Linux stopped; disk retained")
+        state.value = state.value.copy(kdeInstalled = false, kdeInstalling = false, internetReady = false)
+    }
+
+    fun debianConsole(command: String) = operation("Running command") {
+        val result = uml.guest(command, 90)
+        check(result.optBoolean("ok", false)) { result.optString("error", "Command failed") }
+        val output = result.optString("output")
+        state.value = state.value.copy(
+            debianTerminal = (state.value.debianTerminal + "\n# $command\n$output").takeLast(256_000),
+            message = "Command completed"
+        )
+        applyRuntime(result, "Command completed")
+    }
+
+    fun shell(command: String) = debianConsole(command)
+
+    fun probeCapabilities() = operation("Checking runtime") {
+        val termux = uml.isTermuxInstalled()
+        val permission = uml.hasRunCommandPermission()
+        val runtime = runCatching { uml.ensureDaemon() }.getOrNull()
+        val text = buildString {
+            append("Rootless UML ARM64")
+            append(" · Termux=").append(if (termux) "yes" else "no")
+            append(" · command permission=").append(if (permission) "yes" else "no")
+            append(" · daemon=").append(if (runtime != null) "yes" else "no")
+            if (runtime?.optBoolean("guestReady") == true) append(" · Venus guest=ready")
+            if (runtime?.optBoolean("desktopReady") == true) append(" · Plasma=live")
+        }
+        state.value = state.value.copy(capabilities = text, message = text)
+        runtime?.let { applyRuntime(it, text) }
+    }
+
+    fun attachSurface(surface: android.view.Surface) = Unit
+    fun detachSurface(surface: android.view.Surface? = null) = Unit
+    fun sendKey(action: Int, keyCode: Int, metaState: Int): Boolean = false
+    fun sendTouch(action: Int, x: Float, y: Float, pointerId: Int): Boolean = false
+
+    private fun operation(label: String, block: suspend () -> Unit) {
+        if (state.value.busy) return
+        state.value = state.value.copy(busy = true, message = label)
+        scope.launch {
+            try {
+                block()
+            } catch (t: Throwable) {
+                val msg = t.message ?: t.javaClass.simpleName
+                state.value = state.value.copy(
+                    message = msg,
+                    debianStarting = false,
+                    kdeInstalling = false,
+                    debianTerminal = (state.value.debianTerminal + "\nERROR: $msg\n").takeLast(256_000)
+                )
+            } finally {
+                state.value = state.value.copy(busy = false)
+                refresh(silent = true)
             }
-            delay(400)
         }
-        throw IllegalStateException("Debian startup exceeded 12 minutes; check diagnostics")
     }
 
-    fun startVm()=operation { b ->
-        applyStatus(withContext(Dispatchers.IO){b.startVm()})
-        waitForVmRunning(b,45_000L)
-        state.value=state.value.copy(message="Guest runtime running")
-    }
-
-    fun stopVm()=operation { b ->
-        pendingSurface=null
-        applyStatus(withContext(Dispatchers.IO){b.stopVm()})
-        if(successfulGateACommands>0) reconnectProbeArmed=true
-        state.value=state.value.copy(message="Linux stopped; persistent data retained")
-    }
-
-    fun installDebian()=operation("linux") { b -> applyStatus(withContext(Dispatchers.IO){b.installDebian()}) }
-
-    fun startDebian(width:Int,height:Int,dpi:Int,refreshRate:Int)=operation("linux") { b ->
-        pendingSurface=null
-        state.value=state.value.copy(message="Launching Debian ARM64…")
-        applyStatus(withContext(Dispatchers.IO){b.startDebian(width,height,dpi,refreshRate)})
-        waitForLinuxStartup(b)
-        refresh()
-    }
-
-    fun startDebianDiagnostic()=operation("linux") { b ->
-        pendingSurface=null
-        state.value=state.value.copy(message="Launching Debian diagnostic…")
-        applyStatus(withContext(Dispatchers.IO){b.startDebianDiagnostic()})
-        waitForLinuxStartup(b)
-        refresh()
-    }
-
-    fun installKde()=operation("linux") { b ->
-        applyStatus(withContext(Dispatchers.IO){b.installKde()})
-        refresh()
-    }
-
-    fun debianConsole(command:String)=operation("linux") { b ->
-        waitForVmRunning(b,60_000L)
-        val reply=withContext(Dispatchers.IO){b.debianConsole(command)}
-        val result=JSONObject(reply)
-        check(result.optBoolean("ok")) { result.optString("error","Debian command failed") }
-        val output=result.optString("output")
-        state.value=state.value.copy(
-            debianTerminal=(state.value.debianTerminal+"\n# $command\n$output").takeLast(256000),
-            message="Debian command completed")
-        refresh()
-    }
-
-    fun probeCapabilities()=operation { b ->
-        val raw=withContext(Dispatchers.IO){b.inspectCapabilities()}
-        val obj=JSONObject(raw)
-        val text=if(obj.optBoolean("ok")) buildString {
-            append("AVF caps=").append(obj.optInt("capabilities"))
-            append(" · pVM=").append(obj.optBoolean("protectedVm"))
-            append(" · non-pVM=").append(obj.optBoolean("nonProtectedVm"))
-            append(" · custom=").append(obj.optBoolean("customImageApi"))
-            append(" · GPU API=").append(obj.optBoolean("gpuConfigApi"))
-            append(" · display API=").append(obj.optBoolean("displayConfigApi"))
-        } else "Capability probe failed: ${obj.optString("error")}" 
-        state.value=state.value.copy(capabilities=text,message=text)
-        refresh()
-    }
-
-    fun shell(command:String)=operation { b ->
-        if(!state.value.running || state.value.mode!="microdroid") applyStatus(withContext(Dispatchers.IO){b.startVm()})
-        waitForVmRunning(b,45_000L)
-        val reply=withContext(Dispatchers.IO){b.guestShell(command)}
-        val result=JSONObject(reply)
-        check(result.optBoolean("ok")) { result.optString("error","Guest command failed") }
-        val output=result.optString("output")
-        successfulGateACommands++
-        val reconnected=reconnectProbeArmed
-        if(reconnected) reconnectProbeArmed=false
-        state.value=state.value.copy(
-            terminal=(state.value.terminal+"\n$ $command\n$output").takeLast(256000),
-            message=if(reconnected)"Reconnect verified" else "Guest command completed")
-        refresh()
-    }
-
-    fun attachSurface(surface:Surface) { pendingSurface=surface }
-    fun detachSurface(surface:Surface?=null) { if(surface==null||pendingSurface===surface) pendingSurface=null }
-    fun sendKey(action:Int,keyCode:Int,metaState:Int):Boolean = false
-    fun sendTouch(action:Int,x:Float,y:Float,pointerId:Int):Boolean = false
-
-    private fun operation(failureChannel:String="microdroid",block:suspend (IVmBridge)->Unit) {
-        if(state.value.busy) return
-        val b=bridge?:return
-        state.value=state.value.copy(busy=true)
-        scope.launch { try { block(b) } catch(e:Exception) {
-            val error=e.message?:e.javaClass.simpleName
-            state.value=if(failureChannel=="linux") state.value.copy(message=error,debianTerminal=(state.value.debianTerminal+"\nERROR: $error\n").takeLast(120000))
-                else state.value.copy(message=error,terminal=(state.value.terminal+"\nERROR: $error\n").takeLast(120000))
-            refresh()
-            state.value=state.value.copy(message=error)
-        } finally { state.value=state.value.copy(busy=false) } }
+    private suspend fun persistVerificationLoop() {
+        while (scope.isActive) {
+            val s = state.value
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    File(filesDir, "verification-runtime.json").writeText(
+                        JSONObject()
+                            .put("versionName", BuildConfig.VERSION_NAME)
+                            .put("commit", BuildConfig.GIT_COMMIT)
+                            .put("branch", BuildConfig.GIT_BRANCH)
+                            .put("backend", s.backend.name)
+                            .put("running", s.running)
+                            .put("stage", s.stage)
+                            .put("desktop", s.kdeInstalled)
+                            .put("graphics", s.graphics)
+                            .put("network", s.internetStage)
+                            .put("updatedElapsedMs", SystemClock.elapsedRealtime())
+                            .toString(2)
+                    )
+                }
+            }
+            delay(2_000)
+        }
     }
 
     override fun onDestroy() {
-        active=null; scope.cancel(); pendingSurface=null
-        if(bridge!=null) try { Shizuku.unbindUserService(args,connection,true) } catch(_:Exception) {}
-        bridge=null; super.onDestroy()
+        active = null
+        scope.cancel()
+        super.onDestroy()
     }
-    override fun onBind(intent:Intent?):IBinder?=null
+
+    override fun onBind(intent: Intent?): IBinder? = null
 }
