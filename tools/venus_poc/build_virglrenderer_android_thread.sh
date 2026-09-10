@@ -208,6 +208,34 @@ BUILD_SH="$TP_DIR/packages/$PKG/build.sh"
   exit 1
 }
 
+# termux-packages' Android Vulkan patch has a naming mismatch in the no-GBM
+# branch: it defines vkr_get_fd_info_from_allocation_info(), while upstream
+# vkr_device_memory.c still calls vkr_gbm_get_fd_info_from_allocation_info().
+# This is normally hidden by prebuilt packages, but rebuilding Venus on-device
+# exposes it as an implicit-function-declaration error. Keep the Android helper
+# implementation, but give it the name expected by the virglrenderer source.
+ANDROID_VULKAN_PATCH="$TP_DIR/packages/$PKG/0011-use-Android-Vulkan.patch.beforehostbuild"
+if [ -f "$ANDROID_VULKAN_PATCH" ]; then
+  python - "$ANDROID_VULKAN_PATCH" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+old = "vkr_get_fd_info_from_allocation_info"
+new = "vkr_gbm_get_fd_info_from_allocation_info"
+count = s.count(old)
+if count:
+    s = s.replace(old, new)
+    p.write_text(s)
+    print(f"[venus-build] fixed Android Vulkan helper name ({count} occurrence(s))")
+elif new in s:
+    print("[venus-build] Android Vulkan helper name already fixed")
+else:
+    raise SystemExit("could not locate Android Vulkan allocation helper in Termux patch")
+PY
+fi
+
 python - "$BUILD_SH" <<'PY'
 from pathlib import Path
 import sys
