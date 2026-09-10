@@ -311,7 +311,7 @@ DEB="$(find "$TP_DIR/output" "$TP_DIR/debs" -maxdepth 1 -type f -name 'virglrend
 }
 
 echo "[venus-build] installing: $DEB"
-apt install -y "$DEB"
+apt install -y --allow-downgrades "$DEB"
 
 mkdir -p "$(dirname "$MARKER")"
 touch "$MARKER"
