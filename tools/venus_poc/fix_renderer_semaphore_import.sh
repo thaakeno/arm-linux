@@ -3,7 +3,9 @@ set -euo pipefail
 
 SRC_ROOT="${SRC_ROOT:-$HOME/.termux-build/virglrenderer-android/src}"
 SRC="$SRC_ROOT/src/venus/vkr_queue.c"
-BUILD_DIR="${BUILD_DIR:-$HOME/.termux-build/virglrenderer-android/host-build/virglrenderer-build}"
+BUILD_ROOT="${BUILD_ROOT:-$HOME/.termux-build/virglrenderer-android/host-build}"
+BUILD_DIR="${BUILD_DIR:-$BUILD_ROOT/virglrenderer-build}"
+EPOXY_BUILD="$BUILD_ROOT/libepoxy-build"
 PREFIX_DIR="${PREFIX_DIR:-$PREFIX/opt/virglrenderer-android}"
 
 [ -f "$SRC" ] || {
@@ -16,6 +18,26 @@ PREFIX_DIR="${PREFIX_DIR:-$PREFIX/opt/virglrenderer-android}"
   exit 1
 }
 
+# Installing the .deb can replace the private prefix and remove the libepoxy
+# development headers that the host-build Ninja graph still references. Restore
+# those headers from the already-built bundled libepoxy tree before rebuilding.
+EPOXY_DST="$PREFIX_DIR/include/epoxy"
+mkdir -p "$EPOXY_DST"
+for h in common.h gl.h egl.h; do
+  src="$SRC_ROOT/libepoxy/include/epoxy/$h"
+  [ -f "$src" ] && cp -f "$src" "$EPOXY_DST/$h"
+done
+for h in gl_generated.h egl_generated.h; do
+  src="$EPOXY_BUILD/include/epoxy/$h"
+  [ -f "$src" ] && cp -f "$src" "$EPOXY_DST/$h"
+done
+
+if [ ! -f "$EPOXY_DST/gl.h" ] || [ ! -f "$EPOXY_DST/gl_generated.h" ]; then
+  echo "[venus-sync-fix] could not restore bundled libepoxy headers" >&2
+  exit 1
+fi
+echo "[venus-sync-fix] restored bundled libepoxy headers"
+
 cp -f "$SRC" "$SRC.before-venus-sync-fix"
 
 python - "$SRC" <<'PY'
@@ -25,35 +47,32 @@ import sys
 
 p = Path(sys.argv[1])
 s = p.read_text()
-
 marker = "Android fallback: signal resourceId=0 semaphore through a queue submit"
-if marker in s:
-    print("[venus-sync-fix] source already patched")
-    raise SystemExit(0)
 
-# Match both virglrenderer variants seen in the wild:
-#   vkr_cs_decoder_set_fatal(&ctx->decoder)
-#   vkr_context_set_fatal(ctx)
-pat = re.compile(
-    r'(?P<indent>^[ \t]*)if\s*\(\s*vk->ImportSemaphoreFdKHR\s*\(\s*args->device\s*,\s*&import_info\s*\)\s*!=\s*VK_SUCCESS\s*\)\s*\n'
-    r'(?P=indent)[ \t]+(?P<fatal>vkr_(?:cs_decoder_set_fatal\s*\(\s*&ctx->decoder\s*\)|context_set_fatal\s*\(\s*ctx\s*\)))\s*;',
-    re.M,
-)
-m = pat.search(s)
-if not m:
-    lines = s.splitlines()
-    hits = [i for i, line in enumerate(lines) if "ImportSemaphoreFdKHR" in line]
-    if hits:
-        i = hits[0]
-        lo, hi = max(0, i - 8), min(len(lines), i + 10)
-        print("[venus-sync-fix] actual source around ImportSemaphoreFdKHR:", file=sys.stderr)
-        for n in range(lo, hi):
-            print(f"{n+1:5}: {lines[n]}", file=sys.stderr)
-    raise SystemExit("[venus-sync-fix] could not match ImportSemaphoreFdKHR failure block")
+if marker not in s:
+    # Match both virglrenderer variants seen here:
+    #   vkr_cs_decoder_set_fatal(&ctx->decoder)
+    #   vkr_context_set_fatal(ctx)
+    pat = re.compile(
+        r'(?P<indent>^[ \t]*)if\s*\(\s*vk->ImportSemaphoreFdKHR\s*\(\s*args->device\s*,\s*&import_info\s*\)\s*!=\s*VK_SUCCESS\s*\)\s*\n'
+        r'(?P=indent)[ \t]+(?P<fatal>vkr_(?:cs_decoder_set_fatal\s*\(\s*&ctx->decoder\s*\)|context_set_fatal\s*\(\s*ctx\s*\)))\s*;',
+        re.M,
+    )
+    m = pat.search(s)
+    if not m:
+        lines = s.splitlines()
+        hits = [i for i, line in enumerate(lines) if "ImportSemaphoreFdKHR" in line]
+        if hits:
+            i = hits[0]
+            lo, hi = max(0, i - 8), min(len(lines), i + 10)
+            print("[venus-sync-fix] actual source around ImportSemaphoreFdKHR:", file=sys.stderr)
+            for n in range(lo, hi):
+                print(f"{n+1:5}: {lines[n]}", file=sys.stderr)
+        raise SystemExit("[venus-sync-fix] could not match ImportSemaphoreFdKHR failure block")
 
-indent = m.group("indent")
-fatal = m.group("fatal") + ";"
-new = f'''{indent}if (vk->ImportSemaphoreFdKHR) {{
+    indent = m.group("indent")
+    fatal = m.group("fatal") + ";"
+    new = f'''{indent}if (vk->ImportSemaphoreFdKHR) {{
 {indent}   if (vk->ImportSemaphoreFdKHR(args->device, &import_info) != VK_SUCCESS)
 {indent}      {fatal}
 {indent}}} else {{
@@ -63,22 +82,14 @@ new = f'''{indent}if (vk->ImportSemaphoreFdKHR) {{
 {indent}    * in this configuration, so avoid the NULL call and produce the same
 {indent}    * renderer-side signaled state with an empty queue submit.
 {indent}    */
-{indent}   if (LIST_IS_EMPTY(&dev->queues)) {{
+{indent}   if (dev->queues.next == &dev->queues) {{
 {indent}      vkr_log("cannot signal imported semaphore: device has no queue");
 {indent}      {fatal}
 {indent}      return;
 {indent}   }}
 
-{indent}   struct vkr_queue *queue = NULL;
-{indent}   LIST_FOR_EACH_ENTRY (queue, &dev->queues, base.track_head) {{
-{indent}      break;
-{indent}   }}
-{indent}   if (!queue) {{
-{indent}      vkr_log("cannot signal imported semaphore: queue lookup failed");
-{indent}      {fatal}
-{indent}      return;
-{indent}   }}
-
+{indent}   struct vkr_queue *queue =
+{indent}      LIST_ENTRY(struct vkr_queue, dev->queues.next, base.track_head);
 {indent}   const VkSemaphore semaphore = res_info->semaphore;
 {indent}   const VkSubmitInfo signal_submit = {{
 {indent}      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -92,11 +103,25 @@ new = f'''{indent}if (vk->ImportSemaphoreFdKHR) {{
 {indent}      {fatal}
 {indent}   }}
 {indent}}}'''
+    s = s[:m.start()] + new + s[m.end():]
+    print(f"[venus-sync-fix] patched {p}")
+    print(f"[venus-sync-fix] fatal helper: {m.group('fatal')}")
+else:
+    print("[venus-sync-fix] source already contains semaphore fallback")
 
-s = s[:m.start()] + new + s[m.end():]
+# Repair the first failed version in-place as well. This source tree persists
+# between retries, so do not require a fresh package extraction.
+s = s.replace("LIST_IS_EMPTY(&dev->queues)", "dev->queues.next == &dev->queues")
+# Older retry used a loop just to fetch the first queue; use the native list
+# representation directly, matching vkr_device_lookup_queue in this source.
+s = re.sub(
+    r'struct vkr_queue \*queue = NULL;\s*LIST_FOR_EACH_ENTRY \(queue, &dev->queues, base\.track_head\) \{\s*break;\s*\}\s*if \(!queue\) \{.*?return;\s*\}',
+    'struct vkr_queue *queue =\n      LIST_ENTRY(struct vkr_queue, dev->queues.next, base.track_head);',
+    s,
+    count=1,
+    flags=re.S,
+)
 p.write_text(s)
-print(f"[venus-sync-fix] patched {p}")
-print(f"[venus-sync-fix] fatal helper: {m.group('fatal')}")
 PY
 
 echo "[venus-sync-fix] rebuilding virgl_render_server/libvirglrenderer..."
