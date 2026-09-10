@@ -1,14 +1,14 @@
-name: Vessel Next
+name: Vessel Final
 
 on:
   push:
-    branches: [ app/vessel-next ]
+    branches: [ app/vessel-final, app/vessel-next ]
   pull_request:
-    branches: [ dev-1 ]
+    branches: [ dev-1, app/vessel-next ]
   workflow_dispatch:
 
 concurrency:
-  group: vessel-next-${{ github.ref }}
+  group: vessel-final-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -37,16 +37,26 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
 
+      - name: Validate rootless runtime controller
+        run: |
+          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon.py
+          python3 -m py_compile tools/venus_poc/host_relay_direct.py
+          python3 -m py_compile tools/venus_poc/guest_relay_direct.py
+          bash -n tools/venus_poc/run_venus_uml.sh
+          bash -n tools/venus_poc/build_guest_mesa_venus_26_2.sh
+          grep -q 'ENABLE_X11' tools/venus_poc/run_venus_uml.sh
+          grep -q 'render-server-worker=thread' tools/venus_poc/build_virglrenderer_android_thread.sh
+
       - name: Compile, unit-test and lint
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
 
       - name: Upload debug APK
-        if: always()
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-next-debug
+          name: vessel-final-debug
           path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: ignore
-          retention-days: 3
+          if-no-files-found: error
+          retention-days: 7
