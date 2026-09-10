@@ -47,19 +47,29 @@ class TermuxUmlController(private val context: Context) {
             "Grant Vessel the 'Run commands in Termux environment' permission in Android settings"
         }
         val command = """
-            set -e
-            cd ~/venus-poc
-            git fetch origin app/vessel-final
-            if [ ! -e ~/vessel-poc-runtime/.git ]; then
-              rm -rf ~/vessel-poc-runtime
-              git worktree add --detach ~/vessel-poc-runtime origin/app/vessel-final
-            else
-              git -C ~/vessel-poc-runtime reset --hard origin/app/vessel-final
-            fi
-            pkill -f '[v]essel_runtime_daemon.py' 2>/dev/null || true
-            sleep 0.25
-            export VESSEL_POC_DIR=~/vessel-poc-runtime
-            exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon.py >>~/vessel-daemon.log 2>&1
+            LOG=~/vessel-daemon.log
+            : > "$LOG"
+            {
+              echo "[vessel-launch] $(date -Iseconds) starting"
+              set -e
+              cd ~/venus-poc
+              echo "[vessel-launch] fetching app/vessel-final"
+              git fetch origin app/vessel-final
+              if [ ! -e ~/vessel-poc-runtime/.git ]; then
+                echo "[vessel-launch] creating runtime worktree"
+                rm -rf ~/vessel-poc-runtime
+                git worktree add --detach ~/vessel-poc-runtime origin/app/vessel-final
+              else
+                echo "[vessel-launch] refreshing runtime worktree"
+                git -C ~/vessel-poc-runtime reset --hard origin/app/vessel-final
+              fi
+              echo "[vessel-launch] stopping stale daemon"
+              pkill -f '[v]essel_runtime_daemon.py' 2>/dev/null || true
+              sleep 0.25
+              export VESSEL_POC_DIR=~/vessel-poc-runtime
+              echo "[vessel-launch] exec runtime daemon"
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon.py
+            } >> "$LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
             setClassName(TERMUX_PACKAGE, "com.termux.app.RunCommandService")
@@ -109,7 +119,7 @@ class TermuxUmlController(private val context: Context) {
             }
         }
         throw IllegalStateException(
-            "Vessel runtime daemon did not start. Inspect ~/vessel-daemon.log in Termux.",
+            "Vessel runtime daemon did not start. In Termux run: cat ~/vessel-daemon.log",
             last
         )
     }
