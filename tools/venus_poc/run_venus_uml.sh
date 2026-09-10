@@ -21,6 +21,7 @@ cleanup() {
   echo
   echo "[venus-run] cleaning up..."
   [ -n "${X11_PROXY_PID:-}" ] && kill "$X11_PROXY_PID" 2>/dev/null || true
+  [ -n "${TERMUX_X11_PID:-}" ] && kill "$TERMUX_X11_PID" 2>/dev/null || true
   [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null || true
   [ -n "${VIRGL_PID:-}" ] && kill "$VIRGL_PID" 2>/dev/null || true
   pkill -f '[h]ost_relay_direct.py' 2>/dev/null || true
@@ -64,20 +65,31 @@ if [ "$ENABLE_X11" = "1" ]; then
   }
 
   X11_UNIX="$PREFIX/tmp/.X11-unix/X${X11_DISPLAY_NUM}"
-  if [ ! -S "$X11_UNIX" ]; then
-    termux-x11 ":$X11_DISPLAY_NUM" >/dev/null 2>&1 &
-    for _ in $(seq 1 50); do
-      [ -S "$X11_UNIX" ] && break
-      sleep 0.1
-    done
-  fi
+
+  # A stale X socket can survive an old Termux:X11 process. Starting the
+  # launcher based only on `-S` then leaves the Android activity showing
+  # "Not connected" even though the proxy socket exists. Always establish a
+  # fresh X server for this self-contained Venus session.
+  pkill -f '[t]ermux-x11' 2>/dev/null || true
+  pkill -f "socat TCP-LISTEN:${X11_TCP_PORT}.*X${X11_DISPLAY_NUM}" 2>/dev/null || true
+  rm -f "$X11_UNIX"
+
+  termux-x11 ":$X11_DISPLAY_NUM" >"$HOME/termux-x11.log" 2>&1 &
+  TERMUX_X11_PID=$!
+  for _ in $(seq 1 50); do
+    [ -S "$X11_UNIX" ] && break
+    kill -0 "$TERMUX_X11_PID" 2>/dev/null || {
+      echo "[venus-run] termux-x11 died; see $HOME/termux-x11.log" >&2
+      exit 1
+    }
+    sleep 0.1
+  done
   [ -S "$X11_UNIX" ] || {
     echo "[venus-run] Termux:X11 socket did not appear: $X11_UNIX" >&2
     exit 1
   }
 
   am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity >/dev/null 2>&1 || true
-  pkill -f "socat TCP-LISTEN:${X11_TCP_PORT}.*X${X11_DISPLAY_NUM}" 2>/dev/null || true
   socat \
     "TCP-LISTEN:${X11_TCP_PORT},bind=127.0.0.1,reuseaddr,fork" \
     "UNIX-CONNECT:${X11_UNIX}" \
