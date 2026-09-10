@@ -136,7 +136,6 @@ class Runtime:
             self.console.clear()
             self.set_progress("uml_boot", 8, "Starting UML kernel")
             master, slave = pty.openpty()
-            # Do not echo the huge base64 helper-install commands back into logs.
             attrs = termios.tcgetattr(slave)
             attrs[3] &= ~(termios.ECHO | termios.ECHONL)
             termios.tcsetattr(slave, termios.TCSANOW, attrs)
@@ -293,8 +292,8 @@ rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
         self._install_reverse_vnc_helper()
         self.set_progress("vnc_start", 90, "Starting KDE Plasma display")
         start_cmd = (
-            f"(command -v tigervncserver >/dev/null 2>&1 && tigervncserver :1 || vncserver :1) "
-            f"-localhost yes -SecurityTypes None -geometry {width}x{height} -depth 24 -dpi {dpi} "
+            "if command -v tigervncserver >/dev/null 2>&1; then VNC=tigervncserver; else VNC=vncserver; fi; "
+            f"$VNC :1 -localhost yes -SecurityTypes None -geometry {width}x{height} -depth 24 -dpi {dpi} "
             ">/tmp/vessel-vnc.log 2>&1"
         )
         self.guest(start_cmd, 45)
