@@ -194,13 +194,32 @@ class VesselActivity : ComponentActivity() {
                 }
             }
 
+            Text("Native display", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            ElevatedCard(shape = RoundedCornerShape(22.dp)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.ViewInAr, null, Modifier.size(28.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Native Surface 3D test", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text("Direct Android GPU surface · no VNC · no Termux:X11 · direct touch", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    Button(onClick = { openNativeCube() }, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.PlayArrow, null)
+                        Spacer(Modifier.width(7.dp))
+                        Text("Open native 3D cube")
+                    }
+                }
+            }
+
             Text("Machine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Metric(Icons.Default.Memory, "Memory", "4 GB UML memory")
+                    Metric(Icons.Default.Memory, "Memory", "8 GB UML memory")
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                     Metric(Icons.Default.Wifi, "Network", state.internetStage)
-                    Metric(Icons.Default.DesktopWindows, "Display", if (state.kdeInstalled) "KDE Plasma X11 · embedded RFB" else state.kdeStage)
+                    Metric(Icons.Default.DesktopWindows, "Display", if (state.kdeInstalled) "KDE Plasma X11 · embedded RFB (legacy)" else state.kdeStage)
                     Metric(Icons.Default.Storage, "Disk", "Persistent ext4")
                 }
             }
@@ -211,8 +230,11 @@ class VesselActivity : ComponentActivity() {
                     FilledTonalButton(onClick = { VmSessionService.active?.launchFirefox() }, enabled = !state.busy) {
                         Icon(Icons.Default.Public, null); Spacer(Modifier.width(6.dp)); Text("Firefox")
                     }
+                    FilledTonalButton(onClick = { openNativeCube() }) {
+                        Icon(Icons.Default.ViewInAr, null); Spacer(Modifier.width(6.dp)); Text("Native 3D")
+                    }
                     FilledTonalButton(onClick = { VmSessionService.active?.runVulkan3DTest() }, enabled = !state.busy) {
-                        Icon(Icons.Default.ViewInAr, null); Spacer(Modifier.width(6.dp)); Text("Vulkan 3D test")
+                        Icon(Icons.Default.Memory, null); Spacer(Modifier.width(6.dp)); Text("Guest Vulkan")
                     }
                     OutlinedButton(onClick = openDesktop) {
                         Icon(Icons.Default.OpenInFull, null); Spacer(Modifier.width(6.dp)); Text("Open desktop")
@@ -260,6 +282,11 @@ class VesselActivity : ComponentActivity() {
                             Button(onClick = { if (state.running) VmSessionService.active?.installKde() else startLinux() }, enabled = state.connected && !state.busy) {
                                 Text(if (state.running) "Start Plasma" else "Start Linux + Plasma")
                             }
+                            OutlinedButton(onClick = { openNativeCube() }, modifier = Modifier.fillMaxWidth()) {
+                                Icon(Icons.Default.ViewInAr, null)
+                                Spacer(Modifier.width(7.dp))
+                                Text("Open native 3D cube")
+                            }
                         }
                     }
                 }
@@ -274,7 +301,8 @@ class VesselActivity : ComponentActivity() {
             FilterChip(selected = mode == VncFramebufferView.PointerMode.TRACKPAD, onClick = { onMode(VncFramebufferView.PointerMode.TRACKPAD) }, label = { Text("Trackpad") }, leadingIcon = { Icon(Icons.Default.Mouse, null) })
             AssistChip(onClick = { VncFramebufferView.active?.showKeyboard() }, label = { Text("Keyboard") }, leadingIcon = { Icon(Icons.Default.Keyboard, null) })
             AssistChip(onClick = { VmSessionService.active?.launchFirefox() }, label = { Text("Firefox") }, leadingIcon = { Icon(Icons.Default.Public, null) })
-            AssistChip(onClick = { VmSessionService.active?.runVulkan3DTest() }, label = { Text("3D test") }, leadingIcon = { Icon(Icons.Default.ViewInAr, null) })
+            AssistChip(onClick = { openNativeCube() }, label = { Text("Native 3D") }, leadingIcon = { Icon(Icons.Default.ViewInAr, null) })
+            AssistChip(onClick = { VmSessionService.active?.runVulkan3DTest() }, label = { Text("Guest Vulkan") }, leadingIcon = { Icon(Icons.Default.Memory, null) })
             AssistChip(onClick = onFullscreen, label = { Text("Fullscreen") }, leadingIcon = { Icon(Icons.Default.OpenInFull, null) })
         }
     }
@@ -298,7 +326,8 @@ class VesselActivity : ComponentActivity() {
                     IconButton(onClick = { mode = VncFramebufferView.PointerMode.TRACKPAD; VncFramebufferView.active?.setPointerMode(mode) }) { Icon(Icons.Default.Mouse, "Trackpad") }
                     IconButton(onClick = { VncFramebufferView.active?.showKeyboard() }) { Icon(Icons.Default.Keyboard, "Keyboard") }
                     IconButton(onClick = { VmSessionService.active?.launchFirefox() }) { Icon(Icons.Default.Public, "Firefox") }
-                    IconButton(onClick = { VmSessionService.active?.runVulkan3DTest() }) { Icon(Icons.Default.ViewInAr, "Vulkan test") }
+                    IconButton(onClick = { openNativeCube() }) { Icon(Icons.Default.ViewInAr, "Native 3D") }
+                    IconButton(onClick = { VmSessionService.active?.runVulkan3DTest() }) { Icon(Icons.Default.Memory, "Guest Vulkan") }
                     IconButton(onClick = onExit) { Icon(Icons.Default.CloseFullscreen, "Exit fullscreen") }
                 }
             }
@@ -334,10 +363,16 @@ class VesselActivity : ComponentActivity() {
     private fun SystemPage(state: SessionState) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("System", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            FeatureCard(Icons.Default.Hub, "Runtime", "Rootless ARM64 User Mode Linux · protocol 21")
+            FeatureCard(Icons.Default.Hub, "Runtime", "Rootless ARM64 User Mode Linux · protocol 22")
             FeatureCard(Icons.Default.Bolt, "GPU", "Mesa Venus → umshm → virglrenderer/Turnip → Adreno")
+            FeatureCard(Icons.Default.DesktopWindows, "Native display", "Android Surface benchmark · direct GPU + touch · no VNC/Termux:X11 in benchmark")
             FeatureCard(Icons.Default.Wifi, "Network", "umnet/passt NAT · desktop transport stays on loopback")
             FeatureCard(Icons.Default.Code, "Build", "${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_BRANCH.ifBlank { "app/vessel-final" }} · ${BuildConfig.GIT_COMMIT}")
+            Button(onClick = { openNativeCube() }, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.ViewInAr, null)
+                Spacer(Modifier.width(7.dp))
+                Text("Open native 3D cube")
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { VmSessionService.active?.probeCapabilities() }, enabled = !state.busy) { Icon(Icons.Default.BugReport, null); Spacer(Modifier.width(6.dp)); Text("Runtime check") }
                 OutlinedButton(onClick = { shareDiagnostics(state) }) { Icon(Icons.Default.Share, null); Spacer(Modifier.width(6.dp)); Text("Share logs") }
@@ -396,6 +431,12 @@ class VesselActivity : ComponentActivity() {
         VmSessionService.active?.startDebian(1152, 720, 120, 60)
     }
 
+    private fun openNativeCube() {
+        startActivity(Intent(this, NativeCubeActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        })
+    }
+
     private fun formatUptime(ms: Long): String {
         val total = (ms / 1000L).coerceAtLeast(0); val h = total / 3600; val m = (total % 3600) / 60; val s = total % 60
         return when { h > 0 -> "%dh %02dm".format(h, m); m > 0 -> "%dm %02ds".format(m, s); else -> "${s}s" }
@@ -413,6 +454,7 @@ class VesselActivity : ComponentActivity() {
 
     private fun diagnosticsText(state: SessionState): String = buildString {
         appendLine("Vessel ${BuildConfig.VERSION_NAME} ${BuildConfig.GIT_COMMIT}")
+        appendLine("protocol=${TermuxUmlController.REQUIRED_PROTOCOL}")
         appendLine("running=${state.running} desktop=${state.kdeInstalled} uptimeMs=${state.uptimeMs}")
         appendLine("${state.progressPercent}% ${state.progressPhase}: ${state.progressDetail}")
         appendLine("error=${state.lastError.ifBlank { "none" }}")
