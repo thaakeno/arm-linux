@@ -24,14 +24,12 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
-/** Embedded RFB 3.8 client for Vessel's KDE desktop. */
+/** Embedded RFB 3.8 viewer. The server owns the only cursor. */
 class VncFramebufferView(context: Context) : View(context) {
     companion object { @Volatile var active: VncFramebufferView? = null }
 
-    enum class PointerMode { DIRECT, TRACKPAD }
-
     private val running = AtomicBoolean(false)
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val wireLock = Any()
     private val density = resources.displayMetrics.density
@@ -41,9 +39,9 @@ class VncFramebufferView(context: Context) : View(context) {
     @Volatile private var fbWidth = 0
     @Volatile private var fbHeight = 0
     @Volatile private var lastError = "Waiting for Plasma desktop"
+    @Volatile private var directInputEnabled = true
     private var socket: Socket? = null
     private var output: DataOutputStream? = null
-    private var pointerMode = PointerMode.DIRECT
     private var cursorGuestX = 0
     private var cursorGuestY = 0
     private var lastPointerSentMs = 0L
@@ -56,19 +54,19 @@ class VncFramebufferView(context: Context) : View(context) {
     private var moved = false
     private var dragging = false
     private var maxPointers = 1
-    private var scrollAccumulator = 0f
+    private var scrollAccumulatorX = 0f
+    private var scrollAccumulatorY = 0f
     private var lastTapMs = 0L
     private var lastTapX = 0f
     private var lastTapY = 0f
-
-    private val directChip = RectF()
-    private val trackpadChip = RectF()
 
     init {
         isFocusable = true
         isFocusableInTouchMode = true
         keepScreenOn = true
         setLayerType(LAYER_TYPE_HARDWARE, null)
+        bitmapPaint.color = Color.WHITE
+        bitmapPaint.alpha = 255
         active = this
         start()
     }
@@ -77,6 +75,14 @@ class VncFramebufferView(context: Context) : View(context) {
         stop()
         if (active === this) active = null
         super.onDetachedFromWindow()
+    }
+
+    fun setDirectInputEnabled(enabled: Boolean) {
+        directInputEnabled = enabled
+        if (!enabled && dragging) {
+            sendPointer(0, cursorGuestX, cursorGuestY)
+            dragging = false
+        }
     }
 
     private fun start() {
@@ -94,12 +100,13 @@ class VncFramebufferView(context: Context) : View(context) {
         var backoff = 100L
         while (running.get()) {
             try {
-                val s = Socket()
-                s.tcpNoDelay = true
-                s.keepAlive = true
-                s.receiveBufferSize = 2 * 1024 * 1024
-                s.sendBufferSize = 128 * 1024
-                s.connect(InetSocketAddress("127.0.0.1", TermuxUmlController.VNC_PORT), 2500)
+                val s = Socket().apply {
+                    tcpNoDelay = true
+                    keepAlive = true
+                    receiveBufferSize = 2 * 1024 * 1024
+                    sendBufferSize = 128 * 1024
+                    connect(InetSocketAddress("127.0.0.1", TermuxUmlController.VNC_PORT), 2500)
+                }
                 socket = s
                 backoff = 100L
                 runSession(s)
@@ -125,11 +132,8 @@ class VncFramebufferView(context: Context) : View(context) {
 
         val version = ByteArray(12)
         input.readFully(version)
-        val banner = String(version, Charsets.US_ASCII)
-        check(banner.startsWith("RFB ")) { "Not an RFB server: $banner" }
-        synchronized(wireLock) {
-            out.write("RFB 003.008\n".toByteArray(Charsets.US_ASCII)); out.flush()
-        }
+        check(String(version, Charsets.US_ASCII).startsWith("RFB ")) { "Not an RFB server" }
+        synchronized(wireLock) { out.write("RFB 003.008\n".toByteArray(Charsets.US_ASCII)); out.flush() }
 
         val count = input.readUnsignedByte()
         check(count > 0) { "VNC server rejected the connection" }
@@ -145,8 +149,7 @@ class VncFramebufferView(context: Context) : View(context) {
         input.skipBytes(16)
         val nameLen = input.readInt()
         if (nameLen in 0..65535) {
-            val name = ByteArray(nameLen)
-            input.readFully(name)
+            val name = ByteArray(nameLen); input.readFully(name)
             lastError = String(name, Charsets.UTF_8)
         }
         bitmap = Bitmap.createBitmap(fbWidth, fbHeight, Bitmap.Config.ARGB_8888)
@@ -155,6 +158,8 @@ class VncFramebufferView(context: Context) : View(context) {
         sendPixelFormat(out)
         sendEncodings(out)
         requestUpdate(out, false)
+        // Also seeds the X server's real pointer position immediately.
+        sendPointer(0, cursorGuestX, cursorGuestY)
         postInvalidate()
 
         while (running.get()) {
@@ -180,41 +185,27 @@ class VncFramebufferView(context: Context) : View(context) {
     }
 
     private fun sendEncodings(out: DataOutputStream) = synchronized(wireLock) {
-        // Hextile first, then CopyRect, then raw. We deliberately do not request
-        // a client-side cursor pseudo-encoding: Xtigervnc owns the one real cursor.
         out.writeByte(2); out.writeByte(0); out.writeShort(3)
-        out.writeInt(5)
-        out.writeInt(1)
-        out.writeInt(0)
+        out.writeInt(5); out.writeInt(1); out.writeInt(0)
         out.flush()
     }
 
     private fun requestUpdate(out: DataOutputStream, incremental: Boolean) = synchronized(wireLock) {
         out.writeByte(3); out.writeByte(if (incremental) 1 else 0)
-        out.writeShort(0); out.writeShort(0)
-        out.writeShort(fbWidth); out.writeShort(fbHeight)
-        out.flush()
+        out.writeShort(0); out.writeShort(0); out.writeShort(fbWidth); out.writeShort(fbHeight); out.flush()
     }
 
     private fun readPixel(input: DataInputStream): Int {
-        val b = input.readUnsignedByte()
-        val g = input.readUnsignedByte()
-        val r = input.readUnsignedByte()
-        input.readUnsignedByte()
+        val b = input.readUnsignedByte(); val g = input.readUnsignedByte(); val r = input.readUnsignedByte(); input.readUnsignedByte()
         return -0x1000000 or (r shl 16) or (g shl 8) or b
     }
 
     private fun decodeRaw(input: DataInputStream, bmp: Bitmap, x: Int, y: Int, w: Int, h: Int) {
-        val rowBytes = ByteArray(w * 4)
-        val row = IntArray(w)
+        val rowBytes = ByteArray(w * 4); val row = IntArray(w)
         repeat(h) { yy ->
-            input.readFully(rowBytes)
-            var p = 0
+            input.readFully(rowBytes); var p = 0
             for (xx in 0 until w) {
-                val b = rowBytes[p++].toInt() and 0xff
-                val g = rowBytes[p++].toInt() and 0xff
-                val r = rowBytes[p++].toInt() and 0xff
-                p++
+                val b = rowBytes[p++].toInt() and 0xff; val g = rowBytes[p++].toInt() and 0xff; val r = rowBytes[p++].toInt() and 0xff; p++
                 row[xx] = -0x1000000 or (r shl 16) or (g shl 8) or b
             }
             synchronized(bmp) { bmp.setPixels(row, 0, w, x, y + yy, w, 1) }
@@ -222,60 +213,32 @@ class VncFramebufferView(context: Context) : View(context) {
     }
 
     private fun decodeCopyRect(input: DataInputStream, bmp: Bitmap, x: Int, y: Int, w: Int, h: Int) {
-        val srcX = input.readUnsignedShort()
-        val srcY = input.readUnsignedShort()
+        val srcX = input.readUnsignedShort(); val srcY = input.readUnsignedShort()
         check(srcX + w <= bmp.width && srcY + h <= bmp.height) { "Invalid CopyRect source" }
         val pixels = IntArray(w * h)
-        synchronized(bmp) {
-            bmp.getPixels(pixels, 0, w, srcX, srcY, w, h)
-            bmp.setPixels(pixels, 0, w, x, y, w, h)
-        }
+        synchronized(bmp) { bmp.getPixels(pixels, 0, w, srcX, srcY, w, h); bmp.setPixels(pixels, 0, w, x, y, w, h) }
     }
 
     private fun decodeHextile(input: DataInputStream, bmp: Bitmap, x: Int, y: Int, w: Int, h: Int) {
-        val tile = IntArray(16 * 16)
-        var bg = 0
-        var fg = 0
-        var bgValid = false
-        var fgValid = false
-        var ty = 0
+        val tile = IntArray(256); var bg = 0; var fg = 0; var bgValid = false; var fgValid = false; var ty = 0
         while (ty < h) {
-            val th = minOf(16, h - ty)
-            var tx = 0
+            val th = minOf(16, h - ty); var tx = 0
             while (tx < w) {
-                val tw = minOf(16, w - tx)
-                val sub = input.readUnsignedByte()
-                if ((sub and 1) != 0) {
-                    decodeRaw(input, bmp, x + tx, y + ty, tw, th)
-                    bgValid = false
-                    fgValid = false
-                    tx += 16
-                    continue
-                }
+                val tw = minOf(16, w - tx); val sub = input.readUnsignedByte()
+                if ((sub and 1) != 0) { decodeRaw(input, bmp, x + tx, y + ty, tw, th); bgValid = false; fgValid = false; tx += 16; continue }
                 if ((sub and 2) != 0) { bg = readPixel(input); bgValid = true }
-                check(bgValid) { "Hextile background missing" }
-                Arrays.fill(tile, 0, tw * th, bg)
+                check(bgValid) { "Hextile background missing" }; Arrays.fill(tile, 0, tw * th, bg)
                 if ((sub and 4) != 0) { fg = readPixel(input); fgValid = true }
-                val any = (sub and 8) != 0
-                val coloured = (sub and 16) != 0
-                if (any) {
-                    val count = input.readUnsignedByte()
+                if ((sub and 8) != 0) {
+                    val coloured = (sub and 16) != 0; val count = input.readUnsignedByte()
                     repeat(count) {
-                        val color = if (coloured) readPixel(input) else {
-                            check(fgValid) { "Hextile foreground missing" }; fg
-                        }
-                        val xy = input.readUnsignedByte()
-                        val wh = input.readUnsignedByte()
-                        val sx = xy ushr 4
-                        val sy = xy and 0x0f
-                        val sw = (wh ushr 4) + 1
-                        val sh = (wh and 0x0f) + 1
-                        check(sx + sw <= tw && sy + sh <= th) { "Invalid Hextile subrectangle" }
+                        val color = if (coloured) readPixel(input) else { check(fgValid) { "Hextile foreground missing" }; fg }
+                        val xy = input.readUnsignedByte(); val wh = input.readUnsignedByte(); val sx = xy ushr 4; val sy = xy and 15; val sw = (wh ushr 4) + 1; val sh = (wh and 15) + 1
                         for (yy in sy until sy + sh) Arrays.fill(tile, yy * tw + sx, yy * tw + sx + sw, color)
                     }
                 }
                 synchronized(bmp) { bmp.setPixels(tile, 0, tw, x + tx, y + ty, tw, th) }
-                if (coloured) fgValid = false
+                if ((sub and 16) != 0) fgValid = false
                 tx += 16
             }
             ty += 16
@@ -283,33 +246,20 @@ class VncFramebufferView(context: Context) : View(context) {
     }
 
     private fun readFramebufferUpdate(input: DataInputStream, out: DataOutputStream) {
-        input.readUnsignedByte()
-        val rectangles = input.readUnsignedShort()
-        val bmp = bitmap ?: return
+        input.readUnsignedByte(); val rectangles = input.readUnsignedShort(); val bmp = bitmap ?: return
         repeat(rectangles) {
-            val x = input.readUnsignedShort()
-            val y = input.readUnsignedShort()
-            val w = input.readUnsignedShort()
-            val h = input.readUnsignedShort()
-            val encoding = input.readInt()
+            val x = input.readUnsignedShort(); val y = input.readUnsignedShort(); val w = input.readUnsignedShort(); val h = input.readUnsignedShort(); val encoding = input.readInt()
             check(x + w <= bmp.width && y + h <= bmp.height) { "Invalid VNC rectangle" }
-            when (encoding) {
-                0 -> decodeRaw(input, bmp, x, y, w, h)
-                1 -> decodeCopyRect(input, bmp, x, y, w, h)
-                5 -> decodeHextile(input, bmp, x, y, w, h)
-                else -> error("Unexpected VNC encoding $encoding")
-            }
+            when (encoding) { 0 -> decodeRaw(input, bmp, x, y, w, h); 1 -> decodeCopyRect(input, bmp, x, y, w, h); 5 -> decodeHextile(input, bmp, x, y, w, h); else -> error("Unexpected VNC encoding $encoding") }
         }
-        postInvalidateOnAnimation()
-        requestUpdate(out, true)
+        postInvalidateOnAnimation(); requestUpdate(out, true)
     }
 
     private fun fittedRect(): RectF? {
         val bmp = bitmap ?: return null
         if (width <= 0 || height <= 0) return null
         val fit = minOf(width.toFloat() / bmp.width, height.toFloat() / bmp.height)
-        val dw = bmp.width * fit
-        val dh = bmp.height * fit
+        val dw = bmp.width * fit; val dh = bmp.height * fit
         return RectF((width - dw) / 2f, (height - dh) / 2f, (width + dw) / 2f, (height + dh) / 2f)
     }
 
@@ -320,180 +270,82 @@ class VncFramebufferView(context: Context) : View(context) {
         return x to y
     }
 
-    private fun updateControlRects() {
-        val pad = 12f * density
-        val chipH = 34f * density
-        val chipW = 82f * density
-        directChip.set(pad, pad, pad + chipW, pad + chipH)
-        trackpadChip.set(directChip.right + 7f * density, pad, directChip.right + 7f * density + chipW, pad + chipH)
-    }
-
     override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        canvas.drawColor(Color.BLACK)
-        val bmp = bitmap
-        val rect = fittedRect()
+        super.onDraw(canvas); canvas.drawColor(Color.BLACK)
+        val bmp = bitmap; val rect = fittedRect()
         if (bmp != null && rect != null) {
-            synchronized(bmp) { canvas.drawBitmap(bmp, null, rect, paint) }
+            bitmapPaint.color = Color.WHITE; bitmapPaint.alpha = 255; bitmapPaint.style = Paint.Style.FILL
+            synchronized(bmp) { canvas.drawBitmap(bmp, null, rect, bitmapPaint) }
         } else {
-            textPaint.textSize = 18f * density
-            textPaint.color = Color.LTGRAY
-            textPaint.textAlign = Paint.Align.LEFT
-            canvas.drawText(lastError.take(70), 20f * density, 42f * density, textPaint)
+            textPaint.textSize = 16f * density; textPaint.color = Color.LTGRAY; textPaint.textAlign = Paint.Align.CENTER
+            canvas.drawText(lastError.take(70), width / 2f, height / 2f, textPaint)
         }
-        updateControlRects()
-        drawModeChips(canvas)
-    }
-
-    private fun drawModeChips(canvas: Canvas) {
-        fun chip(rect: RectF, label: String, selected: Boolean) {
-            paint.color = if (selected) Color.argb(235, 28, 83, 63) else Color.argb(175, 14, 19, 17)
-            canvas.drawRoundRect(rect, 18f * density, 18f * density, paint)
-            if (!selected) {
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = density
-                paint.color = Color.argb(125, 120, 150, 138)
-                canvas.drawRoundRect(rect, 18f * density, 18f * density, paint)
-                paint.style = Paint.Style.FILL
-            }
-            textPaint.color = Color.WHITE
-            textPaint.textSize = 12f * density
-            textPaint.textAlign = Paint.Align.CENTER
-            val y = rect.centerY() - (textPaint.ascent() + textPaint.descent()) / 2f
-            canvas.drawText(label, rect.centerX(), y, textPaint)
-        }
-        chip(directChip, "Direct", pointerMode == PointerMode.DIRECT)
-        chip(trackpadChip, "Trackpad", pointerMode == PointerMode.TRACKPAD)
-    }
-
-    private fun setMode(mode: PointerMode) {
-        if (pointerMode == mode) return
-        pointerMode = mode
-        dragging = false
-        performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-        invalidate()
     }
 
     private fun click(mask: Int) {
-        sendPointer(mask, cursorGuestX, cursorGuestY)
-        sendPointer(0, cursorGuestX, cursorGuestY)
+        sendPointer(mask, cursorGuestX, cursorGuestY); sendPointer(0, cursorGuestX, cursorGuestY)
         performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
     }
 
-    private fun moveTrackpad(dx: Float, dy: Float) {
-        val r = fittedRect() ?: return
-        if (r.width() <= 0f || r.height() <= 0f) return
-        val sensitivity = 1.45f
-        cursorGuestX = (cursorGuestX + dx / r.width() * fbWidth * sensitivity).roundToInt().coerceIn(0, (fbWidth - 1).coerceAtLeast(0))
-        cursorGuestY = (cursorGuestY + dy / r.height() * fbHeight * sensitivity).roundToInt().coerceIn(0, (fbHeight - 1).coerceAtLeast(0))
-        sendPointer(if (dragging) 1 else 0, cursorGuestX, cursorGuestY)
+    fun movePointerRelative(dx: Float, dy: Float, draggingNow: Boolean = false) {
+        if (fbWidth <= 0 || fbHeight <= 0) return
+        val sensitivity = 1.55f
+        cursorGuestX = (cursorGuestX + dx * sensitivity * fbWidth / 900f).roundToInt().coerceIn(0, fbWidth - 1)
+        cursorGuestY = (cursorGuestY + dy * sensitivity * fbHeight / 700f).roundToInt().coerceIn(0, fbHeight - 1)
+        sendPointer(if (draggingNow) 1 else 0, cursorGuestX, cursorGuestY)
     }
 
-    private fun scrollTrackpad(dy: Float) {
-        scrollAccumulator += dy
+    fun clickPointer(buttonMask: Int = 1) = click(buttonMask)
+
+    fun scrollPointer(dx: Float, dy: Float) {
+        scrollAccumulatorX += dx; scrollAccumulatorY += dy
         val threshold = 18f * density
-        while (abs(scrollAccumulator) >= threshold) {
-            val mask = if (scrollAccumulator > 0) 16 else 8
-            sendPointer(mask, cursorGuestX, cursorGuestY)
-            sendPointer(0, cursorGuestX, cursorGuestY)
-            scrollAccumulator += if (scrollAccumulator > 0) -threshold else threshold
+        while (abs(scrollAccumulatorY) >= threshold) {
+            val mask = if (scrollAccumulatorY > 0) 16 else 8
+            sendPointer(mask, cursorGuestX, cursorGuestY); sendPointer(0, cursorGuestX, cursorGuestY)
+            scrollAccumulatorY += if (scrollAccumulatorY > 0) -threshold else threshold
+        }
+        while (abs(scrollAccumulatorX) >= threshold) {
+            val mask = if (scrollAccumulatorX > 0) 64 else 32
+            sendPointer(mask, cursorGuestX, cursorGuestY); sendPointer(0, cursorGuestX, cursorGuestY)
+            scrollAccumulatorX += if (scrollAccumulatorX > 0) -threshold else threshold
         }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        requestFocus()
-        if (fbWidth <= 0 || fbHeight <= 0) return true
-        updateControlRects()
-
+        if (!directInputEnabled) return false
+        requestFocus(); if (fbWidth <= 0 || fbHeight <= 0) return true
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-            if (directChip.contains(event.x, event.y)) { setMode(PointerMode.DIRECT); return true }
-            if (trackpadChip.contains(event.x, event.y)) { setMode(PointerMode.TRACKPAD); return true }
-
-            touchStartX = event.x
-            touchStartY = event.y
-            lastTouchX = event.x
-            lastTouchY = event.y
-            touchStartedMs = SystemClock.uptimeMillis()
-            moved = false
-            dragging = false
-            maxPointers = 1
-            scrollAccumulator = 0f
-
-            if (pointerMode == PointerMode.DIRECT) {
-                val p = mapToGuest(event.x, event.y)
-                cursorGuestX = p.first
-                cursorGuestY = p.second
-                sendPointer(0, cursorGuestX, cursorGuestY)
-            }
+            touchStartX = event.x; touchStartY = event.y; lastTouchX = event.x; lastTouchY = event.y; touchStartedMs = SystemClock.uptimeMillis(); moved = false; dragging = false; maxPointers = 1
+            val p = mapToGuest(event.x, event.y); cursorGuestX = p.first; cursorGuestY = p.second; sendPointer(0, cursorGuestX, cursorGuestY)
             return true
         }
-
         maxPointers = maxOf(maxPointers, event.pointerCount)
         when (event.actionMasked) {
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                lastTouchX = event.getX(0)
-                lastTouchY = event.getY(0)
-                return true
-            }
+            MotionEvent.ACTION_POINTER_DOWN -> { lastTouchX = event.getX(0); lastTouchY = event.getY(0); return true }
             MotionEvent.ACTION_MOVE -> {
-                val x = event.getX(0)
-                val y = event.getY(0)
-                val dx = x - lastTouchX
-                val dy = y - lastTouchY
+                val x = event.getX(0); val y = event.getY(0)
                 if (hypot((x - touchStartX).toDouble(), (y - touchStartY).toDouble()) > touchSlop) moved = true
-
-                if (pointerMode == PointerMode.TRACKPAD) {
-                    if (event.pointerCount >= 2) {
-                        scrollTrackpad(dy)
-                    } else {
-                        if (!dragging && moved && SystemClock.uptimeMillis() - touchStartedMs > 360) {
-                            dragging = true
-                            sendPointer(1, cursorGuestX, cursorGuestY)
-                            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                        }
-                        moveTrackpad(dx, dy)
-                    }
+                if (event.pointerCount >= 2) {
+                    scrollPointer(x - lastTouchX, y - lastTouchY)
                 } else {
-                    val p = mapToGuest(x, y)
-                    cursorGuestX = p.first
-                    cursorGuestY = p.second
-                    if (!dragging && moved && SystemClock.uptimeMillis() - touchStartedMs > 360) {
-                        dragging = true
-                        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                    }
+                    val p = mapToGuest(x, y); cursorGuestX = p.first; cursorGuestY = p.second
+                    if (!dragging && moved && SystemClock.uptimeMillis() - touchStartedMs > 340) { dragging = true; performHapticFeedback(HapticFeedbackConstants.LONG_PRESS) }
                     val now = SystemClock.uptimeMillis()
-                    if (now - lastPointerSentMs >= 12) {
-                        sendPointer(if (dragging) 1 else 0, cursorGuestX, cursorGuestY)
-                        lastPointerSentMs = now
-                    }
+                    if (now - lastPointerSentMs >= 8) { sendPointer(if (dragging) 1 else 0, cursorGuestX, cursorGuestY); lastPointerSentMs = now }
                 }
-                lastTouchX = x
-                lastTouchY = y
-                return true
+                lastTouchX = x; lastTouchY = y; return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (dragging) {
-                    sendPointer(0, cursorGuestX, cursorGuestY)
-                } else if (event.actionMasked == MotionEvent.ACTION_UP && !moved) {
-                    if (pointerMode == PointerMode.DIRECT) {
-                        val p = mapToGuest(event.x, event.y)
-                        cursorGuestX = p.first
-                        cursorGuestY = p.second
-                    }
-                    if (maxPointers >= 2) {
-                        click(4)
-                    } else {
-                        val now = SystemClock.uptimeMillis()
-                        val isDouble = now - lastTapMs < 300 && hypot((event.x - lastTapX).toDouble(), (event.y - lastTapY).toDouble()) < 28f * density
-                        click(1)
-                        if (isDouble) click(1)
-                        lastTapMs = now
-                        lastTapX = event.x
-                        lastTapY = event.y
+                if (dragging) sendPointer(0, cursorGuestX, cursorGuestY)
+                else if (event.actionMasked == MotionEvent.ACTION_UP && !moved) {
+                    val p = mapToGuest(event.x, event.y); cursorGuestX = p.first; cursorGuestY = p.second
+                    if (maxPointers >= 2) click(4) else {
+                        val now = SystemClock.uptimeMillis(); val dbl = now - lastTapMs < 300 && hypot((event.x-lastTapX).toDouble(), (event.y-lastTapY).toDouble()) < 28f*density
+                        click(1); if (dbl) click(1); lastTapMs = now; lastTapX = event.x; lastTapY = event.y
                     }
                 }
-                dragging = false
-                return true
+                dragging = false; return true
             }
         }
         return true
@@ -501,25 +353,21 @@ class VncFramebufferView(context: Context) : View(context) {
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         if ((event.source and InputDevice.SOURCE_CLASS_POINTER) != 0) {
-            val p = mapToGuest(event.x, event.y)
-            cursorGuestX = p.first
-            cursorGuestY = p.second
+            val p = mapToGuest(event.x, event.y); cursorGuestX = p.first; cursorGuestY = p.second
             when (event.actionMasked) {
-                MotionEvent.ACTION_HOVER_MOVE -> {
-                    sendPointer(0, cursorGuestX, cursorGuestY)
-                    return true
-                }
-                MotionEvent.ACTION_SCROLL -> {
-                    val v = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
-                    if (v != 0f) {
-                        sendPointer(if (v > 0) 8 else 16, cursorGuestX, cursorGuestY)
-                        sendPointer(0, cursorGuestX, cursorGuestY)
-                        return true
-                    }
-                }
+                MotionEvent.ACTION_HOVER_MOVE -> { sendPointer(event.buttonStateToRfbMask(), cursorGuestX, cursorGuestY); return true }
+                MotionEvent.ACTION_SCROLL -> { scrollPointer(-event.getAxisValue(MotionEvent.AXIS_HSCROLL) * 24f * density, -event.getAxisValue(MotionEvent.AXIS_VSCROLL) * 24f * density); return true }
             }
         }
         return super.onGenericMotionEvent(event)
+    }
+
+    private fun MotionEvent.buttonStateToRfbMask(): Int {
+        var mask = 0
+        if ((buttonState and MotionEvent.BUTTON_PRIMARY) != 0) mask = mask or 1
+        if ((buttonState and MotionEvent.BUTTON_TERTIARY) != 0) mask = mask or 2
+        if ((buttonState and MotionEvent.BUTTON_SECONDARY) != 0) mask = mask or 4
+        return mask
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean { sendAndroidKey(true, keyCode, event); return true }
@@ -528,19 +376,9 @@ class VncFramebufferView(context: Context) : View(context) {
     fun sendAndroidKey(down: Boolean, keyCode: Int, event: KeyEvent? = null) {
         if (down) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
         val keysym = when (keyCode) {
-            KeyEvent.KEYCODE_ESCAPE -> 0xff1b
-            KeyEvent.KEYCODE_TAB -> 0xff09
-            KeyEvent.KEYCODE_ENTER -> 0xff0d
-            KeyEvent.KEYCODE_DEL -> 0xff08
-            KeyEvent.KEYCODE_FORWARD_DEL -> 0xffff
-            KeyEvent.KEYCODE_DPAD_LEFT -> 0xff51
-            KeyEvent.KEYCODE_DPAD_UP -> 0xff52
-            KeyEvent.KEYCODE_DPAD_RIGHT -> 0xff53
-            KeyEvent.KEYCODE_DPAD_DOWN -> 0xff54
-            KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_CTRL_RIGHT -> 0xffe3
-            KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT -> 0xffe9
-            KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT -> 0xffe1
-            KeyEvent.KEYCODE_META_LEFT, KeyEvent.KEYCODE_META_RIGHT -> 0xffeb
+            KeyEvent.KEYCODE_ESCAPE -> 0xff1b; KeyEvent.KEYCODE_TAB -> 0xff09; KeyEvent.KEYCODE_ENTER -> 0xff0d; KeyEvent.KEYCODE_DEL -> 0xff08; KeyEvent.KEYCODE_FORWARD_DEL -> 0xffff
+            KeyEvent.KEYCODE_DPAD_LEFT -> 0xff51; KeyEvent.KEYCODE_DPAD_UP -> 0xff52; KeyEvent.KEYCODE_DPAD_RIGHT -> 0xff53; KeyEvent.KEYCODE_DPAD_DOWN -> 0xff54
+            KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_CTRL_RIGHT -> 0xffe3; KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT -> 0xffe9; KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT -> 0xffe1; KeyEvent.KEYCODE_META_LEFT, KeyEvent.KEYCODE_META_RIGHT -> 0xffeb
             else -> event?.unicodeChar?.takeIf { it != 0 } ?: KeyEvent(keyCode, keyCode).unicodeChar
         }
         if (keysym != 0) sendKey(down, keysym)
@@ -548,17 +386,57 @@ class VncFramebufferView(context: Context) : View(context) {
 
     private fun sendKey(down: Boolean, keysym: Int) {
         val out = output ?: return
-        synchronized(wireLock) {
-            runCatching {
-                out.writeByte(4); out.writeByte(if (down) 1 else 0); out.writeShort(0); out.writeInt(keysym); out.flush()
-            }
-        }
+        synchronized(wireLock) { runCatching { out.writeByte(4); out.writeByte(if (down) 1 else 0); out.writeShort(0); out.writeInt(keysym); out.flush() } }
     }
 
     private fun sendPointer(mask: Int, x: Int, y: Int) {
         val out = output ?: return
-        synchronized(wireLock) {
-            runCatching { out.writeByte(5); out.writeByte(mask); out.writeShort(x); out.writeShort(y); out.flush() }
+        synchronized(wireLock) { runCatching { out.writeByte(5); out.writeByte(mask); out.writeShort(x); out.writeShort(y); out.flush() } }
+    }
+}
+
+/** Dedicated laptop-style touchpad shown below the display. */
+class VesselTrackpadView(context: Context) : View(context) {
+    private val density = resources.displayMetrics.density
+    private val touchSlop = 8f * density
+    private var downX = 0f; private var downY = 0f; private var lastX = 0f; private var lastY = 0f
+    private var downMs = 0L; private var moved = false; private var maxPointers = 1; private var dragging = false
+    private var lastTapMs = 0L; private var lastTapX = 0f; private var lastTapY = 0f
+
+    init { isClickable = true; isFocusable = true }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val target = VncFramebufferView.active ?: return true
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.x; downY = event.y; lastX = event.x; lastY = event.y; downMs = SystemClock.uptimeMillis(); moved = false; maxPointers = 1; dragging = false
+                return true
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> { maxPointers = maxOf(maxPointers, event.pointerCount); lastX = event.getX(0); lastY = event.getY(0); return true }
+            MotionEvent.ACTION_MOVE -> {
+                maxPointers = maxOf(maxPointers, event.pointerCount)
+                val x = event.getX(0); val y = event.getY(0); val dx = x-lastX; val dy = y-lastY
+                if (hypot((x-downX).toDouble(), (y-downY).toDouble()) > touchSlop) moved = true
+                if (event.pointerCount >= 2) target.scrollPointer(dx, dy)
+                else {
+                    if (!dragging && moved && SystemClock.uptimeMillis()-downMs > 380) { dragging = true; performHapticFeedback(HapticFeedbackConstants.LONG_PRESS) }
+                    target.movePointerRelative(dx, dy, dragging)
+                }
+                lastX = x; lastY = y; return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (dragging) target.movePointerRelative(0f, 0f, false)
+                else if (event.actionMasked == MotionEvent.ACTION_UP && !moved) {
+                    if (maxPointers >= 3) target.clickPointer(2)
+                    else if (maxPointers >= 2) target.clickPointer(4)
+                    else {
+                        val now = SystemClock.uptimeMillis(); val dbl = now-lastTapMs < 300 && hypot((event.x-lastTapX).toDouble(), (event.y-lastTapY).toDouble()) < 28f*density
+                        target.clickPointer(1); if (dbl) target.clickPointer(1); lastTapMs = now; lastTapX = event.x; lastTapY = event.y
+                    }
+                }
+                dragging = false; return true
+            }
         }
+        return true
     }
 }
