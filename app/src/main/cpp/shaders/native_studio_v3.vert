@@ -90,8 +90,10 @@ void sphereVertex(int localIndex, int segU, int segV, int bodyIndex,
     BodyGpu b = bodies[bodyIndex];
     vec3 local = n * b.posRad.w;
     if (b.meta.y == 1) {
-        float compression = clamp(b.extra.x, -0.18, 0.34);
-        float sy = max(0.58, 1.0 - compression);
+        // Volume-preserving squash for the gummy sphere. Keep deformation inside
+        // the RT sphere envelope so raster and acceleration geometry stay close.
+        float compression = clamp(b.extra.x, -0.08, 0.14);
+        float sy = max(0.78, 1.0 - compression);
         float sxz = inversesqrt(sy);
         local *= vec3(sxz, sy, sxz);
         n = normalize(n / vec3(sxz, sy, sxz));
@@ -115,6 +117,7 @@ void main() {
         int face = index / 6;
         int corner = index - face * 6;
         uv = quadCorner(corner) * 0.5 + 0.5;
+        // Central stone plinth. Still uses the exact cube BLAS, so RT and raster agree.
         worldPos = facePosition(face, quadCorner(corner));
         worldNormal = faceNormal(face);
         material = 0;
@@ -122,8 +125,10 @@ void main() {
     } else if (index < CUBE_VERTS + FLOOR_VERTS) {
         int corner = index - CUBE_VERTS;
         vec2 q = quadCorner(corner);
+        // A large continuous studio floor removes the old visible edge / invisible
+        // collision-plane mismatch while retaining exact floor BLAS geometry.
         uv = q * 0.5 + 0.5;
-        worldPos = vec3(q.x * 8.0, -1.01, q.y * 8.0);
+        worldPos = vec3(q.x * 24.0, -1.01, q.y * 24.0);
         worldNormal = vec3(0.0, 1.0, 0.0);
         material = 1;
         objectId = 0;
