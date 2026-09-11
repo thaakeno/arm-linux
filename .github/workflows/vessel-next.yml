@@ -40,6 +40,7 @@ jobs:
       - name: Validate rootless runtime controller
         run: |
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon.py
+          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v7.py
           python3 -m py_compile tools/venus_poc/vessel_acceptance.py
           python3 -m py_compile tools/venus_poc/host_relay_direct.py
           python3 -m py_compile tools/venus_poc/guest_relay_direct.py
@@ -47,7 +48,10 @@ jobs:
           bash -n tools/venus_poc/build_guest_mesa_venus_26_2.sh
           grep -q 'ENABLE_X11' tools/venus_poc/run_venus_uml.sh
           grep -q 'render-server-worker=thread' tools/venus_poc/build_virglrenderer_android_thread.sh
-          grep -q 'PROTOCOL_VERSION = 2' tools/venus_poc/vessel_runtime_daemon.py
+          grep -q 'PROTOCOL_VERSION = 7' tools/venus_poc/vessel_runtime_daemon_v7.py
+          grep -q 'CHUNK_SIZE = 1024' tools/venus_poc/vessel_runtime_daemon_v7.py
+          grep -q 'REQUIRED_PROTOCOL = 7' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -q 'vessel_runtime_daemon_v7.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -q 'progressDetail' tools/venus_poc/vessel_runtime_daemon.py
           grep -q 'termios.ECHO' tools/venus_poc/vessel_runtime_daemon.py
           grep -q 'serve_connection' tools/venus_poc/vessel_runtime_daemon.py
