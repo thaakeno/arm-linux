@@ -91,7 +91,7 @@ jobs:
               ],
               'app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt': [
                   'SurfaceView', 'System.loadLibrary("vessel_vulkan")',
-                  'Vessel Native Vulkan', 'Drag to rotate', 'Pinch to zoom',
+                  'Vessel Native Vulkan', 'Drag to orbit', 'Pinch to zoom',
               ],
               'app/src/main/cpp/CMakeLists.txt': [
                   'add_library(vessel_vulkan SHARED native_vulkan_cube.cpp)',
