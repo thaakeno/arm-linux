@@ -20,7 +20,7 @@ class TermuxUmlController(private val context: Context) {
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = 5901
-        const val REQUIRED_PROTOCOL = 6
+        const val REQUIRED_PROTOCOL = 7
 
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
@@ -65,7 +65,7 @@ class TermuxUmlController(private val context: Context) {
               fi
 
               echo "[vessel-launch] stopping stale daemon"
-              OLD_PID="${'$'}(pgrep -f '(^|/)python(3)? .*vessel_runtime_daemon(_v[0-9]+)?\.py${'$'}' | head -n1 || true)"
+              OLD_PID="${'$'}(pgrep -f '(^|/)python(3)? .*vessel_runtime_daemon(_v[0-9]+)?\\.py${'$'}' | head -n1 || true)"
               if [ -n "${'$'}OLD_PID" ]; then
                 kill "${'$'}OLD_PID" 2>/dev/null || true
                 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -76,8 +76,8 @@ class TermuxUmlController(private val context: Context) {
               fi
 
               export VESSEL_POC_DIR=~/vessel-poc-runtime
-              echo "[vessel-launch] exec runtime daemon protocol 6"
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v6.py
+              echo "[vessel-launch] exec runtime daemon protocol 7"
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v7.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
