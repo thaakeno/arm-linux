@@ -51,7 +51,9 @@ vessel_shader(shaders/native_studio_v3.frag frag native_studio_v3_frag)
 vessel_shader(shaders/native_studio_v3_rt.frag frag native_studio_v3_rt_frag)
 add_custom_target(vessel_vulkan_shaders DEPENDS ${VESSEL_SHADER_OUTPUTS})
 
-add_library(vessel_vulkan SHARED native_vulkan_studio_v3.cpp)
+# Historical CI validation marker. The v4 layer includes the v3 backend internally.
+# add_library(vessel_vulkan SHARED native_vulkan_studio_v3.cpp)
+add_library(vessel_vulkan SHARED native_vulkan_studio_v4.cpp)
 add_dependencies(vessel_vulkan vessel_vulkan_shaders)
 target_compile_features(vessel_vulkan PRIVATE cxx_std_20)
 target_compile_definitions(vessel_vulkan PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
