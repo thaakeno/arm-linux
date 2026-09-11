@@ -2,6 +2,7 @@ package com.example.dreamlinux
 
 import android.app.Activity
 import android.graphics.Color
+import android.graphics.PixelFormat
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -66,8 +67,13 @@ class NativeCubeActivity : Activity() {
             false
         }
 
+        // Important: the SurfaceView Surface is a separate compositor layer behind the
+        // Activity window. Do not give the View itself an opaque black background, because
+        // that regular View layer can cover the Vulkan Surface on some Android compositors.
+        // The parent owns the fallback background instead.
         surfaceView = SurfaceView(this).apply {
-            setBackgroundColor(Color.BLACK)
+            background = null
+            holder.setFormat(PixelFormat.OPAQUE)
         }
 
         val scaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -161,9 +167,6 @@ class NativeCubeActivity : Activity() {
     }
 
     private fun enterImmersiveMode() {
-        // Use the long-standing decor-view immersive flags for this SurfaceView activity.
-        // They are stable across the Android versions Vessel supports and avoid changing
-        // WindowInsets state while the Vulkan Surface is being created/reconfigured.
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility =
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
