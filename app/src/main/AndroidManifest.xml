@@ -44,6 +44,12 @@
         </service>
 
         <activity
+            android:name=".NativeCubeActivity"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
+            android:screenOrientation="sensorLandscape"
+            android:exported="true" />
+
+        <activity
             android:name=".VesselActivity"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
             android:exported="true">
