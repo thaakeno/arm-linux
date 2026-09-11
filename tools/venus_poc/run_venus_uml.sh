@@ -20,8 +20,17 @@ PORT="${VENUS_RELAY_PORT:-5002}"
 X11_DISPLAY_NUM="${X11_DISPLAY_NUM:-0}"
 X11_TCP_PORT="${X11_TCP_PORT:-6000}"
 ENABLE_X11="${ENABLE_X11:-1}"
+VESSEL_VCPUS="${VESSEL_VCPUS:-6}"
 REQUIRE_THREAD_WORKER="${REQUIRE_THREAD_WORKER:-1}"
 THREAD_WORKER_MARKER="${THREAD_WORKER_MARKER:-$PREFIX/opt/virglrenderer-android/.venus-thread-worker}"
+
+case "$VESSEL_VCPUS" in
+  ''|*[!0-9]*) echo "[venus-run] VESSEL_VCPUS must be an integer from 1 to 8" >&2; exit 1 ;;
+esac
+if [ "$VESSEL_VCPUS" -lt 1 ] || [ "$VESSEL_VCPUS" -gt 8 ]; then
+  echo "[venus-run] VESSEL_VCPUS must be between 1 and CONFIG_NR_CPUS=8" >&2
+  exit 1
+fi
 
 cleanup() {
   rc=$?
@@ -39,18 +48,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Read /proc/<pid>/cmdline without a shell input-redirection race. Android can
-# reap a short-lived process between -r and opening cmdline; cat suppresses that
-# harmless ENOENT instead of dumping it into Vessel's live log.
 proc_cmdline() {
   local proc="$1"
   cat "$proc/cmdline" 2>/dev/null | tr '\0' ' ' || true
 }
 
-# A daemon/APK restart can lose ownership of an already-running UML process.
-# UML then keeps an advisory lock on the raw ext4 image and the next boot panics
-# with "Failed to lock debian-docker.ext4". Clean only linux-umshm processes
-# that are using THIS runtime directory/image, never unrelated UML instances.
 cleanup_stale_uml() {
   local found=0 pid cmd cwd proc alive
   for proc in /proc/[0-9]*; do
@@ -90,7 +92,6 @@ cleanup_stale_uml() {
       sleep 0.1
     done
 
-    # Escalate only if a matching stale UML process ignored TERM.
     for proc in /proc/[0-9]*; do
       pid="${proc##*/}"
       cmd="$(proc_cmdline "$proc")"
@@ -121,6 +122,14 @@ for f in \
     exit 1
   fi
 done
+
+# Do not silently fall back to the old UP kernel. The rebuilt Vessel kernel is
+# CONFIG_SMP=y / CONFIG_NR_CPUS=8 and must advertise the ncpus= boot switch.
+if ! "$UML_DIR/linux-umshm" --help 2>&1 | grep -q 'ncpus='; then
+  echo "[venus-run] linux-umshm is the old uniprocessor build." >&2
+  echo "[venus-run] rebuild/install the Vessel SMP kernel before booting." >&2
+  exit 1
+fi
 
 if [ "$REQUIRE_THREAD_WORKER" = "1" ] && [ ! -e "$THREAD_WORKER_MARKER" ]; then
   echo "[venus-run] custom thread-worker virglrenderer is not installed." >&2
@@ -226,12 +235,13 @@ if [ "$ENABLE_X11" = "1" ]; then
   echo "[venus-run] X11 guest display: 10.0.2.2:${X11_DISPLAY_NUM}"
   echo "[venus-run] X11 proxy log: $X11_LOG"
 fi
-echo "[venus-run] booting Debian UML..."
+echo "[venus-run] booting Debian UML with $VESSEL_VCPUS vCPUs..."
 
 cd "$UML_DIR"
 ./umnet --passt ./passt --dns 1.1.1.1 -- \
   ./linux-umshm \
     mem=2048M \
+    ncpus="$VESSEL_VCPUS" \
     ubd0=debian-docker.ext4 \
     root=/dev/ubda \
     rw \
