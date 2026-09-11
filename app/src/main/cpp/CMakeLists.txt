@@ -60,15 +60,13 @@ add_custom_command(
 
 add_custom_target(vessel_vulkan_shaders DEPENDS "${VERT_HEADER}" "${FRAG_HEADER}")
 
-add_library(vessel_vulkan SHARED native_vulkan_cube.cpp)
+# Keep the Vulkan Studio benchmark as a first-class Vessel diagnostic even after
+# the Linux desktop transport lands. It exercises the native Android Surface,
+# Adreno Vulkan path, GPU timings, PBR-style shaders and stress geometry.
+add_library(vessel_vulkan SHARED native_vulkan_studio.cpp)
 add_dependencies(vessel_vulkan vessel_vulkan_shaders)
 target_compile_features(vessel_vulkan PRIVATE cxx_std_17)
-# Android Vulkan platform types/functions are hidden by vulkan.h unless this is defined
-# before inclusion. Defining it at the target level keeps the native source portable and
-# guarantees VkAndroidSurfaceCreateInfoKHR / vkCreateAndroidSurfaceKHR are declared.
 target_compile_definitions(vessel_vulkan PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
-# Vulkan's C structs are intentionally initialized with sType and then populated field-by-field.
-# Clang's -Wmissing-field-initializers is therefore noise here, while all other warnings stay fatal.
 target_compile_options(vessel_vulkan PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
 target_include_directories(vessel_vulkan PRIVATE "${GENERATED_DIR}")
 target_link_libraries(vessel_vulkan PRIVATE android log vulkan)
