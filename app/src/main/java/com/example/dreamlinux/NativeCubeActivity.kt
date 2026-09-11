@@ -10,6 +10,8 @@ import android.os.Build
 import android.os.Bundle
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import android.view.Surface
+import android.view.SurfaceHolder
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -22,9 +24,9 @@ import kotlin.math.max
 /**
  * Native Android Surface benchmark for Vessel's post-VNC display path.
  *
- * This intentionally bypasses VNC, RFB, Termux:X11 and XCB completely. It gives us a clean
- * SurfaceView/BufferQueue baseline for frame pacing and touch latency before the guest scanout is
- * wired into the same Surface path.
+ * This bypasses VNC, RFB, Termux:X11 and XCB completely. The render loop goes directly through
+ * Android's Surface/BufferQueue so we can measure the smoothness and touch latency of the display
+ * path we want to feed the Linux/Venus scanout into.
  */
 class NativeCubeActivity : Activity() {
     private lateinit var cubeView: NativeCubeView
@@ -50,23 +52,34 @@ class NativeCubeActivity : Activity() {
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         }
 
-        cubeView = NativeCubeView(this) { fps, frameMs, renderer ->
-            runOnUiThread {
-                stats.text = "Vessel Native Surface  •  %.1f FPS  •  %.2f ms\n%s\nDrag to rotate  •  Pinch to zoom".format(
-                    fps, frameMs, renderer
-                )
-            }
-        }
-
+        // Create the overlay before starting GLSurfaceView's render thread. This removes the race
+        // where the first renderer callback could arrive before the lateinit TextView existed.
         stats = TextView(this).apply {
             setTextColor(Color.WHITE)
-            setBackgroundColor(0x88000000.toInt())
+            setBackgroundColor(0xAA050807.toInt())
             textSize = 13f
             setPadding(28, 18, 28, 18)
-            text = "Starting native Surface…"
+            text = "Vessel Native Surface\nStarting GPU render…\nDrag to rotate · Pinch to zoom"
         }
 
-        val root = FrameLayout(this)
+        cubeView = NativeCubeView(
+            this,
+            statsCallback = { fps, frameMs, renderer, refresh ->
+                runOnUiThread {
+                    stats.text = "Vessel Native Surface  •  %.1f FPS  •  %.2f ms\n%s  •  display %.0f Hz\nDrag to rotate  •  Pinch to zoom".format(
+                        fps, frameMs, renderer, refresh
+                    )
+                }
+            },
+            errorCallback = { message ->
+                runOnUiThread {
+                    stats.setBackgroundColor(0xCC3B171A.toInt())
+                    stats.text = "Native Surface render error\n$message\nPress Back to return to Vessel"
+                }
+            }
+        )
+
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         root.addView(
             cubeView,
             FrameLayout.LayoutParams(
@@ -100,9 +113,11 @@ class NativeCubeActivity : Activity() {
 
 private class NativeCubeView(
     context: android.content.Context,
-    statsCallback: (fps: Float, frameMs: Float, renderer: String) -> Unit
+    statsCallback: (fps: Float, frameMs: Float, renderer: String, refreshRate: Float) -> Unit,
+    errorCallback: (String) -> Unit
 ) : GLSurfaceView(context) {
-    private val cubeRenderer = CubeRenderer(statsCallback)
+    private val refreshRate = display?.refreshRate?.takeIf { it > 1f } ?: 60f
+    private val cubeRenderer = CubeRenderer(refreshRate, statsCallback, errorCallback)
     private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
             cubeRenderer.zoomBy(detector.scaleFactor)
@@ -117,6 +132,15 @@ private class NativeCubeView(
         setEGLContextClientVersion(3)
         preserveEGLContextOnPause = true
         holder.setFormat(PixelFormat.OPAQUE)
+        holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    holder.surface.setFrameRate(refreshRate, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+                }
+            }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
+            override fun surfaceDestroyed(holder: SurfaceHolder) = Unit
+        })
         setRenderer(cubeRenderer)
         renderMode = RENDERMODE_CONTINUOUSLY
         isFocusable = true
@@ -133,9 +157,11 @@ private class NativeCubeView(
             MotionEvent.ACTION_DOWN -> {
                 lastX = event.x
                 lastY = event.y
+                cubeRenderer.markInteraction()
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                cubeRenderer.markInteraction()
                 if (!scaleDetector.isInProgress && event.pointerCount == 1) {
                     val dx = event.x - lastX
                     val dy = event.y - lastY
@@ -145,23 +171,30 @@ private class NativeCubeView(
                 }
                 return true
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> return true
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                cubeRenderer.markInteraction()
+                return true
+            }
         }
         return true
     }
 }
 
 private class CubeRenderer(
-    private val statsCallback: (fps: Float, frameMs: Float, renderer: String) -> Unit
+    private val refreshRate: Float,
+    private val statsCallback: (fps: Float, frameMs: Float, renderer: String, refreshRate: Float) -> Unit,
+    private val errorCallback: (String) -> Unit
 ) : GLSurfaceView.Renderer {
     @Volatile private var yaw = -28f
     @Volatile private var pitch = 22f
     @Volatile private var cameraDistance = 6.2f
+    @Volatile private var lastInteractionNs = 0L
 
     private var program = 0
     private var vbo = 0
     private var vao = 0
     private var vertexCount = 0
+    private var ready = false
 
     private val projection = FloatArray(16)
     private val view = FloatArray(16)
@@ -171,7 +204,12 @@ private class CubeRenderer(
 
     private var frames = 0
     private var statsStartNs = 0L
+    private var previousFrameNs = 0L
     private var rendererName = "OpenGL ES"
+
+    fun markInteraction() {
+        lastInteractionNs = System.nanoTime()
+    }
 
     fun rotateBy(dx: Float, dy: Float) {
         yaw += dx
@@ -179,45 +217,54 @@ private class CubeRenderer(
     }
 
     fun zoomBy(scale: Float) {
+        markInteraction()
         cameraDistance = (cameraDistance / scale).coerceIn(3.2f, 11f)
     }
 
     override fun onSurfaceCreated(gl: javax.microedition.khronos.opengles.GL10?, config: javax.microedition.khronos.egl.EGLConfig?) {
-        GLES30.glClearColor(0.018f, 0.024f, 0.022f, 1f)
-        GLES30.glEnable(GLES30.GL_DEPTH_TEST)
-        GLES30.glEnable(GLES30.GL_CULL_FACE)
-        GLES30.glCullFace(GLES30.GL_BACK)
+        try {
+            GLES30.glClearColor(0.012f, 0.018f, 0.016f, 1f)
+            GLES30.glEnable(GLES30.GL_DEPTH_TEST)
+            // Keep culling disabled in the benchmark so a winding mistake can never produce an
+            // apparently black screen. The depth buffer still gives us a real solid 3D object.
+            GLES30.glDisable(GLES30.GL_CULL_FACE)
 
-        rendererName = GLES30.glGetString(GLES30.GL_RENDERER) ?: "Android GPU"
-        program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
+            rendererName = GLES30.glGetString(GLES30.GL_RENDERER) ?: "Android GPU"
+            program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
 
-        val data = buildCube()
-        vertexCount = data.size / FLOATS_PER_VERTEX
-        val buffer = ByteBuffer.allocateDirect(data.size * 4)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer()
-            .apply { put(data); position(0) }
+            val data = buildCube()
+            vertexCount = data.size / FLOATS_PER_VERTEX
+            val buffer = ByteBuffer.allocateDirect(data.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+                .apply { put(data); position(0) }
 
-        val ids = IntArray(1)
-        GLES30.glGenVertexArrays(1, ids, 0)
-        vao = ids[0]
-        GLES30.glBindVertexArray(vao)
+            val ids = IntArray(1)
+            GLES30.glGenVertexArrays(1, ids, 0)
+            vao = ids[0]
+            GLES30.glBindVertexArray(vao)
 
-        GLES30.glGenBuffers(1, ids, 0)
-        vbo = ids[0]
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo)
-        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, data.size * 4, buffer, GLES30.GL_STATIC_DRAW)
+            GLES30.glGenBuffers(1, ids, 0)
+            vbo = ids[0]
+            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo)
+            GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, data.size * 4, buffer, GLES30.GL_STATIC_DRAW)
 
-        val stride = FLOATS_PER_VERTEX * 4
-        GLES30.glEnableVertexAttribArray(0)
-        GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, stride, 0)
-        GLES30.glEnableVertexAttribArray(1)
-        GLES30.glVertexAttribPointer(1, 3, GLES30.GL_FLOAT, false, stride, 3 * 4)
-        GLES30.glEnableVertexAttribArray(2)
-        GLES30.glVertexAttribPointer(2, 3, GLES30.GL_FLOAT, false, stride, 6 * 4)
+            val stride = FLOATS_PER_VERTEX * 4
+            GLES30.glEnableVertexAttribArray(0)
+            GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, stride, 0)
+            GLES30.glEnableVertexAttribArray(1)
+            GLES30.glVertexAttribPointer(1, 3, GLES30.GL_FLOAT, false, stride, 3 * 4)
+            GLES30.glEnableVertexAttribArray(2)
+            GLES30.glVertexAttribPointer(2, 3, GLES30.GL_FLOAT, false, stride, 6 * 4)
 
-        GLES30.glBindVertexArray(0)
-        statsStartNs = System.nanoTime()
+            GLES30.glBindVertexArray(0)
+            statsStartNs = System.nanoTime()
+            previousFrameNs = statsStartNs
+            ready = true
+        } catch (t: Throwable) {
+            ready = false
+            errorCallback(t.message ?: t.javaClass.simpleName)
+        }
     }
 
     override fun onSurfaceChanged(gl: javax.microedition.khronos.opengles.GL10?, width: Int, height: Int) {
@@ -228,6 +275,15 @@ private class CubeRenderer(
     override fun onDrawFrame(gl: javax.microedition.khronos.opengles.GL10?) {
         val frameStart = System.nanoTime()
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT or GLES30.GL_DEPTH_BUFFER_BIT)
+        if (!ready) return
+
+        val deltaSeconds = ((frameStart - previousFrameNs).coerceIn(0L, 50_000_000L)) / 1_000_000_000f
+        previousFrameNs = frameStart
+        // Auto-rotate whenever the user is not actively manipulating it, so successful rendering is
+        // visually obvious immediately instead of looking like a frozen/static test screen.
+        if (frameStart - lastInteractionNs > 220_000_000L) {
+            yaw += 24f * deltaSeconds
+        }
 
         Matrix.setLookAtM(view, 0, 0f, 0.15f, cameraDistance, 0f, 0f, 0f, 0f, 1f, 0f)
         Matrix.setIdentityM(model, 0)
@@ -251,8 +307,8 @@ private class CubeRenderer(
         val elapsed = now - statsStartNs
         if (elapsed >= 500_000_000L) {
             val fps = frames * 1_000_000_000f / elapsed.toFloat()
-            val frameMs = (now - frameStart) / 1_000_000f
-            statsCallback(fps, frameMs, rendererName)
+            val frameMs = 1000f / max(1f, fps)
+            statsCallback(fps, frameMs, rendererName, refreshRate)
             frames = 0
             statsStartNs = now
         }
