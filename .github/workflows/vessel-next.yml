@@ -1,9 +1,6 @@
 name: Vessel Final
 
 on:
-  # app/vessel-final is the head of PR #2, so every push to it already emits a
-  # pull_request:synchronize event. Do not also run this workflow on the same
-  # direct push or GitHub will compile/test the exact same commit twice.
   push:
     branches: [ app/vessel-next ]
   pull_request:
@@ -92,16 +89,21 @@ jobs:
               'app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt': [
                   'SurfaceView', 'System.loadLibrary("vessel_vulkan")',
                   'Vessel Vulkan Studio', 'Drag to orbit', 'Pinch to zoom',
-                  'LIVE VULKAN LOG', 'nativeSetStress',
+                  'LIVE VULKAN LOG', 'nativeSetStress', 'nativeSetQuality',
+                  'nativeSetPhysics', 'nativeSetRt', 'COPY LOGS',
               ],
               'app/src/main/cpp/CMakeLists.txt': [
-                  'add_library(vessel_vulkan SHARED native_vulkan_studio.cpp)',
+                  'add_library(vessel_vulkan SHARED native_vulkan_studio_v3.cpp)',
                   'target_link_libraries(vessel_vulkan PRIVATE android log vulkan)',
-                  'vessel_vulkan_shaders',
+                  'native_studio_v3_rt.frag',
               ],
-              'app/src/main/cpp/native_vulkan_studio.cpp': [
+              'app/src/main/cpp/native_vulkan_studio_v3.cpp': [
                   'VK_KHR_ANDROID_SURFACE_EXTENSION_NAME', 'vkCreateAndroidSurfaceKHR',
-                  'vkQueuePresentKHR', 'vkCreateQueryPool', 'Vessel Vulkan Studio',
+                  'VK_KHR_RAY_QUERY_EXTENSION_NAME', 'vkCmdBuildAccelerationStructuresKHR',
+                  'physicsStep', 'grabStart', 'vkQueuePresentKHR',
+              ],
+              'app/src/main/cpp/shaders/native_studio_v3_rt.frag': [
+                  'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceReflection',
               ],
           }
           for path, needles in checks.items():
