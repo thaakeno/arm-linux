@@ -3,9 +3,11 @@ package com.example.dreamlinux
 import android.app.Activity
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.Surface
@@ -17,19 +19,23 @@ import android.widget.TextView
 import kotlin.math.max
 
 /**
- * Vulkan-only native Android Surface benchmark for Vessel.
+ * Persistent Vulkan-only graphics diagnostic for Vessel.
  *
- * Rendering is performed by native Vulkan through VK_KHR_android_surface directly into the
- * SurfaceView's Android Surface. There is intentionally no OpenGL/OpenGL ES fallback here.
+ * This benchmark intentionally stays in the finished app even after the Linux desktop transport
+ * is native. It exercises the same Android Surface + Vulkan + Adreno presentation path directly,
+ * with no OpenGL, VNC or Termux:X11 fallback.
  */
 class NativeCubeActivity : Activity() {
     private lateinit var stats: TextView
+    private lateinit var logs: TextView
+    private lateinit var modeChip: TextView
     private lateinit var surfaceView: SurfaceView
     private val handler = Handler(Looper.getMainLooper())
     private var rendererHandle = 0L
     private var nativeLoaded = false
     private var lastX = 0f
     private var lastY = 0f
+    private var stressMode = false
 
     private val statsPoll = object : Runnable {
         override fun run() {
@@ -37,14 +43,16 @@ class NativeCubeActivity : Activity() {
             if (handle != 0L && nativeLoaded) {
                 val text = runCatching { nativeStatus(handle) }
                     .getOrElse { "ERROR: Vulkan status: ${it.message ?: it.javaClass.simpleName}" }
-                if (text.startsWith("ERROR:")) {
-                    stats.setBackgroundColor(0xCC3B171A.toInt())
-                } else {
-                    stats.setBackgroundColor(0xAA050807.toInt())
-                }
+                stats.setBackgroundColor(
+                    if (text.startsWith("ERROR:")) 0xCC3B171A.toInt() else 0xB3050807.toInt()
+                )
                 stats.text = "$text\nDrag to orbit · Pinch to zoom"
+
+                val logText = runCatching { nativeLogs(handle) }
+                    .getOrElse { "log read failed: ${it.message ?: it.javaClass.simpleName}" }
+                logs.text = "LIVE VULKAN LOG\n$logText"
             }
-            handler.postDelayed(this, 250L)
+            handler.postDelayed(this, 200L)
         }
     }
 
@@ -55,9 +63,39 @@ class NativeCubeActivity : Activity() {
         stats = TextView(this).apply {
             setTextColor(Color.WHITE)
             setBackgroundColor(0xCC050807.toInt())
-            textSize = 13f
-            setPadding(28, 18, 28, 18)
-            text = "Vessel Native Vulkan\nWaiting for Android Surface…\nDrag to orbit · Pinch to zoom"
+            textSize = 12.5f
+            setPadding(24, 14, 24, 14)
+            text = "Vessel Vulkan Studio\nWaiting for Android Surface…\nDrag to orbit · Pinch to zoom"
+        }
+
+        logs = TextView(this).apply {
+            setTextColor(0xFFD7E0DB.toInt())
+            setBackgroundColor(0xA8050807.toInt())
+            typeface = Typeface.MONOSPACE
+            textSize = 9.5f
+            setPadding(18, 12, 18, 12)
+            maxLines = 11
+            text = "LIVE VULKAN LOG\nrenderer not started"
+        }
+
+        modeChip = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setBackgroundColor(0xCC18362B.toInt())
+            textSize = 11.5f
+            gravity = Gravity.CENTER
+            setPadding(24, 14, 24, 14)
+            text = "QUALITY"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                stressMode = !stressMode
+                text = if (stressMode) "STRESS" else "QUALITY"
+                setBackgroundColor(
+                    if (stressMode) 0xCCD35B34.toInt() else 0xCC18362B.toInt()
+                )
+                val handle = rendererHandle
+                if (handle != 0L) runCatching { nativeSetStress(handle, stressMode) }
+            }
         }
 
         nativeLoaded = try {
@@ -68,20 +106,21 @@ class NativeCubeActivity : Activity() {
             false
         }
 
-        // SurfaceView owns a separate compositor layer. Keep the View transparent so the
-        // Vulkan swapchain remains visible; the parent supplies the black fallback color.
         surfaceView = SurfaceView(this).apply {
             background = null
             holder.setFormat(PixelFormat.OPAQUE)
         }
 
-        val scaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            override fun onScale(detector: ScaleGestureDetector): Boolean {
-                val handle = rendererHandle
-                if (handle != 0L) nativeZoom(handle, detector.scaleFactor)
-                return true
+        val scaleDetector = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    val handle = rendererHandle
+                    if (handle != 0L) nativeZoom(handle, detector.scaleFactor)
+                    return true
+                }
             }
-        })
+        )
 
         surfaceView.setOnTouchListener { _, event ->
             scaleDetector.onTouchEvent(event)
@@ -98,10 +137,6 @@ class NativeCubeActivity : Activity() {
                         val dy = event.y - lastY
                         val handle = rendererHandle
                         if (handle != 0L) {
-                            // "Grab the object" orbit semantics: dragging right makes the
-                            // object appear to turn right, while vertical motion affects only
-                            // pitch. Lower sensitivity than the first prototype keeps small
-                            // phone movements controllable and Blender-like.
                             val yawDegrees = -dx * (145f / max(surfaceView.width, 1))
                             val pitchDegrees = -dy * (105f / max(surfaceView.height, 1))
                             nativeRotate(handle, yawDegrees, pitchDegrees)
@@ -125,35 +160,45 @@ class NativeCubeActivity : Activity() {
             }
         }
 
-        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                if (!nativeLoaded || rendererHandle != 0L) return
-                val surface: Surface = holder.surface
-                rendererHandle = runCatching { nativeCreate(surface) }.getOrElse {
-                    showFatal("Vulkan renderer creation failed: ${it.message ?: it.javaClass.simpleName}")
-                    0L
+        surfaceView.holder.addCallback(
+            object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    if (!nativeLoaded || rendererHandle != 0L) return
+                    val surface: Surface = holder.surface
+                    rendererHandle = runCatching { nativeCreate(surface) }.getOrElse {
+                        showFatal("Vulkan renderer creation failed: ${it.message ?: it.javaClass.simpleName}")
+                        0L
+                    }
+                    if (rendererHandle == 0L) {
+                        showFatal("Vulkan renderer creation returned no native handle")
+                    } else {
+                        nativeResize(
+                            rendererHandle,
+                            max(surfaceView.width, 1),
+                            max(surfaceView.height, 1)
+                        )
+                        nativeSetStress(rendererHandle, stressMode)
+                        stats.text = "Vessel Vulkan Studio\nCreating Vulkan scene…"
+                    }
                 }
-                if (rendererHandle == 0L) {
-                    showFatal("Vulkan renderer creation returned no native handle")
-                } else {
-                    // Push the actual visible SurfaceView dimensions immediately. On Android,
-                    // VkSurfaceCapabilitiesKHR.currentExtent can be expressed in the device's
-                    // natural orientation while SurfaceFlinger applies a 90/270° transform.
-                    // Using the View size avoids turning a square into a wide rectangle.
-                    nativeResize(rendererHandle, max(surfaceView.width, 1), max(surfaceView.height, 1))
-                    stats.text = "Vessel Native Vulkan\nCreating VkInstance + Android swapchain…"
+
+                override fun surfaceChanged(
+                    holder: SurfaceHolder,
+                    format: Int,
+                    width: Int,
+                    height: Int
+                ) {
+                    val handle = rendererHandle
+                    if (handle != 0L) {
+                        runCatching { nativeResize(handle, max(width, 1), max(height, 1)) }
+                    }
+                }
+
+                override fun surfaceDestroyed(holder: SurfaceHolder) {
+                    destroyRenderer()
                 }
             }
-
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                val handle = rendererHandle
-                if (handle != 0L) runCatching { nativeResize(handle, max(width, 1), max(height, 1)) }
-            }
-
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                destroyRenderer()
-            }
-        })
+        )
 
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         root.addView(
@@ -170,9 +215,32 @@ class NativeCubeActivity : Activity() {
                 FrameLayout.LayoutParams.WRAP_CONTENT
             ).apply {
                 leftMargin = 28
-                topMargin = 28
+                topMargin = 22
             }
         )
+        root.addView(
+            modeChip,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END
+            ).apply {
+                topMargin = 22
+                rightMargin = 28
+            }
+        )
+        root.addView(
+            logs,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.START
+            ).apply {
+                leftMargin = 28
+                bottomMargin = 26
+            }
+        )
+
         setContentView(root)
         handler.post(statsPoll)
     }
@@ -202,15 +270,14 @@ class NativeCubeActivity : Activity() {
     private fun destroyRenderer() {
         val handle = rendererHandle
         rendererHandle = 0L
-        if (handle != 0L && nativeLoaded) {
-            runCatching { nativeDestroy(handle) }
-        }
+        if (handle != 0L && nativeLoaded) runCatching { nativeDestroy(handle) }
     }
 
     private fun showFatal(message: String) {
         runOnUiThread {
             stats.setBackgroundColor(0xCC3B171A.toInt())
             stats.text = "Native Vulkan error\n$message\nPress Back to return to Vessel"
+            logs.text = "LIVE VULKAN LOG\n$message"
         }
     }
 
@@ -219,5 +286,7 @@ class NativeCubeActivity : Activity() {
     private external fun nativeResize(handle: Long, width: Int, height: Int)
     private external fun nativeRotate(handle: Long, dxDegrees: Float, dyDegrees: Float)
     private external fun nativeZoom(handle: Long, scaleFactor: Float)
+    private external fun nativeSetStress(handle: Long, enabled: Boolean)
     private external fun nativeStatus(handle: Long): String
+    private external fun nativeLogs(handle: Long): String
 }
