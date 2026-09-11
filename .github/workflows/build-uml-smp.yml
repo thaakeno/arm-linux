@@ -1,5 +1,6 @@
 name: Vessel UML SMP Kernel
 
+# Rebuild trigger: rerun after accidental cancellation.
 on:
   push:
     branches: [ app/vessel-final ]
