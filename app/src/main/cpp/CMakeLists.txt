@@ -11,13 +11,11 @@ target_compile_options(dev1_payload PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(dev1_payload PRIVATE dl)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
 set(GLSLC_CANDIDATES
     "${ANDROID_NDK}/shader-tools/linux-x86_64/glslc"
     "${ANDROID_NDK}/shader-tools/darwin-x86_64/glslc"
     "${ANDROID_NDK}/shader-tools/darwin-arm64/glslc"
-    "${ANDROID_NDK}/shader-tools/windows-x86_64/glslc.exe"
-)
+    "${ANDROID_NDK}/shader-tools/windows-x86_64/glslc.exe")
 set(GLSLC "")
 foreach(candidate IN LISTS GLSLC_CANDIDATES)
     if(EXISTS "${candidate}")
@@ -29,41 +27,31 @@ if(NOT GLSLC)
     find_program(GLSLC glslc)
 endif()
 if(NOT GLSLC)
-    message(FATAL_ERROR "Vessel Vulkan renderer requires glslc from the Android NDK shader-tools directory")
+    message(FATAL_ERROR "Vessel Vulkan Studio requires glslc")
 endif()
 
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GENERATED_DIR}")
 
-set(VERT_SRC "${CMAKE_CURRENT_SOURCE_DIR}/shaders/native_cube.vert")
-set(FRAG_SRC "${CMAKE_CURRENT_SOURCE_DIR}/shaders/native_cube.frag")
-set(VERT_SPV "${GENERATED_DIR}/native_cube.vert.spv")
-set(FRAG_SPV "${GENERATED_DIR}/native_cube.frag.spv")
-set(VERT_HEADER "${GENERATED_DIR}/native_cube_vert_spv.h")
-set(FRAG_HEADER "${GENERATED_DIR}/native_cube_frag_spv.h")
+function(vessel_shader SOURCE STAGE SYMBOL)
+    get_filename_component(BASE "${SOURCE}" NAME)
+    set(SPV "${GENERATED_DIR}/${BASE}.spv")
+    set(HEADER "${GENERATED_DIR}/${SYMBOL}_spv.h")
+    add_custom_command(
+        OUTPUT "${SPV}" "${HEADER}"
+        COMMAND "${GLSLC}" --target-env=vulkan1.2 -fshader-stage=${STAGE} "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE}" -o "${SPV}"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_spv.py" "${SPV}" "${HEADER}" ${SYMBOL}_spv
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_spv.py"
+        VERBATIM)
+    set(VESSEL_SHADER_OUTPUTS ${VESSEL_SHADER_OUTPUTS} "${HEADER}" PARENT_SCOPE)
+endfunction()
 
-add_custom_command(
-    OUTPUT "${VERT_SPV}" "${VERT_HEADER}"
-    COMMAND "${GLSLC}" -fshader-stage=vert "${VERT_SRC}" -o "${VERT_SPV}"
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_spv.py" "${VERT_SPV}" "${VERT_HEADER}" native_cube_vert_spv
-    DEPENDS "${VERT_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_spv.py"
-    VERBATIM
-)
+vessel_shader(shaders/native_studio_v3.vert vert native_studio_v3_vert)
+vessel_shader(shaders/native_studio_v3.frag frag native_studio_v3_frag)
+vessel_shader(shaders/native_studio_v3_rt.frag frag native_studio_v3_rt_frag)
+add_custom_target(vessel_vulkan_shaders DEPENDS ${VESSEL_SHADER_OUTPUTS})
 
-add_custom_command(
-    OUTPUT "${FRAG_SPV}" "${FRAG_HEADER}"
-    COMMAND "${GLSLC}" -fshader-stage=frag "${FRAG_SRC}" -o "${FRAG_SPV}"
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_spv.py" "${FRAG_SPV}" "${FRAG_HEADER}" native_cube_frag_spv
-    DEPENDS "${FRAG_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_spv.py"
-    VERBATIM
-)
-
-add_custom_target(vessel_vulkan_shaders DEPENDS "${VERT_HEADER}" "${FRAG_HEADER}")
-
-# Keep the Vulkan Studio benchmark as a first-class Vessel diagnostic even after
-# the Linux desktop transport lands. It exercises the native Android Surface,
-# Adreno Vulkan path, GPU timings, PBR-style shaders and stress geometry.
-add_library(vessel_vulkan SHARED native_vulkan_studio.cpp)
+add_library(vessel_vulkan SHARED native_vulkan_studio_v3.cpp)
 add_dependencies(vessel_vulkan vessel_vulkan_shaders)
 target_compile_features(vessel_vulkan PRIVATE cxx_std_17)
 target_compile_definitions(vessel_vulkan PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
