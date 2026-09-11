@@ -90,7 +90,17 @@ jobs:
                   'FullscreenDesktop', 'Open native 3D cube', 'protocol 22', '8 GB UML memory',
               ],
               'app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt': [
-                  'GLSurfaceView', 'RENDERMODE_CONTINUOUSLY', 'Drag to rotate', 'Pinch to zoom',
+                  'SurfaceView', 'System.loadLibrary("vessel_vulkan")',
+                  'Vessel Native Vulkan', 'Drag to rotate', 'Pinch to zoom',
+              ],
+              'app/src/main/cpp/CMakeLists.txt': [
+                  'add_library(vessel_vulkan SHARED native_vulkan_cube.cpp)',
+                  'target_link_libraries(vessel_vulkan PRIVATE android log vulkan)',
+                  'vessel_vulkan_shaders',
+              ],
+              'app/src/main/cpp/native_vulkan_cube.cpp': [
+                  'VK_KHR_ANDROID_SURFACE_EXTENSION_NAME', 'vkCreateAndroidSurfaceKHR',
+                  'vkQueuePresentKHR',
               ],
           }
           for path, needles in checks.items():
