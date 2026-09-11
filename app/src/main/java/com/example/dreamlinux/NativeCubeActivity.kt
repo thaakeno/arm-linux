@@ -34,6 +34,7 @@ class NativeCubeActivity : Activity() {
     private lateinit var controlsCard: LinearLayout
     private lateinit var surfaceView: SurfaceView
     private lateinit var qualityLabel: TextView
+    private lateinit var qualitySeek: SeekBar
     private lateinit var modeButton: Button
     private lateinit var physicsButton: Button
     private lateinit var rtButton: Button
@@ -247,7 +248,7 @@ class NativeCubeActivity : Activity() {
             addView(section("GRAPHICS"))
             qualityLabel = TextView(this@NativeCubeActivity).apply { setTextColor(0xFFEAF7F1.toInt()); textSize = 9.6f; text = "Quality $quality / 100" }
             addView(qualityLabel)
-            addView(SeekBar(this@NativeCubeActivity).apply {
+            qualitySeek = SeekBar(this@NativeCubeActivity).apply {
                 max = 100; progress = quality
                 setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                     override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -256,7 +257,8 @@ class NativeCubeActivity : Activity() {
                     override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
                     override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
                 })
-            })
+            }
+            addView(qualitySeek)
             val presets = LinearLayout(this@NativeCubeActivity).apply { orientation = LinearLayout.HORIZONTAL }
             presets.addView(button("Low") { setQualityPreset(15) }); presets.addView(button("120Hz") { setQualityPreset(62) }); presets.addView(button("Ultra", true) { setQualityPreset(100) }); addView(presets)
             addView(section("RENDER"))
@@ -297,7 +299,9 @@ class NativeCubeActivity : Activity() {
     }
 
     private fun setQualityPreset(value: Int) {
-        quality = value.coerceIn(0, 100); qualityLabel.text = "Quality $quality / 100"
+        quality = value.coerceIn(0, 100)
+        qualityLabel.text = "Quality $quality / 100"
+        if (::qualitySeek.isInitialized && qualitySeek.progress != quality) qualitySeek.progress = quality
         if (rendererHandle != 0L) nativeSetQuality(rendererHandle, quality)
         appendLog("preset -> Q$quality")
     }
