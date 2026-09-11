@@ -88,7 +88,7 @@ jobs:
               ],
               'app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt': [
                   'SurfaceView', 'System.loadLibrary("vessel_vulkan")',
-                  'Vessel Vulkan Studio', 'Drag to orbit', 'Pinch to zoom',
+                  'Vessel Vulkan Studio', 'Drag to orbit', 'pinch to zoom',
                   'LIVE VULKAN LOG', 'nativeSetStress', 'nativeSetQuality',
                   'nativeSetPhysics', 'nativeSetRt', 'COPY LOGS',
               ],
