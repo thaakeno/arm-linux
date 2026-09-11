@@ -37,6 +37,31 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
 
+      - name: Fetch Vulkan Studio v6 offline assets
+        run: |
+          set -euxo pipefail
+          ASSETS=app/src/main/assets/vulkan_v6
+          THIRD=app/src/main/cpp/third_party
+          mkdir -p "$ASSETS" "$THIRD"
+          UA='Vessel-Vulkan-Studio-v6/1.0 (offline APK asset build)'
+          get() { curl --fail --location --retry 4 --retry-delay 2 --user-agent "$UA" "$1" --output "$2"; test -s "$2"; }
+
+          # CC0 Poly Haven material maps. Downloaded only during build; the APK is fully offline at runtime.
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/slab_tiles/slab_tiles_diff_2k.jpg' "$ASSETS/slab_tiles_diff_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/slab_tiles/slab_tiles_nor_gl_2k.jpg' "$ASSETS/slab_tiles_nor_gl_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/slab_tiles/slab_tiles_arm_2k.jpg' "$ASSETS/slab_tiles_arm_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/slab_tiles/slab_tiles_disp_2k.png' "$ASSETS/slab_tiles_disp_2k.png"
+
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_diff_2k.jpg' "$ASSETS/rough_concrete_diff_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_nor_gl_2k.jpg' "$ASSETS/rough_concrete_nor_gl_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_arm_2k.jpg' "$ASSETS/rough_concrete_arm_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/rough_concrete/rough_concrete_disp_2k.png' "$ASSETS/rough_concrete_disp_2k.png"
+
+          get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/evening_museum_courtyard_1k.hdr' "$ASSETS/evening_museum_courtyard_1k.hdr"
+          get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$THIRD/stb_image.h"
+
+          du -h "$ASSETS"/*
+
       - name: Validate rootless runtime controller
         run: |
           set -euxo pipefail
@@ -88,30 +113,43 @@ jobs:
               ],
               'app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt': [
                   'SurfaceView', 'System.loadLibrary("vessel_vulkan")',
-                  'Vessel Vulkan Studio v5', 'Orbit · pinch zoom',
+                  'Vessel Vulkan Studio v6', 'Orbit · pinch zoom',
                   'VULKAN LOG', 'nativeSetStress', 'nativeSetQuality',
-                  'nativeSetPhysics', 'nativeSetRt', 'Full Vulkan log copied',
+                  'nativeSetPhysics', 'nativeSetRt', 'nativeGrabLightStart',
+                  'Full Vulkan log copied',
               ],
               'app/src/main/cpp/CMakeLists.txt': [
-                  'add_library(vessel_vulkan SHARED native_vulkan_studio_v5.cpp)',
+                  'add_library(vessel_vulkan SHARED native_vulkan_studio_v6.cpp)',
                   'target_link_libraries(vessel_vulkan PRIVATE android log vulkan)',
-                  'native_studio_v5_rt.frag',
+                  'native_studio_v6_rt.frag',
               ],
               'app/src/main/cpp/native_vulkan_studio_v3.cpp': [
                   'VK_KHR_RAY_QUERY_EXTENSION_NAME', 'vkCmdBuildAccelerationStructuresKHR',
               ],
-              'app/src/main/cpp/native_vulkan_studio_v5.cpp': [
-                  'native_studio_v5_rt_frag_spv', 'rebuildTlasV5', 'cmdUpdateTlasV5',
-                  'physicsStepV5', 'kRoomHalf', 'replacePipelineV5',
+              'app/src/main/cpp/native_vulkan_studio_v6.cpp': [
+                  'native_studio_v6_rt_frag_spv', 'rebuildTlasV6', 'cmdUpdateTlasV6',
+                  'physicsStepV6', 'loadTexturesV6', 'rough_concrete_diff_2k.jpg',
+                  'evening_museum_courtyard_1k.hdr', 'nativeGrabLightStart',
               ],
-              'app/src/main/cpp/shaders/native_studio_v5_rt.frag': [
-                  'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceReflection',
+              'app/src/main/cpp/shaders/native_studio_v6_rt.frag': [
+                  'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceScene',
+                  'floorAlbedo', 'environmentMap', 'transmission', 'anisotropy',
+              ],
+              'app/src/main/cpp/shaders/native_studio_v6.vert': [
+                  'concreteHeight', 'floorHeight', 'HERO_GRID', 'ARCH_BOXES',
               ],
           }
           for path, needles in checks.items():
               text = Path(path).read_text()
               for needle in needles:
                   assert needle in text, f'{needle!r} missing from {path}'
+          for name in [
+              'slab_tiles_diff_2k.jpg', 'slab_tiles_nor_gl_2k.jpg', 'slab_tiles_arm_2k.jpg', 'slab_tiles_disp_2k.png',
+              'rough_concrete_diff_2k.jpg', 'rough_concrete_nor_gl_2k.jpg', 'rough_concrete_arm_2k.jpg', 'rough_concrete_disp_2k.png',
+              'evening_museum_courtyard_1k.hdr',
+          ]:
+              p = Path('app/src/main/assets/vulkan_v6') / name
+              assert p.stat().st_size > 1024, f'asset too small: {p}'
           PY
 
       - name: Compile, unit-test and lint
