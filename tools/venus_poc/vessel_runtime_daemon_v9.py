@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Protocol-9 Vessel runtime entrypoint.
 
-The UML PTY is used only to boot Debian and launch one tiny bootstrap command.
-The bootstrap opens an outbound TCP connection through passt to the Termux host
-(guest gateway 10.0.2.2 maps to host loopback), downloads the real command
-agent, and keeps that socket for all later commands.
+The UML PTY is used only to boot Debian and launch a tiny *background* bootstrap
+child. The PID-1 shell must stay alive: replacing it with `exec python3` makes
+the whole UML guest halt as soon as the command-agent socket exits.
 
-All command framing and output therefore bypass the terminal line discipline.
-This removes the failure class seen in protocols 3-8: canonical line limits,
-raw/cooked tty transitions, control-character interpretation, prompt races,
-partial PTY frames, and child processes consuming command bytes.
+After bootstrap, all commands/output use a dedicated TCP channel through passt
+(guest 10.0.2.2 -> Termux loopback). If that socket dies, Vessel closes it and
+can bootstrap a fresh child without declaring Debian dead.
 """
 from __future__ import annotations
 
@@ -33,7 +31,6 @@ MAX_COMMAND = 16 * 1024 * 1024
 MAX_RECORD = 16 * 1024 * 1024
 LEGACY_STTY = "stty -echo 2>/dev/null || true\n"
 
-# This source is transferred over TCP, never through the tty.
 AGENT_SOURCE = r'''import socket,struct,subprocess
 s=globals()["s"]
 
@@ -91,11 +88,8 @@ _original_prepare = core.Runtime._prepare_venus_guest
 
 
 def full_write(self: core.Runtime, text: str) -> None:
-    # core.start() used to inject an asynchronous `stty -echo` immediately
-    # before _prepare_venus_guest(). Protocol 9 performs that exact terminal
-    # setup atomically in its bootstrap command, so suppress the legacy write.
-    # This leaves exactly ONE post-boot command on the PTY and removes the last
-    # command-ordering race before the socket handoff.
+    # core.start() used to inject an asynchronous stty command before Venus
+    # setup. Protocol 9 folds that into its one bootstrap command instead.
     if text == LEGACY_STTY and getattr(self, "agent_socket", None) is None:
         return
     if self.master is None:
@@ -145,6 +139,8 @@ def close_agent(self: core.Runtime) -> None:
 def _ensure_agent(self: core.Runtime) -> None:
     if getattr(self, "agent_socket", None) is not None:
         return
+    if self.proc is None or self.proc.poll() is not None:
+        raise RuntimeError("Debian UML is not running")
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -156,8 +152,6 @@ def _ensure_agent(self: core.Runtime) -> None:
     listener.listen(1)
     listener.settimeout(15.0)
 
-    # The only post-boot tty command. It is small, line-oriented, and hands all
-    # subsequent traffic to TCP. MSG_WAITALL makes bootstrap transfer exact.
     bootstrap_py = (
         "import socket,struct;"
         f"s=socket.create_connection(({GUEST_HOST_GATEWAY!r},{AGENT_PORT}),10);"
@@ -166,8 +160,16 @@ def _ensure_agent(self: core.Runtime) -> None:
         "src=s.recv(n,socket.MSG_WAITALL);"
         "exec(compile(src,'<vessel-agent>','exec'),{'s':s})"
     )
-    command = "stty -echo 2>/dev/null || true; exec python3 -u -c " + shlex.quote(bootstrap_py) + "\n"
-    if len(command.encode("utf-8")) >= 1024:
+
+    # CRITICAL: do NOT `exec` this over the interactive root shell. That shell
+    # is PID 1 in this minimal UML guest. Replacing it makes agent termination
+    # terminate init and UML prints `reboot: System halted`.
+    command = (
+        "stty -echo 2>/dev/null || true; "
+        "nohup python3 -u -c " + shlex.quote(bootstrap_py) +
+        " </dev/null >/tmp/vessel-agent-bootstrap.log 2>&1 &\n"
+    )
+    if len(command.encode("utf-8")) >= 1200:
         listener.close()
         raise RuntimeError("guest socket bootstrap unexpectedly exceeds safe tty size")
 
@@ -195,10 +197,14 @@ def _ensure_agent(self: core.Runtime) -> None:
 def socket_guest(self: core.Runtime, command: str, timeout: float = 45.0) -> str:
     if not command.strip():
         return ""
-    if not self.guest_ready:
-        raise RuntimeError("Debian is not ready")
+    if self.proc is None or self.proc.poll() is not None:
+        raise RuntimeError("Debian UML is not running")
 
     with self.command_lock:
+        # guest_ready tracks whether boot reached the shell. A dropped agent
+        # socket does NOT mean Debian stopped, so it must not clear this flag.
+        if not self.guest_ready:
+            raise RuntimeError("Debian is not ready")
         _ensure_agent(self)
         sock = getattr(self, "agent_socket", None)
         if sock is None:
@@ -239,9 +245,10 @@ def socket_guest(self: core.Runtime, command: str, timeout: float = 45.0) -> str
                     raise RuntimeError("guest command agent error: " + body.decode("utf-8", "replace"))
                 raise RuntimeError(f"unknown guest agent record type: {kind!r}")
         except Exception as exc:
+            # Drop only the command socket. Debian and its PID-1 shell remain
+            # alive, allowing the next request to bootstrap a fresh agent.
             close_agent(self)
-            self.guest_ready = False
-            raise RuntimeError(f"guest command socket failed; restart Debian runtime: {exc}") from exc
+            raise RuntimeError(f"guest command socket failed; channel will reconnect: {exc}") from exc
 
 
 def prepare_with_socket_agent(self: core.Runtime) -> None:
