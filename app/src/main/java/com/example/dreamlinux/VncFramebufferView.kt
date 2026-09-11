@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.RectF
 import android.os.SystemClock
 import android.view.HapticFeedbackConstants
@@ -44,7 +43,7 @@ class VncFramebufferView(context: Context) : View(context) {
     @Volatile private var lastError = "Waiting for Plasma desktop"
     private var socket: Socket? = null
     private var output: DataOutputStream? = null
-    private var pointerMode = PointerMode.TRACKPAD
+    private var pointerMode = PointerMode.DIRECT
     private var cursorGuestX = 0
     private var cursorGuestY = 0
     private var lastPointerSentMs = 0L
@@ -58,12 +57,12 @@ class VncFramebufferView(context: Context) : View(context) {
     private var dragging = false
     private var maxPointers = 1
     private var scrollAccumulator = 0f
+    private var lastTapMs = 0L
+    private var lastTapX = 0f
+    private var lastTapY = 0f
 
     private val directChip = RectF()
     private val trackpadChip = RectF()
-    private val trackpadRect = RectF()
-    private val leftButtonRect = RectF()
-    private val rightButtonRect = RectF()
 
     init {
         isFocusable = true
@@ -92,17 +91,17 @@ class VncFramebufferView(context: Context) : View(context) {
     }
 
     private fun connectionLoop() {
-        var backoff = 120L
+        var backoff = 100L
         while (running.get()) {
             try {
                 val s = Socket()
                 s.tcpNoDelay = true
                 s.keepAlive = true
-                s.receiveBufferSize = 1024 * 1024
+                s.receiveBufferSize = 2 * 1024 * 1024
                 s.sendBufferSize = 128 * 1024
                 s.connect(InetSocketAddress("127.0.0.1", TermuxUmlController.VNC_PORT), 2500)
                 socket = s
-                backoff = 120L
+                backoff = 100L
                 runSession(s)
             } catch (t: Throwable) {
                 lastError = t.message ?: t.javaClass.simpleName
@@ -114,13 +113,13 @@ class VncFramebufferView(context: Context) : View(context) {
             }
             if (running.get()) {
                 Thread.sleep(backoff)
-                backoff = (backoff * 2).coerceAtMost(1200L)
+                backoff = (backoff * 2).coerceAtMost(1000L)
             }
         }
     }
 
     private fun runSession(socket: Socket) {
-        val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 512 * 1024))
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 1024 * 1024))
         val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
         output = out
 
@@ -143,8 +142,7 @@ class VncFramebufferView(context: Context) : View(context) {
         synchronized(wireLock) { out.writeByte(1); out.flush() }
         fbWidth = input.readUnsignedShort()
         fbHeight = input.readUnsignedShort()
-        val serverPixelFormat = ByteArray(16)
-        input.readFully(serverPixelFormat)
+        input.skipBytes(16)
         val nameLen = input.readInt()
         if (nameLen in 0..65535) {
             val name = ByteArray(nameLen)
@@ -182,8 +180,11 @@ class VncFramebufferView(context: Context) : View(context) {
     }
 
     private fun sendEncodings(out: DataOutputStream) = synchronized(wireLock) {
-        out.writeByte(2); out.writeByte(0); out.writeShort(2)
+        // Hextile first, then CopyRect, then raw. We deliberately do not request
+        // a client-side cursor pseudo-encoding: Xtigervnc owns the one real cursor.
+        out.writeByte(2); out.writeByte(0); out.writeShort(3)
         out.writeInt(5)
+        out.writeInt(1)
         out.writeInt(0)
         out.flush()
     }
@@ -217,6 +218,17 @@ class VncFramebufferView(context: Context) : View(context) {
                 row[xx] = -0x1000000 or (r shl 16) or (g shl 8) or b
             }
             synchronized(bmp) { bmp.setPixels(row, 0, w, x, y + yy, w, 1) }
+        }
+    }
+
+    private fun decodeCopyRect(input: DataInputStream, bmp: Bitmap, x: Int, y: Int, w: Int, h: Int) {
+        val srcX = input.readUnsignedShort()
+        val srcY = input.readUnsignedShort()
+        check(srcX + w <= bmp.width && srcY + h <= bmp.height) { "Invalid CopyRect source" }
+        val pixels = IntArray(w * h)
+        synchronized(bmp) {
+            bmp.getPixels(pixels, 0, w, srcX, srcY, w, h)
+            bmp.setPixels(pixels, 0, w, x, y, w, h)
         }
     }
 
@@ -283,6 +295,7 @@ class VncFramebufferView(context: Context) : View(context) {
             check(x + w <= bmp.width && y + h <= bmp.height) { "Invalid VNC rectangle" }
             when (encoding) {
                 0 -> decodeRaw(input, bmp, x, y, w, h)
+                1 -> decodeCopyRect(input, bmp, x, y, w, h)
                 5 -> decodeHextile(input, bmp, x, y, w, h)
                 else -> error("Unexpected VNC encoding $encoding")
             }
@@ -307,25 +320,12 @@ class VncFramebufferView(context: Context) : View(context) {
         return x to y
     }
 
-    private fun guestToView(x: Int, y: Int): Pair<Float, Float>? {
-        val r = fittedRect() ?: return null
-        if (fbWidth <= 0 || fbHeight <= 0) return null
-        return (r.left + x.toFloat() / fbWidth * r.width()) to (r.top + y.toFloat() / fbHeight * r.height())
-    }
-
     private fun updateControlRects() {
         val pad = 12f * density
         val chipH = 34f * density
         val chipW = 82f * density
         directChip.set(pad, pad, pad + chipW, pad + chipH)
         trackpadChip.set(directChip.right + 7f * density, pad, directChip.right + 7f * density + chipW, pad + chipH)
-
-        val margin = 14f * density
-        val h = 142f * density
-        trackpadRect.set(margin, height - h - margin, width - margin, height - margin)
-        val buttonH = 34f * density
-        leftButtonRect.set(trackpadRect.left + 8f * density, trackpadRect.bottom - buttonH - 8f * density, trackpadRect.centerX() - 4f * density, trackpadRect.bottom - 8f * density)
-        rightButtonRect.set(trackpadRect.centerX() + 4f * density, trackpadRect.bottom - buttonH - 8f * density, trackpadRect.right - 8f * density, trackpadRect.bottom - 8f * density)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -338,23 +338,21 @@ class VncFramebufferView(context: Context) : View(context) {
         } else {
             textPaint.textSize = 18f * density
             textPaint.color = Color.LTGRAY
+            textPaint.textAlign = Paint.Align.LEFT
             canvas.drawText(lastError.take(70), 20f * density, 42f * density, textPaint)
         }
-
         updateControlRects()
         drawModeChips(canvas)
-        if (pointerMode == PointerMode.TRACKPAD) drawTrackpad(canvas)
-        drawLocalCursor(canvas)
     }
 
     private fun drawModeChips(canvas: Canvas) {
         fun chip(rect: RectF, label: String, selected: Boolean) {
-            paint.color = if (selected) Color.argb(235, 28, 83, 63) else Color.argb(190, 20, 25, 23)
+            paint.color = if (selected) Color.argb(235, 28, 83, 63) else Color.argb(175, 14, 19, 17)
             canvas.drawRoundRect(rect, 18f * density, 18f * density, paint)
             if (!selected) {
                 paint.style = Paint.Style.STROKE
                 paint.strokeWidth = density
-                paint.color = Color.argb(150, 120, 150, 138)
+                paint.color = Color.argb(125, 120, 150, 138)
                 canvas.drawRoundRect(rect, 18f * density, 18f * density, paint)
                 paint.style = Paint.Style.FILL
             }
@@ -366,57 +364,6 @@ class VncFramebufferView(context: Context) : View(context) {
         }
         chip(directChip, "Direct", pointerMode == PointerMode.DIRECT)
         chip(trackpadChip, "Trackpad", pointerMode == PointerMode.TRACKPAD)
-    }
-
-    private fun drawTrackpad(canvas: Canvas) {
-        paint.color = Color.argb(225, 18, 22, 21)
-        canvas.drawRoundRect(trackpadRect, 20f * density, 20f * density, paint)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 1.2f * density
-        paint.color = Color.argb(110, 139, 232, 190)
-        canvas.drawRoundRect(trackpadRect, 20f * density, 20f * density, paint)
-        paint.style = Paint.Style.FILL
-
-        textPaint.textAlign = Paint.Align.CENTER
-        textPaint.color = Color.argb(220, 235, 242, 239)
-        textPaint.textSize = 12f * density
-        canvas.drawText("TRACKPAD", trackpadRect.centerX(), trackpadRect.top + 25f * density, textPaint)
-        textPaint.color = Color.argb(155, 220, 228, 224)
-        textPaint.textSize = 10f * density
-        canvas.drawText("Move · tap to click · two-finger scroll", trackpadRect.centerX(), trackpadRect.top + 45f * density, textPaint)
-
-        paint.color = Color.argb(180, 33, 41, 38)
-        canvas.drawRoundRect(leftButtonRect, 12f * density, 12f * density, paint)
-        canvas.drawRoundRect(rightButtonRect, 12f * density, 12f * density, paint)
-        textPaint.color = Color.argb(210, 235, 242, 239)
-        textPaint.textSize = 10f * density
-        canvas.drawText("Left click", leftButtonRect.centerX(), leftButtonRect.centerY() - (textPaint.ascent() + textPaint.descent()) / 2f, textPaint)
-        canvas.drawText("Right click", rightButtonRect.centerX(), rightButtonRect.centerY() - (textPaint.ascent() + textPaint.descent()) / 2f, textPaint)
-    }
-
-    private fun drawLocalCursor(canvas: Canvas) {
-        val p = guestToView(cursorGuestX, cursorGuestY) ?: return
-        val x = p.first
-        val y = p.second
-        val s = 18f * density
-        val path = Path().apply {
-            moveTo(x, y)
-            lineTo(x, y + s)
-            lineTo(x + 5.2f * density, y + 12f * density)
-            lineTo(x + 9.2f * density, y + 20f * density)
-            lineTo(x + 12.5f * density, y + 18.2f * density)
-            lineTo(x + 8.5f * density, y + 10.7f * density)
-            lineTo(x + 15f * density, y + 10.5f * density)
-            close()
-        }
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 3f * density
-        paint.color = Color.argb(220, 0, 0, 0)
-        canvas.drawPath(path, paint)
-        paint.strokeWidth = 1.4f * density
-        paint.color = Color.WHITE
-        canvas.drawPath(path, paint)
-        paint.style = Paint.Style.FILL
     }
 
     private fun setMode(mode: PointerMode) {
@@ -440,7 +387,6 @@ class VncFramebufferView(context: Context) : View(context) {
         cursorGuestX = (cursorGuestX + dx / r.width() * fbWidth * sensitivity).roundToInt().coerceIn(0, (fbWidth - 1).coerceAtLeast(0))
         cursorGuestY = (cursorGuestY + dy / r.height() * fbHeight * sensitivity).roundToInt().coerceIn(0, (fbHeight - 1).coerceAtLeast(0))
         sendPointer(if (dragging) 1 else 0, cursorGuestX, cursorGuestY)
-        invalidate()
     }
 
     private fun scrollTrackpad(dy: Float) {
@@ -462,8 +408,6 @@ class VncFramebufferView(context: Context) : View(context) {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             if (directChip.contains(event.x, event.y)) { setMode(PointerMode.DIRECT); return true }
             if (trackpadChip.contains(event.x, event.y)) { setMode(PointerMode.TRACKPAD); return true }
-            if (pointerMode == PointerMode.TRACKPAD && leftButtonRect.contains(event.x, event.y)) { click(1); return true }
-            if (pointerMode == PointerMode.TRACKPAD && rightButtonRect.contains(event.x, event.y)) { click(4); return true }
 
             touchStartX = event.x
             touchStartY = event.y
@@ -480,7 +424,6 @@ class VncFramebufferView(context: Context) : View(context) {
                 cursorGuestX = p.first
                 cursorGuestY = p.second
                 sendPointer(0, cursorGuestX, cursorGuestY)
-                invalidate()
             }
             return true
         }
@@ -523,7 +466,6 @@ class VncFramebufferView(context: Context) : View(context) {
                         sendPointer(if (dragging) 1 else 0, cursorGuestX, cursorGuestY)
                         lastPointerSentMs = now
                     }
-                    invalidate()
                 }
                 lastTouchX = x
                 lastTouchY = y
@@ -538,7 +480,17 @@ class VncFramebufferView(context: Context) : View(context) {
                         cursorGuestX = p.first
                         cursorGuestY = p.second
                     }
-                    click(if (maxPointers >= 2) 4 else 1)
+                    if (maxPointers >= 2) {
+                        click(4)
+                    } else {
+                        val now = SystemClock.uptimeMillis()
+                        val isDouble = now - lastTapMs < 300 && hypot((event.x - lastTapX).toDouble(), (event.y - lastTapY).toDouble()) < 28f * density
+                        click(1)
+                        if (isDouble) click(1)
+                        lastTapMs = now
+                        lastTapX = event.x
+                        lastTapY = event.y
+                    }
                 }
                 dragging = false
                 return true
@@ -555,7 +507,6 @@ class VncFramebufferView(context: Context) : View(context) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_HOVER_MOVE -> {
                     sendPointer(0, cursorGuestX, cursorGuestY)
-                    invalidate()
                     return true
                 }
                 MotionEvent.ACTION_SCROLL -> {
