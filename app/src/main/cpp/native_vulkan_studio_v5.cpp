@@ -83,7 +83,7 @@ public:
         std::lock_guard<std::mutex> lock(bodyMutex_);
         Vec3 ro, rd; screenRay(nx, ny, ro, rd);
         float best = 1e9f; int bestIndex = -1;
-        for (int i = 0; i < activeBodies(); ++i) {
+        for (int i = 0; i < activeBodiesV5(); ++i) {
             const Body& b = bodies_[i]; Vec3 oc = ro - b.p;
             float qb = dot(oc, rd), c = dot(oc, oc) - b.r * b.r, disc = qb * qb - c;
             if (disc < 0) continue;
@@ -109,7 +109,7 @@ public:
         }
         grabPrevTarget_ = next; grabTarget_ = next; grabLastUpdate_ = now;
         if (!physics_.load()) {
-            Body& b = bodies_[grabbed_]; b.p = clampInside(next, b.r); b.v = {}; // kinematic placement when physics is paused
+            Body& b = bodies_[grabbed_]; b.p = clampInside(next, b.r); b.v = {};
         }
     }
 
@@ -138,6 +138,14 @@ private:
         return p;
     }
 
+    int activeBodiesV5() const {
+        const int q = quality_.load();
+        if (q < 12) return 0;
+        if (!stress_.load()) return 3;
+        const int extras = std::clamp(8 + (q * 40) / 100, 8, 48);
+        return 3 + extras;
+    }
+
     void configureBodies() { std::lock_guard<std::mutex> lock(bodyMutex_); configureBodiesLocked(); }
     void configureBodiesLocked() {
         if (bodies_.size() < 3) return;
@@ -149,7 +157,6 @@ private:
             Body& b = bodies_[bi]; b.r = r;
             b.p = {(float(gx) - 3.5f) * 1.20f, kFloorY + r + .08f * float(i % 3), (float(gz) - 3.5f) * 1.18f};
             b.v = {}; b.gummy = false; b.restitution = .31f + .04f * float(i % 3); b.friction = .42f;
-            // Stress scene is deliberately material-diverse without dozens of fake light emitters.
             b.material = (i % 11 == 0) ? 8 : ((i % 3 == 0) ? 7 : 6);
             float density = (b.material == 8 ? 4.5f : 1.35f); b.mass = std::max(.18f, 4.18879f * r * r * r * density);
         }
@@ -196,7 +203,7 @@ private:
     }
 
     void physicsStepV5(float dt) {
-        std::lock_guard<std::mutex> lock(bodyMutex_); int n=activeBodies(); if(n<=0)return;
+        std::lock_guard<std::mutex> lock(bodyMutex_); int n=activeBodiesV5(); if(n<=0)return;
         if(!physics_.load()) return;
         const int substeps=5;float h=std::min(dt,.024f)/float(substeps);
         for(int sub=0;sub<substeps;++sub){
@@ -243,13 +250,13 @@ private:
         put(0,{0,kFloorY,0},7.2f,1,7.2f,0,floorAs_);put(1,{0,0,0},1.15f,1,1.15f,1,cubeAs_);
         put(2,{0,2.15f,-7.2f},7.2f,3.15f,.08f,2,cubeAs_);put(3,{0,2.15f,7.2f},7.2f,3.15f,.08f,3,cubeAs_);
         put(4,{-7.2f,2.15f,0},.08f,3.15f,7.2f,4,cubeAs_);put(5,{7.2f,2.15f,0},.08f,3.15f,7.2f,5,cubeAs_);put(6,{0,5.30f,0},7.2f,.08f,7.2f,6,cubeAs_);
-        std::lock_guard<std::mutex> lock(bodyMutex_);int active=activeBodies();for(int i=0;i<kBodyCount;++i){const Body& b=bodies_[i];auto& ins=d[kV5StaticInstances+i];ins.transform=transform(b.p,b.r,b.r,b.r);ins.instanceCustomIndex=uint32_t(i)+kV5StaticInstances;ins.mask=i<active?0xff:0;ins.flags=VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;ins.accelerationStructureReference=sphereAs_.address;}
+        std::lock_guard<std::mutex> lock(bodyMutex_);int active=activeBodiesV5();for(int i=0;i<kBodyCount;++i){const Body& b=bodies_[i];auto& ins=d[kV5StaticInstances+i];ins.transform=transform(b.p,b.r,b.r,b.r);ins.instanceCustomIndex=uint32_t(i)+kV5StaticInstances;ins.mask=i<active?0xff:0;ins.flags=VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;ins.accelerationStructureReference=sphereAs_.address;}
     }
 
     void cmdUpdateTlasV5(VkCommandBuffer cmd) {
         updateTlasInstancesV5();VkAccelerationStructureGeometryInstancesDataKHR id{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};id.data.deviceAddress=addr(instanceBuffer_.buffer);tlasGeometry_.geometry.instances=id;
         VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};info.type=VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;info.flags=VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR|VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;info.mode=tlasBuilt_?VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR:VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;info.srcAccelerationStructure=tlasBuilt_?tlas_.handle:VK_NULL_HANDLE;info.dstAccelerationStructure=tlas_.handle;info.geometryCount=1;info.pGeometries=&tlasGeometry_;info.scratchData.deviceAddress=addr(tlasScratch_.buffer);
-        VkAccelerationStructureBuildRangeInfoKHR range{};range.primitiveCount=kV5MaxInstances;const VkAccelerationStructureBuildRangeInfoKHR* pr=&range;fpCmdBuildAS_(cmd,1,&info,&pr);tlasBuilt_=true;
+        VkAccelerationStructureBuildRangeInfoKHR range{};range.primitiveCount=kV5StaticInstances+uint32_t(activeBodiesV5());const VkAccelerationStructureBuildRangeInfoKHR* pr=&range;fpCmdBuildAS_(cmd,1,&info,&pr);tlasBuilt_=true;
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;barrier.dstAccessMask=VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,1,&barrier,0,nullptr,0,nullptr);
     }
 
@@ -272,8 +279,8 @@ private:
             setStatus("Vulkan Studio v5 initializing…");initVulkan();if(rtSupported_)rebuildTlasV5();replacePipelineV5();logV5("bright room active · no black void · bounded physics");
             auto last=Clock::now(),stat=last,start=last,telemetry=last;uint32_t frames=0;
             while(running_){auto now=Clock::now();float dt=std::chrono::duration<float>(now-last).count();last=now;physicsStepV5(dt);updateBodyGpu();float time=std::chrono::duration<float>(now-start).count();drawV5(time);++frames;
-                float e=std::chrono::duration<float>(now-stat).count();if(e>=.5f){float fps=frames/e;bool rt=rtSupported_&&requestedRt_.load()&&quality_.load()>=45;std::ostringstream o;o.setf(std::ios::fixed);o.precision(1);o<<"Vulkan Studio v5 · "<<gpuName_<<" · "<<fps<<" FPS · GPU "<<gpuMs_<<" ms\n";o<<"Q"<<quality_.load()<<" · "<<(stress_.load()?"STRESS":"QUALITY")<<" · Physics "<<(physics_.load()?"ON":"OFF")<<" · RT "<<(rt?"RAY QUERY":"OFF")<<"\n";o<<"room 14.2m · bodies "<<activeBodies()<<" · 1 shadow ray · selective 1-bounce";setStatus(o.str());frames=0;stat=now;}
-                if(std::chrono::duration<float>(now-telemetry).count()>=2.0f){std::ostringstream l;l.setf(std::ios::fixed);l.precision(2);l<<"telemetry · GPU "<<gpuMs_<<" ms · bodies "<<activeBodies()<<" · RT "<<((rtSupported_&&requestedRt_.load())?"on":"off")<<" · target 120Hz";logV5(l.str());telemetry=now;}
+                float e=std::chrono::duration<float>(now-stat).count();if(e>=.5f){float fps=frames/e;bool rt=rtSupported_&&requestedRt_.load()&&quality_.load()>=45;std::ostringstream o;o.setf(std::ios::fixed);o.precision(1);o<<"Vulkan Studio v5 · "<<gpuName_<<" · "<<fps<<" FPS · GPU "<<gpuMs_<<" ms\n";o<<"Q"<<quality_.load()<<" · "<<(stress_.load()?"STRESS":"QUALITY")<<" · Physics "<<(physics_.load()?"ON":"OFF")<<" · RT "<<(rt?"RAY QUERY":"OFF")<<"\n";o<<"room 14.2m · bodies "<<activeBodiesV5()<<" · 1 shadow ray · selective 1-bounce";setStatus(o.str());frames=0;stat=now;}
+                if(std::chrono::duration<float>(now-telemetry).count()>=2.0f){std::ostringstream l;l.setf(std::ios::fixed);l.precision(2);l<<"telemetry · GPU "<<gpuMs_<<" ms · bodies "<<activeBodiesV5()<<" · RT "<<((rtSupported_&&requestedRt_.load())?"on":"off")<<" · target 120Hz";logV5(l.str());telemetry=now;}
             }
         }catch(const std::exception& e){setStatus(std::string("ERROR: Vulkan Studio v5: ")+e.what());logV5(std::string("ERROR: ")+e.what());}
         cleanup();
