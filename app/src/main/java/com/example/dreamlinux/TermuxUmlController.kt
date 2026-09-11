@@ -20,7 +20,7 @@ class TermuxUmlController(private val context: Context) {
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = 5901
-        const val REQUIRED_PROTOCOL = 17
+        const val REQUIRED_PROTOCOL = 18
 
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
@@ -76,8 +76,8 @@ class TermuxUmlController(private val context: Context) {
               fi
 
               export VESSEL_POC_DIR=~/vessel-poc-runtime
-              echo "[vessel-launch] exec runtime daemon protocol 17"
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v17.py
+              echo "[vessel-launch] exec runtime daemon protocol 18"
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v18.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
@@ -107,12 +107,8 @@ class TermuxUmlController(private val context: Context) {
     }
 
     suspend fun ensureDaemon(): JSONObject = withContext(Dispatchers.IO) {
-        val existing = runCatching {
-            requestBlocking(JSONObject().put("action", "status"), 900)
-        }.getOrNull()
-        if (existing != null && existing.optInt("protocolVersion", 0) >= REQUIRED_PROTOCOL) {
-            return@withContext existing
-        }
+        val existing = runCatching { requestBlocking(JSONObject().put("action", "status"), 900) }.getOrNull()
+        if (existing != null && existing.optInt("protocolVersion", 0) >= REQUIRED_PROTOCOL) return@withContext existing
 
         launchDaemon()
         var last: Throwable? = null
@@ -120,17 +116,10 @@ class TermuxUmlController(private val context: Context) {
             delay(200)
             try {
                 val status = requestBlocking(JSONObject().put("action", "status"), 900)
-                if (status.optInt("protocolVersion", 0) >= REQUIRED_PROTOCOL) {
-                    return@withContext status
-                }
-            } catch (t: Throwable) {
-                last = t
-            }
+                if (status.optInt("protocolVersion", 0) >= REQUIRED_PROTOCOL) return@withContext status
+            } catch (t: Throwable) { last = t }
         }
-        throw IllegalStateException(
-            "Vessel runtime daemon did not start. In Termux run: cat ~/vessel-daemon.log",
-            last
-        )
+        throw IllegalStateException("Vessel runtime daemon did not start. In Termux run: cat ~/vessel-daemon.log", last)
     }
 
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
@@ -138,33 +127,21 @@ class TermuxUmlController(private val context: Context) {
     }
 
     suspend fun start(): JSONObject = withContext(Dispatchers.IO) {
-        ensureDaemon()
-        requestBlocking(JSONObject().put("action", "start").put("timeout", 80), 95_000)
+        ensureDaemon(); requestBlocking(JSONObject().put("action", "start").put("timeout", 80), 95_000)
     }
 
     suspend fun stop(): JSONObject = withContext(Dispatchers.IO) {
         runCatching { requestBlocking(JSONObject().put("action", "stop"), 12_000) }
-            .getOrElse {
-                JSONObject().put("ok", true).put("running", false)
-                    .put("guestReady", false).put("desktopReady", false)
-            }
+            .getOrElse { JSONObject().put("ok", true).put("running", false).put("guestReady", false).put("desktopReady", false) }
     }
 
     suspend fun startDesktop(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) {
         ensureDaemon()
-        requestBlocking(
-            JSONObject().put("action", "desktop")
-                .put("width", width).put("height", height).put("dpi", dpi),
-            22 * 60 * 1_000
-        )
+        requestBlocking(JSONObject().put("action", "desktop").put("width", width).put("height", height).put("dpi", dpi), 22 * 60 * 1_000)
     }
 
     suspend fun guest(command: String, timeoutSeconds: Int = 45): JSONObject = withContext(Dispatchers.IO) {
         ensureDaemon()
-        requestBlocking(
-            JSONObject().put("action", "guest")
-                .put("command", command).put("timeout", timeoutSeconds),
-            (timeoutSeconds + 10) * 1_000
-        )
+        requestBlocking(JSONObject().put("action", "guest").put("command", command).put("timeout", timeoutSeconds), (timeoutSeconds + 10) * 1_000)
     }
 }
