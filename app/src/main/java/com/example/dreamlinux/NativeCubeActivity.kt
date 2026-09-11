@@ -124,7 +124,7 @@ class NativeCubeActivity : Activity() {
             System.loadLibrary("vessel_vulkan")
             true
         } catch (t: Throwable) {
-            showFatal("Could not load Vulkan native library: ${t.message ?: t.javaClass.simpleName}")
+            showFatal("Could not load Vulkan native library: ${it.message ?: it.javaClass.simpleName}")
             false
         }
 
@@ -387,7 +387,7 @@ class NativeCubeActivity : Activity() {
         }
         val scroll = ScrollView(this).apply {
             isFillViewport = true
-            addView(logs, ScrollView.LayoutParams(-1, -2))
+            addView(logs, FrameLayout.LayoutParams(-1, -2))
         }
         val actions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
