@@ -45,7 +45,8 @@ float rayEps(int objectId){if(objectId>=7){int bi=objectId-7;return max(.003,bod
 bool occluded(vec3 P,vec3 N,vec3 target,int source){
     vec3 d=target-P;float L=length(d);if(L<.03)return false;d/=L;
     rayQueryEXT rq;rayQueryInitializeEXT(rq,topLevelAS,gl_RayFlagsTerminateOnFirstHitEXT|gl_RayFlagsOpaqueEXT,0xff,P+N*rayEps(source),rayEps(source),d,max(.01,L-.04));
-    while(rayQueryProceedEXT(rq)){}
+    // Qualcomm explicitly recommends avoiding a traversal loop for terminate-on-first-hit opaque rays.
+    rayQueryProceedEXT(rq);
     if(rayQueryGetIntersectionTypeEXT(rq,true)==gl_RayQueryCommittedIntersectionNoneEXT)return false;
     int hit=int(rayQueryGetIntersectionInstanceCustomIndexEXT(rq,true));return hit!=source;
 }
