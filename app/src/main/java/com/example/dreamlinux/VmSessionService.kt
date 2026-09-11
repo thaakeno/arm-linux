@@ -58,6 +58,31 @@ class VmSessionService : Service() {
     private var requestedHeight = 1080
     private var requestedDpi = 144
 
+    private fun shortError(raw: String): String {
+        val e = raw.trim()
+        if (e.isBlank()) return ""
+        return when {
+            e.contains("Guest command transport timed out", ignoreCase = true) ||
+                e.contains("completion marker", ignoreCase = true) ->
+                "Guest command transport stalled after Debian boot"
+            e.contains("Failed to lock", ignoreCase = true) || e.contains("disk is locked", ignoreCase = true) ->
+                "Debian disk is already in use by another UML process"
+            e.contains("TigerVNC failed", ignoreCase = true) -> "TigerVNC failed to start"
+            e.contains("Mesa Venus", ignoreCase = true) -> "Mesa Venus is missing or failed to initialize"
+            e.contains("runtime daemon did not start", ignoreCase = true) -> "Vessel runtime daemon failed to start"
+            e.contains("UML exited during boot", ignoreCase = true) -> "Debian UML exited during boot"
+            e.contains("did not reach a shell", ignoreCase = true) -> "Debian did not reach a shell before timeout"
+            else -> e.lineSequence().firstOrNull()?.take(180) ?: "Runtime failed"
+        }
+    }
+
+    private fun withDetailedErrorLog(base: String, rawError: String): String {
+        if (rawError.isBlank()) return base.takeLast(200_000)
+        val marker = "[Vessel error details]"
+        if (base.contains(marker) && base.contains(rawError.take(120))) return base.takeLast(200_000)
+        return (base.trimEnd() + "\n\n$marker\n" + rawError.trim()).takeLast(200_000)
+    }
+
     override fun onCreate() {
         super.onCreate()
         active = this
@@ -129,10 +154,12 @@ class VmSessionService : Service() {
         val running = obj.optBoolean("running", false)
         val guest = obj.optBoolean("guestReady", false)
         val desktop = obj.optBoolean("desktopReady", false)
-        val error = obj.optString("error").ifBlank { obj.optString("lastError") }
+        val rawError = obj.optString("error").ifBlank { obj.optString("lastError") }
+        val error = shortError(rawError)
         val phase = obj.optString("progressPhase", state.value.progressPhase)
         val percent = obj.optInt("progressPercent", state.value.progressPercent)
-        val detail = obj.optString("progressDetail", state.value.progressDetail).ifBlank { state.value.progressDetail }
+        val rawDetail = obj.optString("progressDetail", state.value.progressDetail).ifBlank { state.value.progressDetail }
+        val detail = if (rawError.isNotBlank() && phase == "error") error else rawDetail
         val message = when {
             error.isNotBlank() -> error
             desktop -> "KDE Plasma is live"
@@ -142,12 +169,13 @@ class VmSessionService : Service() {
             running -> detail.ifBlank { "Booting Debian ARM64" }
             else -> "Runtime ready"
         }
+        val rawLog = obj.optString("logTail", state.value.console)
         state.value = state.value.copy(
             connected = uml.isTermuxInstalled() && uml.hasRunCommandPermission(),
             running = running,
             debianStarting = running && !guest,
             kdeInstalled = desktop,
-            kdeInstalling = !desktop && running && phase.startsWith("desktop") || phase == "vnc_start",
+            kdeInstalling = (!desktop && running && phase.startsWith("desktop")) || phase == "vnc_start",
             kdeStage = when {
                 desktop -> "KDE Plasma live · VNC ${TermuxUmlController.VNC_PORT}"
                 running && (phase.startsWith("desktop") || phase == "vnc_start") -> detail
@@ -157,7 +185,7 @@ class VmSessionService : Service() {
             internetReady = guest,
             internetStage = if (guest) "NAT via umnet/passt" else "offline",
             vmRoot = obj.optString("runtimeDir", state.value.vmRoot),
-            console = obj.optString("logTail", state.value.console).takeLast(200_000),
+            console = withDetailedErrorLog(rawLog, rawError),
             progressPhase = phase,
             progressPercent = percent,
             progressDetail = detail,
@@ -181,11 +209,14 @@ class VmSessionService : Service() {
         try {
             applyRuntime(uml.status())
         } catch (t: Throwable) {
-            // A transient control timeout must not invent a stopped VM. Preserve
-            // the last known runtime state until the daemon actually answers.
             if (!silent) {
-                val msg = t.message ?: "Runtime status unavailable"
-                state.value = state.value.copy(message = msg, lastError = msg)
+                val raw = t.message ?: "Runtime status unavailable"
+                val msg = shortError(raw)
+                state.value = state.value.copy(
+                    message = msg,
+                    lastError = msg,
+                    console = withDetailedErrorLog(state.value.console, raw)
+                )
             }
         }
     }
@@ -261,17 +292,18 @@ class VmSessionService : Service() {
             try {
                 block()
             } catch (t: Throwable) {
-                val msg = t.message ?: t.javaClass.simpleName
+                val raw = t.message ?: t.javaClass.simpleName
+                val msg = shortError(raw)
                 state.value = state.value.copy(
                     message = msg,
                     lastError = msg,
                     debianStarting = false,
                     kdeInstalling = false,
+                    console = withDetailedErrorLog(state.value.console, raw),
                     debianTerminal = (state.value.debianTerminal + "\nERROR: $msg\n").takeLast(256_000)
                 )
             } finally {
                 state.value = state.value.copy(busy = false)
-                // Do not erase a useful error with a generic "Runtime ready".
                 if (state.value.lastError.isBlank()) refresh(silent = true)
             }
         }
