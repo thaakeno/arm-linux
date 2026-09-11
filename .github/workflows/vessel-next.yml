@@ -45,6 +45,7 @@ jobs:
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v11.py
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v12.py
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v13.py
+          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v14.py
           python3 -m py_compile tools/venus_poc/vessel_acceptance.py
           python3 -m py_compile tools/venus_poc/host_relay_direct.py
           python3 -m py_compile tools/venus_poc/guest_relay_direct.py
@@ -52,12 +53,13 @@ jobs:
           bash -n tools/venus_poc/build_guest_mesa_venus_26_2.sh
           grep -q 'ENABLE_X11' tools/venus_poc/run_venus_uml.sh
           grep -q 'render-server-worker=thread' tools/venus_poc/build_virglrenderer_android_thread.sh
-          grep -q 'PROTOCOL_VERSION = 13' tools/venus_poc/vessel_runtime_daemon_v13.py
-          grep -q 'rfbunixpath' tools/venus_poc/vessel_runtime_daemon_v13.py
-          grep -q 'rfbport -1' tools/venus_poc/vessel_runtime_daemon_v13.py
-          grep -q 'socket.AF_UNIX' tools/venus_poc/vessel_runtime_daemon_v13.py
-          grep -q 'REQUIRED_PROTOCOL = 13' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -q 'vessel_runtime_daemon_v13.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -q 'PROTOCOL_VERSION = 14' tools/venus_poc/vessel_runtime_daemon_v14.py
+          grep -q 'vessel_vnc_reverse_persistent.py' tools/venus_poc/vessel_runtime_daemon_v14.py
+          grep -q 'KWIN_COMPOSE=N' tools/venus_poc/vessel_runtime_daemon_v14.py
+          grep -q 'REQUIRED_PROTOCOL = 14' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -q 'vessel_runtime_daemon_v14.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -q 'out.writeInt(5)' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -q 'decodeHextile' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           grep -q 'progressDetail' tools/venus_poc/vessel_runtime_daemon.py
           grep -q 'serve_connection' tools/venus_poc/vessel_runtime_daemon.py
           grep -q 'Virtio-GPU Venus' tools/venus_poc/vessel_acceptance.py
