@@ -26,7 +26,24 @@ git -C "$SRC" reset --hard "$UPSTREAM_COMMIT"
 git -C "$SRC" clean -ffd
 
 # Keep all of Vessel's current Venus shared-memory transport changes.
-python3 "$ROOT/tools/venus_poc/apply_umshm.py" "$SRC"
+# apply_umshm.py historically used a raw triple-quoted string for the
+# phys_mapping() match. On a clean checkout that leaves the \t sequences
+# literal, so the transform aborts even though the upstream function is
+# present with real tab indentation. Build a tiny compatibility copy for this
+# clean-kernel CI path and make that one string a normal Python string.
+SMP_UMSHM_PATCHER="$WORK/apply_umshm_smp.py"
+python3 - "$ROOT/tools/venus_poc/apply_umshm.py" "$SMP_UMSHM_PATCHER" <<'PY'
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1]).read_text()
+needle = "old_phys_mapping = r'''"
+if src.count(needle) != 1:
+    raise SystemExit(f"expected exactly one raw phys_mapping matcher, found {src.count(needle)}")
+Path(sys.argv[2]).write_text(src.replace(needle, "old_phys_mapping = '''", 1))
+PY
+
+python3 "$SMP_UMSHM_PATCHER" "$SRC"
 python3 "$ROOT/tools/venus_poc/fix_umshm_nonblock.py" "$SRC"
 python3 "$ROOT/tools/venus_poc/fix_umshm_ptrace_fds.py" "$SRC"
 
