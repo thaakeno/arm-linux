@@ -20,7 +20,7 @@ class TermuxUmlController(private val context: Context) {
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = 5901
-        const val REQUIRED_PROTOCOL = 21
+        const val REQUIRED_PROTOCOL = 22
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
         private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
@@ -40,7 +40,7 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) starting protocol 21"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) starting protocol 22"
               set -e
               cd ~/venus-poc
               git fetch origin app/vessel-final
@@ -57,8 +57,9 @@ class TermuxUmlController(private val context: Context) {
                 kill -9 "${'$'}OLD_PID" 2>/dev/null || true
               fi
               export VESSEL_POC_DIR=~/vessel-poc-runtime
-              export VESSEL_MEM_MB=4096
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v21.py
+              export VESSEL_MEM_MB=8192
+              export ENABLE_X11=0
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v22.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent=Intent().apply{setClassName(TERMUX_PACKAGE,"com.termux.app.RunCommandService");action=ACTION_RUN_COMMAND;putExtra(EXTRA_PATH,TERMUX_BASH);putExtra(EXTRA_ARGUMENTS,arrayOf("-lc",command));putExtra(EXTRA_WORKDIR,TERMUX_HOME);putExtra(EXTRA_BACKGROUND,true)}
@@ -85,4 +86,5 @@ class TermuxUmlController(private val context: Context) {
     suspend fun stop():JSONObject=withContext(Dispatchers.IO){runCatching{requestBlocking(JSONObject().put("action","stop"),12_000)}.getOrElse{JSONObject().put("ok",true).put("running",false).put("guestReady",false).put("desktopReady",false)}}
     suspend fun startDesktop(width:Int,height:Int,dpi:Int):JSONObject=withContext(Dispatchers.IO){ensureDaemon();requireOk("Start Plasma",requestBlocking(JSONObject().put("action","desktop").put("width",width).put("height",height).put("dpi",dpi),22*60*1_000))}
     suspend fun guest(command:String,timeoutSeconds:Int=45):JSONObject=withContext(Dispatchers.IO){ensureDaemon();requireOk("Guest command",requestBlocking(JSONObject().put("action","guest").put("command",command).put("timeout",timeoutSeconds),(timeoutSeconds+10)*1_000))}
+    suspend fun desktopAction(name:String):JSONObject=withContext(Dispatchers.IO){ensureDaemon();requireOk("Desktop action",requestBlocking(JSONObject().put("action","desktopAction").put("name",name),12_000))}
 }
