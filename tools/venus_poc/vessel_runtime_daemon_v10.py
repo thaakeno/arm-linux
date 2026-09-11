@@ -38,6 +38,11 @@ v9.READY = READY
 # shell cannot terminate apt, dpkg, Plasma setup, etc.
 AGENT_SOURCE = r'''import socket,struct,subprocess
 s=globals()["s"]
+# socket.create_connection(..., 10) uses 10 seconds as an operation timeout.
+# The connection is persistent after bootstrap, so keeping that timeout makes
+# an otherwise healthy idle agent throw TimeoutError after ~10 seconds.  Switch
+# back to blocking mode before entering the long-lived command loop.
+s.settimeout(None)
 
 def rx(n):
     out=bytearray()
@@ -106,6 +111,10 @@ def ensure_agent_v10(self: core.Runtime) -> None:
         "h=s.recv(4,socket.MSG_WAITALL);"
         "n=struct.unpack('!I',h)[0];"
         "src=s.recv(n,socket.MSG_WAITALL);"
+        # create_connection's timeout is inherited by the connected socket.
+        # It is only for the bootstrap handshake; the command channel itself
+        # must be allowed to remain idle indefinitely between UI actions.
+        "s.settimeout(None);"
         "exec(compile(src,'<vessel-agent>','exec'),{'s':s})"
     )
     quoted = shlex.quote(bootstrap_py)
@@ -300,7 +309,7 @@ rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
             time.sleep(0.4)
         else:
             tail = guest_retry(self, "tail -n 120 /tmp/vessel-vnc.log 2>/dev/null || true", 8.0)
-            raise RuntimeError("TigerVNC failed to start: " + tail[-6000:])
+            raise RuntimeError("KDE/TigerVNC package installation exceeded 15 minutes: " + tail[-7000:])
 
         if self.vnc_proxy is None:
             self.vnc_proxy = core.ReverseVncProxy(self)
