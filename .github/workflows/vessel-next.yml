@@ -97,8 +97,11 @@ jobs:
                   'target_link_libraries(vessel_vulkan PRIVATE android log vulkan)',
                   'native_studio_v5_rt.frag',
               ],
+              'app/src/main/cpp/native_vulkan_studio_v3.cpp': [
+                  'VK_KHR_RAY_QUERY_EXTENSION_NAME', 'vkCmdBuildAccelerationStructuresKHR',
+              ],
               'app/src/main/cpp/native_vulkan_studio_v5.cpp': [
-                  'VK_KHR_RAY_QUERY_EXTENSION_NAME', 'cmdUpdateTlasV5',
+                  'native_studio_v5_rt_frag_spv', 'rebuildTlasV5', 'cmdUpdateTlasV5',
                   'physicsStepV5', 'kRoomHalf', 'replacePipelineV5',
               ],
               'app/src/main/cpp/shaders/native_studio_v5_rt.frag': [
