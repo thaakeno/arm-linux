@@ -71,7 +71,7 @@ jobs:
                   'REQUIRED_PROTOCOL = 21', 'vessel_runtime_daemon_v21.py',
               ],
               'app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt': [
-                  'PointerMode.TRACKPAD', 'getHistoricalX', 'showKeyboard',
+                  'TRACKPAD', 'getHistoricalX', 'showKeyboard',
               ],
               'app/src/main/java/com/example/dreamlinux/VesselActivity.kt': [
                   'FullscreenDesktop', 'Vulkan 3D test',
