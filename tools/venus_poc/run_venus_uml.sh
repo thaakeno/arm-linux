@@ -157,7 +157,10 @@ if [ "$ENABLE_X11" = "1" ]; then
   pkill -f "socat TCP-LISTEN:${X11_TCP_PORT}.*X${X11_DISPLAY_NUM}" 2>/dev/null || true
   rm -f "$X11_UNIX"
 
-  termux-x11 ":$X11_DISPLAY_NUM" >"$HOME/termux-x11.log" 2>&1 &
+  # Some Android devices render a black surface/cursor with the default
+  # Termux:X11 drawing path. Legacy drawing is slower but much more compatible
+  # and makes this direct-X11 validation path visibly reliable.
+  termux-x11 ":$X11_DISPLAY_NUM" -legacy-drawing >"$HOME/termux-x11.log" 2>&1 &
   TERMUX_X11_PID=$!
   for _ in $(seq 1 50); do
     [ -S "$X11_UNIX" ] && break
@@ -242,6 +245,7 @@ cd "$UML_DIR"
   ./linux-umshm \
     mem=2048M \
     ncpus="$VESSEL_VCPUS" \
+    seccomp=on \
     ubd0=debian-docker.ext4 \
     root=/dev/ubda \
     rw \
