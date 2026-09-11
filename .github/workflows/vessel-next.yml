@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
 
       - name: JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: temurin
@@ -54,6 +54,7 @@ jobs:
                    tools/venus_poc/vessel_runtime_daemon_v19.py \
                    tools/venus_poc/vessel_runtime_daemon_v20.py \
                    tools/venus_poc/vessel_runtime_daemon_v21.py \
+                   tools/venus_poc/vessel_runtime_daemon_v22.py \
                    tools/venus_poc/vessel_acceptance.py \
                    tools/venus_poc/host_relay_direct.py \
                    tools/venus_poc/guest_relay_direct.py; do
@@ -64,14 +65,14 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           checks = {
-              'tools/venus_poc/vessel_runtime_daemon_v21.py': [
-                  'PROTOCOL_VERSION = 21', 'prepare_venus_v21', 'VESSEL_MEM_MB',
+              'tools/venus_poc/vessel_runtime_daemon_v22.py': [
+                  'PROTOCOL_VERSION = 22', 'network_v22', 'VESSEL_MEM_MB', 'FrameRate 60',
               ],
               'app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt': [
-                  'REQUIRED_PROTOCOL = 21', 'vessel_runtime_daemon_v21.py',
+                  'REQUIRED_PROTOCOL = 22', 'vessel_runtime_daemon_v22.py', 'VESSEL_MEM_MB=8192',
               ],
               'app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt': [
-                  'TRACKPAD', 'getHistoricalX', 'showKeyboard',
+                  'TRACKPAD', 'getHistoricalX', 'showKeyboard', 'out.flush()',
               ],
               'app/src/main/java/com/example/dreamlinux/VesselActivity.kt': [
                   'FullscreenDesktop', 'Vulkan 3D test',
