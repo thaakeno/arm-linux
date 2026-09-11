@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Protocol-19 Vessel runtime.
 
-Hardens desktop package detection/installation and the embedded TigerVNC X11
-lifecycle. Existing Plasma packages are authoritative; transient command-channel
-hiccups never trigger a second install. X server startup is verified from durable
-socket/process state instead of a fragile one-shot stdout marker.
+Hardens boot-time Venus control reconnects, desktop package detection/installation,
+and the embedded TigerVNC X11 lifecycle. Existing Plasma packages are authoritative;
+transient command-channel hiccups are retried without surfacing a false fatal error,
+and optional TigerVNC tuning is capability-detected before launch.
 """
 from __future__ import annotations
 
+import base64
+import shlex
 import time
 
 import vessel_runtime_daemon_v18 as v18
@@ -25,6 +27,74 @@ READY_CMD = (
     "command -v kwin_x11 >/dev/null 2>&1 && "
     "command -v dbus-run-session >/dev/null 2>&1"
 )
+
+
+def prepare_venus_v19(self: core.Runtime) -> None:
+    """Prepare the already-proven Venus guest path without false rc=-15 failures.
+
+    The base runtime marks progress at 40% immediately before this stage. Its old
+    implementation used the raw protocol-9 socket command path, so a disposable
+    guest-agent SIGTERM/reconnect could escape through the top-level RPC as a red
+    Runtime error even though Debian stayed alive and the next agent succeeded.
+    Protocol 19 makes every short/idempotent Venus setup command reconnectable.
+    """
+    self.set_progress("venus", 40, "Preparing Mesa Venus relay")
+    relay_source = core.GUEST_RELAY_SOURCE
+    if not relay_source.exists():
+        raise RuntimeError(f"missing guest relay source: {relay_source}")
+
+    payload = base64.b64encode(relay_source.read_bytes()).decode()
+    v11.resilient_guest(
+        self,
+        f"printf '%s' {shlex.quote(payload)} | base64 -d > /root/guest_relay_direct.py",
+        15.0,
+        attempts=20,
+    )
+    check = v11.resilient_guest(
+        self,
+        "test -s /opt/mesa-venus-26.2.2/lib/aarch64-linux-gnu/libvulkan_virtio.so && "
+        "test -f /root/virtio-wsi-test.json && echo VENUS_READY",
+        10.0,
+        attempts=20,
+    )
+    if "VENUS_READY" not in check:
+        raise RuntimeError("Mesa Venus 26.2.2 is not installed in this guest image")
+
+    v11.resilient_guest(
+        self,
+        "pkill -f '[g]uest_relay_direct.py' 2>/dev/null || true; "
+        "rm -f /tmp/.venus_test /tmp/vessel-guest-relay.log; "
+        "setsid -f python3 /root/guest_relay_direct.py --host 10.0.2.2 --port 5002 --unix /tmp/.venus_test "
+        ">/tmp/vessel-guest-relay.log 2>&1 </dev/null; true",
+        10.0,
+        attempts=20,
+    )
+
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        out = v11.resilient_guest(
+            self,
+            "if [ -S /tmp/.venus_test ]; then echo RELAY_READY; else echo RELAY_WAIT; fi",
+            5.0,
+            attempts=12,
+        )
+        if "RELAY_READY" in out:
+            self.last_error = ""
+            self.set_progress("venus", 55, "Venus relay ready")
+            return
+        time.sleep(0.2)
+
+    tail = ""
+    try:
+        tail = v11.resilient_guest(
+            self,
+            "tail -n 120 /tmp/vessel-guest-relay.log 2>/dev/null || true",
+            8.0,
+            attempts=8,
+        )
+    except Exception:
+        pass
+    raise RuntimeError("Venus guest relay did not create /tmp/.venus_test" + (": " + tail[-5000:] if tail else ""))
 
 
 def desktop_packages_ready(self: core.Runtime) -> bool:
@@ -107,8 +177,6 @@ true
 
 def ensure_desktop_packages_v19(self: core.Runtime) -> None:
     if desktop_packages_ready(self):
-        # A stale RUNNING file from an interrupted first install must never make
-        # a later boot think package installation is still in progress.
         try:
             v11.resilient_guest(
                 self,
@@ -169,12 +237,12 @@ def _xserver_ready_v19(self: core.Runtime) -> bool:
 
 
 def start_xtigervnc_v19(self: core.Runtime, width: int, height: int, dpi: int) -> None:
-    """Start Xtigervnc idempotently and diagnose the real failure in one pass.
+    """Start Xtigervnc idempotently and report the actual server failure.
 
-    Protocol 18 launched with `setsid -f` and then ran a separate readiness
-    command that exited 1. On a slow/restarting UML that rc=1 escaped as a fatal
-    GuestCommandError even when the X server was merely still coming up. This
-    version uses durable pid/status/socket files and an always-successful waiter.
+    TigerVNC parameters are not stable across distro builds. In particular the
+    Debian 12 / TigerVNC 1.12.0 binary on the target device rejects DeferUpdate
+    even though older TigerVNC manuals documented it. Optional tuning is therefore
+    added only when the installed server advertises that parameter.
     """
     self.set_progress("vnc_start", 86, "Starting embedded X server")
 
@@ -200,11 +268,15 @@ true'''
 
     launcher = f'''cat > /tmp/vessel-start-Xtigervnc.sh <<'VSL_X'
 #!/bin/sh
+set --
+if Xtigervnc -help 2>&1 | grep -qiE '(^|[[:space:]])-?DeferUpdate([[:space:]=]|$)'; then
+  set -- "$@" -DeferUpdate 8
+fi
 exec Xtigervnc :1 \\
   -geometry {width}x{height} -depth 24 -dpi {dpi} \\
   -rfbport -1 -rfbunixpath {VNC_UNIX} -rfbunixmode 0600 \\
   -SecurityTypes None -AlwaysShared -AcceptPointerEvents=1 -AcceptKeyEvents=1 \\
-  -DeferUpdate=8
+  "$@"
 VSL_X
 chmod 700 /tmp/vessel-start-Xtigervnc.sh
 setsid -f sh -c '/tmp/vessel-start-Xtigervnc.sh > /tmp/vessel-Xtigervnc.log 2>&1; rc=$?; printf "%s\\n" "$rc" > /tmp/vessel-Xtigervnc.status' </dev/null >/dev/null 2>&1
@@ -212,9 +284,6 @@ printf 'XSERVER_START_REQUESTED\\n'
 true'''
     v11.resilient_guest(self, launcher, 10.0, attempts=8)
 
-    # One waiter, one guest context, zero rc=1 readiness probes. If Xtigervnc
-    # exits, its log is returned in the same successful RPC response so Android
-    # gets the actual cause instead of "guest command failed rc=1".
     waiter = f'''i=0
 while [ "$i" -lt 120 ]; do
   if [ -S {VNC_UNIX} ] && pgrep -f '[X]tigervnc.*:1' >/dev/null 2>&1; then
@@ -234,6 +303,7 @@ tail -n 120 /tmp/vessel-Xtigervnc.log 2>/dev/null || true
 exit 0'''
     out = v11.resilient_guest(self, waiter, 18.0, attempts=4)
     if "XSERVER_READY" in out:
+        self.last_error = ""
         self.append("\n[vessel-desktop] TigerVNC X server ready\n")
         return
 
@@ -251,7 +321,8 @@ exit 0'''
     raise RuntimeError("TigerVNC X server failed to become ready: " + detail)
 
 
-# Patch every dynamic call site used by the protocol-18 desktop implementation.
+# Patch every dynamic call site used by the imported protocol stack.
+core.Runtime._prepare_venus_guest = prepare_venus_v19
 v12._ensure_desktop_packages = ensure_desktop_packages_v19
 v11.v10._launch_package_install = launch_installer_v19
 v18.start_xtigervnc_v18 = start_xtigervnc_v19
