@@ -24,8 +24,8 @@ PROTOCOL_VERSION = 21
 core.PROTOCOL_VERSION = PROTOCOL_VERSION
 
 
-# Keep the proven runner, but give the daily desktop enough memory.  The generated
-# copy lives outside the checkout, so updating the branch never dirties the tree.
+# Keep the proven runner, but give the daily desktop enough memory. The generated
+# copy lives in a Termux-owned cache directory, never Android's global /tmp.
 def _install_runner_v21() -> None:
     original = pathlib.Path(core.RUNNER)
     text = original.read_text()
@@ -33,9 +33,13 @@ def _install_runner_v21() -> None:
     replacement = "    mem=\"${VESSEL_MEM_MB:-4096}M\" \\\n"
     if needle not in text:
         raise RuntimeError("Vessel runner memory argument changed unexpectedly")
-    target = pathlib.Path("/tmp/vessel-run-venus-v21.sh")
-    target.write_text(text.replace(needle, replacement, 1))
-    target.chmod(0o700)
+    cache_dir = pathlib.Path.home() / ".cache" / "vessel"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / "vessel-run-venus-v21.sh"
+    tmp_target = cache_dir / "vessel-run-venus-v21.sh.tmp"
+    tmp_target.write_text(text.replace(needle, replacement, 1))
+    tmp_target.chmod(0o700)
+    tmp_target.replace(target)
     core.RUNNER = target
 
 
@@ -46,9 +50,9 @@ def prepare_venus_v21(self: core.Runtime) -> None:
     """Prepare Venus without a pkill command that can kill its own shell.
 
     Older revisions executed `pkill -f '[g]uest_relay_direct.py'` in the same
-    shell command whose argv also contained the replacement relay path.  On the
+    shell command whose argv also contained the replacement relay path. On the
     target this intermittently SIGTERMed that command (rc=-15) and poisoned the
-    following agent RPC.  Stop and start are now separate operations and process
+    following agent RPC. Stop and start are now separate operations and process
     selection only targets python processes whose real argv contains the relay.
     """
     self.set_progress("venus", 40, "Preparing Mesa Venus relay")
