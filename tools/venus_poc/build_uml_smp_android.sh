@@ -9,13 +9,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${VESSEL_KERNEL_WORK:-$ROOT/.kernel-build}"
 SRC="$WORK/linux-um-arm64"
 OUT="$WORK/out"
-ART="$WORK/artifacts"
+FINAL_ART="$WORK/artifacts"
+UPSTREAM_ART="$FINAL_ART/upstream"
 UPSTREAM_REPO="${VESSEL_UML_UPSTREAM:-https://github.com/zalexdev/linux-um-arm64.git}"
 UPSTREAM_COMMIT="${VESSEL_UML_COMMIT:-8897487c52233cd00cf2850008ca068892f1ae91}"
 JOBS="${JOBS:-$(nproc)}"
 NDK="${NDK:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
 
-mkdir -p "$WORK" "$ART"
+mkdir -p "$WORK" "$FINAL_ART" "$UPSTREAM_ART"
 
 if [ ! -d "$SRC/.git" ]; then
   git clone "$UPSTREAM_REPO" "$SRC"
@@ -54,11 +55,11 @@ CONFIG_NR_CPUS=8
 EOF
 
 # The upstream arm64 UML port already contains the arm64 SMP subarch support;
-# its bionic harness handles Android's executable/ABI constraints. We only add
-# our config fragment and our umshm source transform.
+# its bionic harness handles Android's executable/ABI constraints. Give the
+# harness a private output directory, then copy only Vessel's published files
+# into FINAL_ART so CI and users always have one stable artifact location.
 export TREE="$SRC"
 export O="$OUT"
-UPSTREAM_ART="$ART/upstream"
 export ART="$UPSTREAM_ART"
 export EXTRA_CONFIG="$CONFIG"
 export JOBS
@@ -68,8 +69,6 @@ fi
 
 bash "$SRC/tools/um-arm64/harness/build-bionic.sh"
 
-# build-bionic.sh writes directly into the ART directory supplied above.
-# Keep that location separate from Vessel's final renamed artifact files.
 KERNEL="$UPSTREAM_ART/linux-bionic"
 STUB="$UPSTREAM_ART/stub_exe_bionic"
 [ -s "$KERNEL" ] || { echo "missing rebuilt UML kernel: $KERNEL" >&2; exit 1; }
@@ -78,9 +77,9 @@ STUB="$UPSTREAM_ART/stub_exe_bionic"
 grep -qx 'CONFIG_SMP=y' "$OUT/.config" || { echo 'CONFIG_SMP did not stick' >&2; exit 1; }
 grep -qx 'CONFIG_NR_CPUS=8' "$OUT/.config" || { echo 'CONFIG_NR_CPUS=8 did not stick' >&2; exit 1; }
 
-install -m 0755 "$KERNEL" "$ART/linux-umshm"
-install -m 0755 "$STUB" "$ART/stub_exe-umshm"
-cp "$OUT/.config" "$ART/vessel-uml-smp.config"
+install -m 0755 "$KERNEL" "$FINAL_ART/linux-umshm"
+install -m 0755 "$STUB" "$FINAL_ART/stub_exe-umshm"
+cp "$OUT/.config" "$FINAL_ART/vessel-uml-smp.config"
 
 {
   echo "upstream=$UPSTREAM_REPO"
@@ -88,20 +87,19 @@ cp "$OUT/.config" "$ART/vessel-uml-smp.config"
   echo "CONFIG_SMP=y"
   echo "CONFIG_NR_CPUS=8"
   echo "default_vcpus=6"
-  sha256sum "$ART/linux-umshm" "$ART/stub_exe-umshm"
-} | tee "$ART/SHA256SUMS.txt"
+  sha256sum "$FINAL_ART/linux-umshm" "$FINAL_ART/stub_exe-umshm"
+} | tee "$FINAL_ART/SHA256SUMS.txt"
 
 # The hosted Actions runner is x86_64 while linux-umshm is an Android/bionic
-# AArch64 executable. Executing it here would fail with ENOEXEC even when the
-# kernel is perfectly valid. Verify the compiled-in UML setup/help string in
-# the binary instead; CONFIG_SMP/NR_CPUS were already verified above.
-if ! strings "$ART/linux-umshm" | grep -Fq 'ncpus=<# of desired CPUs>'; then
+# AArch64 executable. Do not execute it in CI. Verify the compiled-in UML
+# setup/help string in the binary instead; CONFIG_SMP/NR_CPUS were verified.
+if ! strings "$FINAL_ART/linux-umshm" | grep -Fq 'ncpus=<# of desired CPUs>'; then
   echo 'rebuilt kernel is missing the compiled-in ncpus= UML option' >&2
   exit 1
 fi
 
 echo
 echo "Vessel SMP kernel ready:"
-echo "  $ART/linux-umshm"
-echo "  $ART/stub_exe-umshm"
+echo "  $FINAL_ART/linux-umshm"
+echo "  $FINAL_ART/stub_exe-umshm"
 echo "  CONFIG_SMP=y CONFIG_NR_CPUS=8; Vessel default ncpus=6"
