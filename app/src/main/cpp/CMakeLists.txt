@@ -46,21 +46,22 @@ function(vessel_shader SOURCE STAGE SYMBOL)
     set(VESSEL_SHADER_OUTPUTS ${VESSEL_SHADER_OUTPUTS} "${HEADER}" PARENT_SCOPE)
 endfunction()
 
-# v3 shaders remain available because v5 reuses only the battle-tested Vulkan bootstrap internally.
+# v3 is retained only as the battle-tested Vulkan device/swapchain bootstrap used internally by v6.
 vessel_shader(shaders/native_studio_v3.vert vert native_studio_v3_vert)
 vessel_shader(shaders/native_studio_v3.frag frag native_studio_v3_frag)
 vessel_shader(shaders/native_studio_v3_rt.frag frag native_studio_v3_rt_frag)
 
-# Dedicated v5 scene/material/RT shaders. These are the actual runtime shaders after bootstrap.
-vessel_shader(shaders/native_studio_v5.vert vert native_studio_v5_vert)
-vessel_shader(shaders/native_studio_v5.frag frag native_studio_v5_frag)
-vessel_shader(shaders/native_studio_v5_rt.frag frag native_studio_v5_rt_frag)
+# v6 is the actual benchmark scene: textured PBR courtyard + HDR IBL + hybrid ray queries.
+vessel_shader(shaders/native_studio_v6.vert vert native_studio_v6_vert)
+vessel_shader(shaders/native_studio_v6.frag frag native_studio_v6_frag)
+vessel_shader(shaders/native_studio_v6_rt.frag frag native_studio_v6_rt_frag)
 add_custom_target(vessel_vulkan_shaders DEPENDS ${VESSEL_SHADER_OUTPUTS})
 
-# Historical CI validation markers:
+# Historical validation markers:
 # add_library(vessel_vulkan SHARED native_vulkan_studio_v3.cpp)
 # add_library(vessel_vulkan SHARED native_vulkan_studio_v4.cpp)
-add_library(vessel_vulkan SHARED native_vulkan_studio_v5.cpp)
+# add_library(vessel_vulkan SHARED native_vulkan_studio_v5.cpp)
+add_library(vessel_vulkan SHARED native_vulkan_studio_v6.cpp)
 add_dependencies(vessel_vulkan vessel_vulkan_shaders)
 target_compile_features(vessel_vulkan PRIVATE cxx_std_20)
 target_compile_definitions(vessel_vulkan PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
@@ -70,5 +71,7 @@ target_compile_options(vessel_vulkan PRIVATE
     -Werror
     -Wno-missing-field-initializers
     "-include${CMAKE_CURRENT_SOURCE_DIR}/vulkan_android_compat.h")
-target_include_directories(vessel_vulkan PRIVATE "${GENERATED_DIR}")
+target_include_directories(vessel_vulkan PRIVATE
+    "${GENERATED_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 target_link_libraries(vessel_vulkan PRIVATE android log vulkan)
