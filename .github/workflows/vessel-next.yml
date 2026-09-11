@@ -51,6 +51,7 @@ jobs:
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v17.py
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v18.py
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v19.py
+          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v20.py
           python3 -m py_compile tools/venus_poc/vessel_acceptance.py
           python3 -m py_compile tools/venus_poc/host_relay_direct.py
           python3 -m py_compile tools/venus_poc/guest_relay_direct.py
@@ -58,10 +59,10 @@ jobs:
           bash -n tools/venus_poc/build_guest_mesa_venus_26_2.sh
           grep -q 'ENABLE_X11' tools/venus_poc/run_venus_uml.sh
           grep -q 'render-server-worker=thread' tools/venus_poc/build_virglrenderer_android_thread.sh
-          grep -q 'PROTOCOL_VERSION = 19' tools/venus_poc/vessel_runtime_daemon_v19.py
-          grep -q 'desktop_packages_ready' tools/venus_poc/vessel_runtime_daemon_v19.py
-          grep -q 'REQUIRED_PROTOCOL = 19' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -q 'vessel_runtime_daemon_v19.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -q 'PROTOCOL_VERSION = 20' tools/venus_poc/vessel_runtime_daemon_v20.py
+          grep -q 'workstation_profile_v20' tools/venus_poc/vessel_runtime_daemon_v20.py
+          grep -q 'REQUIRED_PROTOCOL = 20' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -q 'vessel_runtime_daemon_v20.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -q 'PointerMode.TRACKPAD' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           grep -q 'trackpadRect' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           grep -q 'HapticFeedbackConstants' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
