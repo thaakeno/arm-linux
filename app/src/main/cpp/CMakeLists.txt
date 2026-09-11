@@ -53,7 +53,7 @@ add_custom_target(vessel_vulkan_shaders DEPENDS ${VESSEL_SHADER_OUTPUTS})
 
 add_library(vessel_vulkan SHARED native_vulkan_studio_v3.cpp)
 add_dependencies(vessel_vulkan vessel_vulkan_shaders)
-target_compile_features(vessel_vulkan PRIVATE cxx_std_17)
+target_compile_features(vessel_vulkan PRIVATE cxx_std_20)
 target_compile_definitions(vessel_vulkan PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
 target_compile_options(vessel_vulkan PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
 target_include_directories(vessel_vulkan PRIVATE "${GENERATED_DIR}")
