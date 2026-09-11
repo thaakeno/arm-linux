@@ -20,7 +20,7 @@ class TermuxUmlController(private val context: Context) {
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = 5901
-        const val REQUIRED_PROTOCOL = 9
+        const val REQUIRED_PROTOCOL = 10
 
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
@@ -76,8 +76,8 @@ class TermuxUmlController(private val context: Context) {
               fi
 
               export VESSEL_POC_DIR=~/vessel-poc-runtime
-              echo "[vessel-launch] exec runtime daemon protocol 9"
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v9.py
+              echo "[vessel-launch] exec runtime daemon protocol 10"
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v10.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
