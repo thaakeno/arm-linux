@@ -62,11 +62,20 @@ jobs:
           done
           bash -n tools/venus_poc/run_venus_uml.sh
           bash -n tools/venus_poc/build_guest_mesa_venus_26_2.sh
+          bash -n tools/venus_poc/build_uml_smp_android.sh
           python3 - <<'PY'
           from pathlib import Path
           checks = {
               'tools/venus_poc/vessel_runtime_daemon_v22.py': [
-                  'PROTOCOL_VERSION = 22', 'network_v22', 'VESSEL_MEM_MB', 'FrameRate 60',
+                  'PROTOCOL_VERSION = 22', 'network_v22', 'VESSEL_MEM_MB',
+                  'start_xtigervnc_v22', 'desktop_action_v22',
+              ],
+              'tools/venus_poc/run_venus_uml.sh': [
+                  'VESSEL_VCPUS="${VESSEL_VCPUS:-6}"', 'ncpus="$VESSEL_VCPUS"',
+              ],
+              'tools/venus_poc/build_uml_smp_android.sh': [
+                  'CONFIG_SMP=y', 'CONFIG_NR_CPUS=8', 'apply_umshm.py',
+                  'fix_umshm_nonblock.py', 'fix_umshm_ptrace_fds.py',
               ],
               'app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt': [
                   'REQUIRED_PROTOCOL = 22', 'vessel_runtime_daemon_v22.py', 'VESSEL_MEM_MB=8192',
