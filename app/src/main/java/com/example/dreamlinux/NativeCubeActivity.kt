@@ -124,7 +124,7 @@ class NativeCubeActivity : Activity() {
             System.loadLibrary("vessel_vulkan")
             true
         } catch (t: Throwable) {
-            showFatal("Could not load Vulkan native library: ${it.message ?: it.javaClass.simpleName}")
+            showFatal("Could not load Vulkan native library: ${t.message ?: t.javaClass.simpleName}")
             false
         }
 
