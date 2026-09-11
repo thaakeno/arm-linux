@@ -131,10 +131,12 @@ class VesselActivity : ComponentActivity() {
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text("Debian workstation", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            Text(state.message, color = if (state.lastError.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+            if (state.lastError.isBlank()) {
+                Text(state.message, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
 
             if (!state.connected) SetupCard(state)
-            if (state.lastError.isNotBlank()) ErrorCard(state.lastError)
+            if (state.lastError.isNotBlank()) ErrorCard(shortRuntimeError(state.lastError))
 
             ElevatedCard(shape = RoundedCornerShape(24.dp)) {
                 Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
@@ -152,7 +154,7 @@ class VesselActivity : ComponentActivity() {
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                     Metric(Icons.Default.Wifi, "Network", state.internetStage)
                     Metric(Icons.Default.DesktopWindows, "Display", if (state.kdeInstalled) "KDE Plasma · embedded VNC" else state.kdeStage)
-                    if (state.busy || state.running && !state.kdeInstalled) ProgressBlock(state)
+                    if (state.lastError.isBlank() && (state.busy || state.running && !state.kdeInstalled)) ProgressBlock(state)
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
                             onClick = { if (state.running) VmSessionService.active?.stopVm() else startLinux() },
@@ -249,8 +251,9 @@ class VesselActivity : ComponentActivity() {
                     Spacer(Modifier.width(8.dp))
                     Text("Runtime error", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 }
-                SelectionContainer { Text(error, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
-                OutlinedButton(onClick = { copy(error) }) { Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy error") }
+                Text(error, style = MaterialTheme.typography.bodyMedium)
+                Text("Full output is shown once in Live runtime log below.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = { copy(error) }) { Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy reason") }
             }
         }
     }
@@ -264,6 +267,7 @@ class VesselActivity : ComponentActivity() {
                     Text(
                         when {
                             state.kdeInstalled -> "Interactive Debian desktop"
+                            state.lastError.isNotBlank() -> "Runtime error · check Machine"
                             state.running && state.kdeInstalling -> state.progressDetail
                             state.running -> "Debian is running · Plasma not started"
                             else -> "Start Linux first"
@@ -285,13 +289,18 @@ class VesselActivity : ComponentActivity() {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Icon(Icons.Default.DesktopWindows, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(if (state.running) state.progressDetail.ifBlank { "Preparing desktop" } else "Desktop is not running")
-                            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                            Text(
+                                when {
+                                    state.lastError.isNotBlank() -> "Runtime stopped before Plasma was ready"
+                                    state.running -> state.progressDetail.ifBlank { "Preparing desktop" }
+                                    else -> "Desktop is not running"
+                                }
+                            )
+                            if (state.busy && state.lastError.isBlank()) LinearProgressIndicator(Modifier.fillMaxWidth())
                             Button(
                                 onClick = { if (state.running) VmSessionService.active?.installKde() else startLinux() },
                                 enabled = state.connected && !state.busy
                             ) { Text(if (state.running) "Start Plasma" else "Start Debian + Plasma") }
-                            if (state.lastError.isNotBlank()) Text(state.lastError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
@@ -372,10 +381,10 @@ class VesselActivity : ComponentActivity() {
                     Icon(Icons.Default.Share, null); Spacer(Modifier.width(7.dp)); Text("Share")
                 }
             }
-            RuntimeLogCard(state)
             OutlinedButton(onClick = { copy(diagnosticsText(state)) }) {
                 Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(7.dp)); Text("Copy all diagnostics")
             }
+            Text("The full live runtime log is shown only on the Machine page.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             Text(state.capabilities, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -428,6 +437,20 @@ class VesselActivity : ComponentActivity() {
         if (text.isBlank()) return
         getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Vessel", text))
         Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shortRuntimeError(raw: String): String {
+        val text = raw.substringBefore("Console tail:").trim()
+        return when {
+            text.contains("Guest command transport timed out", ignoreCase = true) -> "Debian command channel stopped responding."
+            text.contains("Guest command timed out", ignoreCase = true) -> "Debian command channel timed out while starting the runtime."
+            text.contains("guest command failed", ignoreCase = true) -> text.lineSequence().firstOrNull()?.take(220) ?: "A Debian command failed."
+            text.contains("Failed to lock", ignoreCase = true) || text.contains("disk", ignoreCase = true) && text.contains("locked", ignoreCase = true) -> "The Debian disk is still locked by another UML process."
+            text.contains("TigerVNC failed", ignoreCase = true) -> "TigerVNC failed to start the KDE Plasma display."
+            text.contains("Mesa Venus", ignoreCase = true) && text.contains("not installed", ignoreCase = true) -> "Mesa Venus is missing from the Debian image."
+            text.contains("daemon did not start", ignoreCase = true) -> "The Vessel runtime daemon did not start."
+            else -> text.lineSequence().firstOrNull()?.take(220)?.ifBlank { "Runtime failed." } ?: "Runtime failed."
+        }
     }
 
     private fun diagnosticsText(state: SessionState): String = buildString {
