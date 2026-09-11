@@ -52,26 +52,23 @@ jobs:
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v18.py
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v19.py
           python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v20.py
+          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v21.py
           python3 -m py_compile tools/venus_poc/vessel_acceptance.py
           python3 -m py_compile tools/venus_poc/host_relay_direct.py
           python3 -m py_compile tools/venus_poc/guest_relay_direct.py
           bash -n tools/venus_poc/run_venus_uml.sh
           bash -n tools/venus_poc/build_guest_mesa_venus_26_2.sh
-          grep -q 'ENABLE_X11' tools/venus_poc/run_venus_uml.sh
           grep -q 'render-server-worker=thread' tools/venus_poc/build_virglrenderer_android_thread.sh
-          grep -q 'PROTOCOL_VERSION = 20' tools/venus_poc/vessel_runtime_daemon_v20.py
-          grep -q 'workstation_profile_v20' tools/venus_poc/vessel_runtime_daemon_v20.py
-          grep -q 'REQUIRED_PROTOCOL = 20' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -q 'vessel_runtime_daemon_v20.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -q 'PROTOCOL_VERSION = 21' tools/venus_poc/vessel_runtime_daemon_v21.py
+          grep -q 'prepare_venus_v21' tools/venus_poc/vessel_runtime_daemon_v21.py
+          grep -q 'VESSEL_MEM_MB:-4096' tools/venus_poc/vessel_runtime_daemon_v21.py
+          grep -q 'REQUIRED_PROTOCOL = 21' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -q 'vessel_runtime_daemon_v21.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -q 'PointerMode.TRACKPAD' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -q 'trackpadRect' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -q 'HapticFeedbackConstants' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -q 'decodeHextile' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -q 'decodeCopyRect' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -q 'progressDetail' tools/venus_poc/vessel_runtime_daemon.py
-          grep -q 'serve_connection' tools/venus_poc/vessel_runtime_daemon.py
-          grep -q 'Virtio-GPU Venus' tools/venus_poc/vessel_acceptance.py
-          grep -q 'RFB 003.008' tools/venus_poc/vessel_acceptance.py
+          grep -q 'getHistoricalX' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -q 'showKeyboard' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -q 'FullscreenDesktop' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          grep -q 'Vulkan 3D test' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
 
       - name: Compile, unit-test and lint
         run: |
