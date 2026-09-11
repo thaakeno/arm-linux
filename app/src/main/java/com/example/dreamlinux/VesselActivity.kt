@@ -40,8 +40,20 @@ class VesselActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        enterImmersiveMode()
         startForegroundService(Intent(this, VmSessionService::class.java))
         setContent { VesselApp() }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enterImmersiveMode()
+    }
+
+    private fun enterImmersiveMode() {
+        val insets = WindowCompat.getInsetsController(window, window.decorView)
+        insets.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        insets.hide(WindowInsetsCompat.Type.systemBars())
     }
 
     @Composable
@@ -51,14 +63,11 @@ class VesselActivity : ComponentActivity() {
         var fullscreen by remember { mutableStateOf(false) }
 
         LaunchedEffect(fullscreen) {
-            val insets = WindowCompat.getInsetsController(window, window.decorView)
-            insets.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            if (fullscreen) {
-                insets.hide(WindowInsetsCompat.Type.systemBars())
-                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            enterImmersiveMode()
+            requestedOrientation = if (fullscreen) {
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             } else {
-                insets.show(WindowInsetsCompat.Type.systemBars())
-                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             }
         }
 
