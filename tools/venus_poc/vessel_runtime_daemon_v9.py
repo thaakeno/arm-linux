@@ -31,6 +31,7 @@ GUEST_HOST_GATEWAY = os.environ.get("VESSEL_GUEST_HOST_GATEWAY", "10.0.2.2")
 READY = b"VSL9READY"
 MAX_COMMAND = 16 * 1024 * 1024
 MAX_RECORD = 16 * 1024 * 1024
+LEGACY_STTY = "stty -echo 2>/dev/null || true\n"
 
 # This source is transferred over TCP, never through the tty.
 AGENT_SOURCE = r'''import socket,struct,subprocess
@@ -90,6 +91,13 @@ _original_prepare = core.Runtime._prepare_venus_guest
 
 
 def full_write(self: core.Runtime, text: str) -> None:
+    # core.start() used to inject an asynchronous `stty -echo` immediately
+    # before _prepare_venus_guest(). Protocol 9 performs that exact terminal
+    # setup atomically in its bootstrap command, so suppress the legacy write.
+    # This leaves exactly ONE post-boot command on the PTY and removes the last
+    # command-ordering race before the socket handoff.
+    if text == LEGACY_STTY and getattr(self, "agent_socket", None) is None:
+        return
     if self.master is None:
         raise RuntimeError("UML console is not open")
     data = text.encode("utf-8")
@@ -148,8 +156,8 @@ def _ensure_agent(self: core.Runtime) -> None:
     listener.listen(1)
     listener.settimeout(15.0)
 
-    # The one tty command is <1 KiB. socket.MSG_WAITALL makes the bootstrap's
-    # length/source reads exact; the real protocol starts only after TCP setup.
+    # The only post-boot tty command. It is small, line-oriented, and hands all
+    # subsequent traffic to TCP. MSG_WAITALL makes bootstrap transfer exact.
     bootstrap_py = (
         "import socket,struct;"
         f"s=socket.create_connection(({GUEST_HOST_GATEWAY!r},{AGENT_PORT}),10);"
@@ -232,9 +240,6 @@ def socket_guest(self: core.Runtime, command: str, timeout: float = 45.0) -> str
                 raise RuntimeError(f"unknown guest agent record type: {kind!r}")
         except Exception as exc:
             close_agent(self)
-            # Once the exec'd socket agent exits there is deliberately no shell
-            # left to fall back to. Mark this boot unusable instead of silently
-            # attempting another PTY protocol and creating another hang.
             self.guest_ready = False
             raise RuntimeError(f"guest command socket failed; restart Debian runtime: {exc}") from exc
 
@@ -268,7 +273,6 @@ def serialized_stop(self: core.Runtime):
         self.lifecycle_lock = threading.RLock()
         lock = self.lifecycle_lock
     with lock:
-        # Flush the ext4 guest before the base implementation terminates UML.
         if getattr(self, "agent_socket", None) is not None and self.guest_ready:
             try:
                 socket_guest(self, "sync", 8.0)
