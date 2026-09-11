@@ -3,14 +3,15 @@ package com.example.dreamlinux
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.os.SystemClock
-import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.ScaleGestureDetector
 import android.view.View
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -21,74 +22,54 @@ import java.net.Socket
 import java.util.Arrays
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 
-/**
- * Embedded RFB 3.8 client for Vessel's KDE desktop.
- *
- * Protocol 14 keeps the server private inside Debian and uses a persistent
- * reverse bridge. The viewer prefers Hextile rather than raw framebuffer
- * updates: static Plasma UI then costs a small fraction of the bytes and CPU
- * required by full 32-bpp raw rectangles.
- */
+/** Embedded RFB 3.8 client for Vessel's KDE desktop. */
 class VncFramebufferView(context: Context) : View(context) {
     companion object { @Volatile var active: VncFramebufferView? = null }
 
+    enum class PointerMode { DIRECT, TRACKPAD }
+
     private val running = AtomicBoolean(false)
-    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val wireLock = Any()
+    private val density = resources.displayMetrics.density
+    private val touchSlop = 8f * density
+
     @Volatile private var bitmap: Bitmap? = null
     @Volatile private var fbWidth = 0
     @Volatile private var fbHeight = 0
     @Volatile private var lastError = "Waiting for Plasma desktop"
     private var socket: Socket? = null
     private var output: DataOutputStream? = null
-    private var pointerMask = 0
-    private var zoom = 1f
-    private var panX = 0f
-    private var panY = 0f
+    private var pointerMode = PointerMode.TRACKPAD
+    private var cursorGuestX = 0
+    private var cursorGuestY = 0
     private var lastPointerSentMs = 0L
 
-    private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-        override fun onScale(detector: ScaleGestureDetector): Boolean {
-            zoom = (zoom * detector.scaleFactor).coerceIn(1f, 4f)
-            if (zoom == 1f) { panX = 0f; panY = 0f }
-            invalidate()
-            return true
-        }
-    })
+    private var touchStartX = 0f
+    private var touchStartY = 0f
+    private var lastTouchX = 0f
+    private var lastTouchY = 0f
+    private var touchStartedMs = 0L
+    private var moved = false
+    private var dragging = false
+    private var maxPointers = 1
+    private var scrollAccumulator = 0f
 
-    private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
-        override fun onDown(e: MotionEvent): Boolean = true
-
-        override fun onDoubleTap(e: MotionEvent): Boolean {
-            zoom = if (zoom > 1.05f) 1f else 2f
-            if (zoom == 1f) { panX = 0f; panY = 0f }
-            invalidate()
-            return true
-        }
-
-        override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
-            if (e2.pointerCount >= 2 || zoom > 1f) {
-                if (e2.pointerCount >= 2 && zoom <= 1.05f && abs(distanceY) > 3f) {
-                    val (x, y) = mapToGuest(e2.x, e2.y)
-                    sendPointer(if (distanceY > 0) 16 else 8, x, y)
-                    sendPointer(0, x, y)
-                } else {
-                    panX -= distanceX
-                    panY -= distanceY
-                    constrainPan()
-                    invalidate()
-                }
-                return true
-            }
-            return false
-        }
-    })
+    private val directChip = RectF()
+    private val trackpadChip = RectF()
+    private val trackpadRect = RectF()
+    private val leftButtonRect = RectF()
+    private val rightButtonRect = RectF()
 
     init {
         isFocusable = true
         isFocusableInTouchMode = true
         keepScreenOn = true
+        setLayerType(LAYER_TYPE_HARDWARE, null)
         active = this
         start()
     }
@@ -171,7 +152,8 @@ class VncFramebufferView(context: Context) : View(context) {
             lastError = String(name, Charsets.UTF_8)
         }
         bitmap = Bitmap.createBitmap(fbWidth, fbHeight, Bitmap.Config.ARGB_8888)
-        zoom = 1f; panX = 0f; panY = 0f
+        cursorGuestX = fbWidth / 2
+        cursorGuestY = fbHeight / 2
         sendPixelFormat(out)
         sendEncodings(out)
         requestUpdate(out, false)
@@ -180,7 +162,7 @@ class VncFramebufferView(context: Context) : View(context) {
         while (running.get()) {
             when (input.readUnsignedByte()) {
                 0 -> readFramebufferUpdate(input, out)
-                2 -> Unit // Bell
+                2 -> Unit
                 3 -> {
                     input.skipBytes(3)
                     val len = input.readInt()
@@ -193,7 +175,6 @@ class VncFramebufferView(context: Context) : View(context) {
 
     private fun sendPixelFormat(out: DataOutputStream) = synchronized(wireLock) {
         out.writeByte(0); out.write(byteArrayOf(0, 0, 0))
-        // 32bpp, depth 24, little endian, true colour, RGB shifts 16/8/0.
         out.writeByte(32); out.writeByte(24); out.writeByte(0); out.writeByte(1)
         out.writeShort(255); out.writeShort(255); out.writeShort(255)
         out.writeByte(16); out.writeByte(8); out.writeByte(0)
@@ -202,8 +183,8 @@ class VncFramebufferView(context: Context) : View(context) {
 
     private fun sendEncodings(out: DataOutputStream) = synchronized(wireLock) {
         out.writeByte(2); out.writeByte(0); out.writeShort(2)
-        out.writeInt(5) // Hextile: much cheaper for desktop UI than raw.
-        out.writeInt(0) // Raw fallback.
+        out.writeInt(5)
+        out.writeInt(0)
         out.flush()
     }
 
@@ -245,7 +226,6 @@ class VncFramebufferView(context: Context) : View(context) {
         var fg = 0
         var bgValid = false
         var fgValid = false
-
         var ty = 0
         while (ty < h) {
             val th = minOf(16, h - ty)
@@ -260,27 +240,17 @@ class VncFramebufferView(context: Context) : View(context) {
                     tx += 16
                     continue
                 }
-
-                if ((sub and 2) != 0) {
-                    bg = readPixel(input)
-                    bgValid = true
-                }
+                if ((sub and 2) != 0) { bg = readPixel(input); bgValid = true }
                 check(bgValid) { "Hextile background missing" }
                 Arrays.fill(tile, 0, tw * th, bg)
-
-                if ((sub and 4) != 0) {
-                    fg = readPixel(input)
-                    fgValid = true
-                }
-
+                if ((sub and 4) != 0) { fg = readPixel(input); fgValid = true }
                 val any = (sub and 8) != 0
                 val coloured = (sub and 16) != 0
                 if (any) {
                     val count = input.readUnsignedByte()
                     repeat(count) {
                         val color = if (coloured) readPixel(input) else {
-                            check(fgValid) { "Hextile foreground missing" }
-                            fg
+                            check(fgValid) { "Hextile foreground missing" }; fg
                         }
                         val xy = input.readUnsignedByte()
                         val wh = input.readUnsignedByte()
@@ -289,9 +259,7 @@ class VncFramebufferView(context: Context) : View(context) {
                         val sw = (wh ushr 4) + 1
                         val sh = (wh and 0x0f) + 1
                         check(sx + sw <= tw && sy + sh <= th) { "Invalid Hextile subrectangle" }
-                        for (yy in sy until sy + sh) {
-                            Arrays.fill(tile, yy * tw + sx, yy * tw + sx + sw, color)
-                        }
+                        for (yy in sy until sy + sh) Arrays.fill(tile, yy * tw + sx, yy * tw + sx + sw, color)
                     }
                 }
                 synchronized(bmp) { bmp.setPixels(tile, 0, tw, x + tx, y + ty, tw, th) }
@@ -327,75 +295,274 @@ class VncFramebufferView(context: Context) : View(context) {
         val bmp = bitmap ?: return null
         if (width <= 0 || height <= 0) return null
         val fit = minOf(width.toFloat() / bmp.width, height.toFloat() / bmp.height)
-        val dw = bmp.width * fit * zoom
-        val dh = bmp.height * fit * zoom
-        val left = (width - dw) / 2f + panX
-        val top = (height - dh) / 2f + panY
-        return RectF(left, top, left + dw, top + dh)
-    }
-
-    private fun constrainPan() {
-        val bmp = bitmap ?: return
-        val fit = minOf(width.toFloat() / bmp.width, height.toFloat() / bmp.height)
-        val excessX = ((bmp.width * fit * zoom - width) / 2f).coerceAtLeast(0f)
-        val excessY = ((bmp.height * fit * zoom - height) / 2f).coerceAtLeast(0f)
-        panX = panX.coerceIn(-excessX, excessX)
-        panY = panY.coerceIn(-excessY, excessY)
+        val dw = bmp.width * fit
+        val dh = bmp.height * fit
+        return RectF((width - dw) / 2f, (height - dh) / 2f, (width + dw) / 2f, (height + dh) / 2f)
     }
 
     private fun mapToGuest(px: Float, py: Float): Pair<Int, Int> {
         val r = fittedRect() ?: return 0 to 0
-        val x = (((px - r.left) / r.width()) * fbWidth).toInt().coerceIn(0, (fbWidth - 1).coerceAtLeast(0))
-        val y = (((py - r.top) / r.height()) * fbHeight).toInt().coerceIn(0, (fbHeight - 1).coerceAtLeast(0))
+        val x = (((px - r.left) / r.width()) * fbWidth).roundToInt().coerceIn(0, (fbWidth - 1).coerceAtLeast(0))
+        val y = (((py - r.top) / r.height()) * fbHeight).roundToInt().coerceIn(0, (fbHeight - 1).coerceAtLeast(0))
         return x to y
+    }
+
+    private fun guestToView(x: Int, y: Int): Pair<Float, Float>? {
+        val r = fittedRect() ?: return null
+        if (fbWidth <= 0 || fbHeight <= 0) return null
+        return (r.left + x.toFloat() / fbWidth * r.width()) to (r.top + y.toFloat() / fbHeight * r.height())
+    }
+
+    private fun updateControlRects() {
+        val pad = 12f * density
+        val chipH = 34f * density
+        val chipW = 82f * density
+        directChip.set(pad, pad, pad + chipW, pad + chipH)
+        trackpadChip.set(directChip.right + 7f * density, pad, directChip.right + 7f * density + chipW, pad + chipH)
+
+        val margin = 14f * density
+        val h = 142f * density
+        trackpadRect.set(margin, height - h - margin, width - margin, height - margin)
+        val buttonH = 34f * density
+        leftButtonRect.set(trackpadRect.left + 8f * density, trackpadRect.bottom - buttonH - 8f * density, trackpadRect.centerX() - 4f * density, trackpadRect.bottom - 8f * density)
+        rightButtonRect.set(trackpadRect.centerX() + 4f * density, trackpadRect.bottom - buttonH - 8f * density, trackpadRect.right - 8f * density, trackpadRect.bottom - 8f * density)
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        canvas.drawColor(android.graphics.Color.BLACK)
+        canvas.drawColor(Color.BLACK)
         val bmp = bitmap
         val rect = fittedRect()
         if (bmp != null && rect != null) {
             synchronized(bmp) { canvas.drawBitmap(bmp, null, rect, paint) }
         } else {
-            paint.textSize = 30f
-            paint.color = android.graphics.Color.LTGRAY
-            canvas.drawText(lastError.take(70), 28f, 56f, paint)
+            textPaint.textSize = 18f * density
+            textPaint.color = Color.LTGRAY
+            canvas.drawText(lastError.take(70), 20f * density, 42f * density, textPaint)
+        }
+
+        updateControlRects()
+        drawModeChips(canvas)
+        if (pointerMode == PointerMode.TRACKPAD) drawTrackpad(canvas)
+        drawLocalCursor(canvas)
+    }
+
+    private fun drawModeChips(canvas: Canvas) {
+        fun chip(rect: RectF, label: String, selected: Boolean) {
+            paint.color = if (selected) Color.argb(235, 28, 83, 63) else Color.argb(190, 20, 25, 23)
+            canvas.drawRoundRect(rect, 18f * density, 18f * density, paint)
+            if (!selected) {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = density
+                paint.color = Color.argb(150, 120, 150, 138)
+                canvas.drawRoundRect(rect, 18f * density, 18f * density, paint)
+                paint.style = Paint.Style.FILL
+            }
+            textPaint.color = Color.WHITE
+            textPaint.textSize = 12f * density
+            textPaint.textAlign = Paint.Align.CENTER
+            val y = rect.centerY() - (textPaint.ascent() + textPaint.descent()) / 2f
+            canvas.drawText(label, rect.centerX(), y, textPaint)
+        }
+        chip(directChip, "Direct", pointerMode == PointerMode.DIRECT)
+        chip(trackpadChip, "Trackpad", pointerMode == PointerMode.TRACKPAD)
+    }
+
+    private fun drawTrackpad(canvas: Canvas) {
+        paint.color = Color.argb(225, 18, 22, 21)
+        canvas.drawRoundRect(trackpadRect, 20f * density, 20f * density, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.2f * density
+        paint.color = Color.argb(110, 139, 232, 190)
+        canvas.drawRoundRect(trackpadRect, 20f * density, 20f * density, paint)
+        paint.style = Paint.Style.FILL
+
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.color = Color.argb(220, 235, 242, 239)
+        textPaint.textSize = 12f * density
+        canvas.drawText("TRACKPAD", trackpadRect.centerX(), trackpadRect.top + 25f * density, textPaint)
+        textPaint.color = Color.argb(155, 220, 228, 224)
+        textPaint.textSize = 10f * density
+        canvas.drawText("Move · tap to click · two-finger scroll", trackpadRect.centerX(), trackpadRect.top + 45f * density, textPaint)
+
+        paint.color = Color.argb(180, 33, 41, 38)
+        canvas.drawRoundRect(leftButtonRect, 12f * density, 12f * density, paint)
+        canvas.drawRoundRect(rightButtonRect, 12f * density, 12f * density, paint)
+        textPaint.color = Color.argb(210, 235, 242, 239)
+        textPaint.textSize = 10f * density
+        canvas.drawText("Left click", leftButtonRect.centerX(), leftButtonRect.centerY() - (textPaint.ascent() + textPaint.descent()) / 2f, textPaint)
+        canvas.drawText("Right click", rightButtonRect.centerX(), rightButtonRect.centerY() - (textPaint.ascent() + textPaint.descent()) / 2f, textPaint)
+    }
+
+    private fun drawLocalCursor(canvas: Canvas) {
+        val p = guestToView(cursorGuestX, cursorGuestY) ?: return
+        val x = p.first
+        val y = p.second
+        val s = 18f * density
+        val path = Path().apply {
+            moveTo(x, y)
+            lineTo(x, y + s)
+            lineTo(x + 5.2f * density, y + 12f * density)
+            lineTo(x + 9.2f * density, y + 20f * density)
+            lineTo(x + 12.5f * density, y + 18.2f * density)
+            lineTo(x + 8.5f * density, y + 10.7f * density)
+            lineTo(x + 15f * density, y + 10.5f * density)
+            close()
+        }
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 3f * density
+        paint.color = Color.argb(220, 0, 0, 0)
+        canvas.drawPath(path, paint)
+        paint.strokeWidth = 1.4f * density
+        paint.color = Color.WHITE
+        canvas.drawPath(path, paint)
+        paint.style = Paint.Style.FILL
+    }
+
+    private fun setMode(mode: PointerMode) {
+        if (pointerMode == mode) return
+        pointerMode = mode
+        dragging = false
+        performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+        invalidate()
+    }
+
+    private fun click(mask: Int) {
+        sendPointer(mask, cursorGuestX, cursorGuestY)
+        sendPointer(0, cursorGuestX, cursorGuestY)
+        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
+
+    private fun moveTrackpad(dx: Float, dy: Float) {
+        val r = fittedRect() ?: return
+        if (r.width() <= 0f || r.height() <= 0f) return
+        val sensitivity = 1.45f
+        cursorGuestX = (cursorGuestX + dx / r.width() * fbWidth * sensitivity).roundToInt().coerceIn(0, (fbWidth - 1).coerceAtLeast(0))
+        cursorGuestY = (cursorGuestY + dy / r.height() * fbHeight * sensitivity).roundToInt().coerceIn(0, (fbHeight - 1).coerceAtLeast(0))
+        sendPointer(if (dragging) 1 else 0, cursorGuestX, cursorGuestY)
+        invalidate()
+    }
+
+    private fun scrollTrackpad(dy: Float) {
+        scrollAccumulator += dy
+        val threshold = 18f * density
+        while (abs(scrollAccumulator) >= threshold) {
+            val mask = if (scrollAccumulator > 0) 16 else 8
+            sendPointer(mask, cursorGuestX, cursorGuestY)
+            sendPointer(0, cursorGuestX, cursorGuestY)
+            scrollAccumulator += if (scrollAccumulator > 0) -threshold else threshold
         }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         requestFocus()
-        scaleDetector.onTouchEvent(event)
-        gestureDetector.onTouchEvent(event)
-        if (fbWidth <= 0 || fbHeight <= 0 || event.pointerCount > 1 || scaleDetector.isInProgress) return true
-        val (x, y) = mapToGuest(event.x, event.y)
-        pointerMask = when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> 1
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> 0
-            else -> pointerMask
+        if (fbWidth <= 0 || fbHeight <= 0) return true
+        updateControlRects()
+
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            if (directChip.contains(event.x, event.y)) { setMode(PointerMode.DIRECT); return true }
+            if (trackpadChip.contains(event.x, event.y)) { setMode(PointerMode.TRACKPAD); return true }
+            if (pointerMode == PointerMode.TRACKPAD && leftButtonRect.contains(event.x, event.y)) { click(1); return true }
+            if (pointerMode == PointerMode.TRACKPAD && rightButtonRect.contains(event.x, event.y)) { click(4); return true }
+
+            touchStartX = event.x
+            touchStartY = event.y
+            lastTouchX = event.x
+            lastTouchY = event.y
+            touchStartedMs = SystemClock.uptimeMillis()
+            moved = false
+            dragging = false
+            maxPointers = 1
+            scrollAccumulator = 0f
+
+            if (pointerMode == PointerMode.DIRECT) {
+                val p = mapToGuest(event.x, event.y)
+                cursorGuestX = p.first
+                cursorGuestY = p.second
+                sendPointer(0, cursorGuestX, cursorGuestY)
+                invalidate()
+            }
+            return true
         }
-        val now = SystemClock.uptimeMillis()
-        if (event.actionMasked != MotionEvent.ACTION_MOVE || now - lastPointerSentMs >= 16) {
-            sendPointer(pointerMask, x, y)
-            lastPointerSentMs = now
+
+        maxPointers = maxOf(maxPointers, event.pointerCount)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                lastTouchX = event.getX(0)
+                lastTouchY = event.getY(0)
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val x = event.getX(0)
+                val y = event.getY(0)
+                val dx = x - lastTouchX
+                val dy = y - lastTouchY
+                if (hypot((x - touchStartX).toDouble(), (y - touchStartY).toDouble()) > touchSlop) moved = true
+
+                if (pointerMode == PointerMode.TRACKPAD) {
+                    if (event.pointerCount >= 2) {
+                        scrollTrackpad(dy)
+                    } else {
+                        if (!dragging && moved && SystemClock.uptimeMillis() - touchStartedMs > 360) {
+                            dragging = true
+                            sendPointer(1, cursorGuestX, cursorGuestY)
+                            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        }
+                        moveTrackpad(dx, dy)
+                    }
+                } else {
+                    val p = mapToGuest(x, y)
+                    cursorGuestX = p.first
+                    cursorGuestY = p.second
+                    if (!dragging && moved && SystemClock.uptimeMillis() - touchStartedMs > 360) {
+                        dragging = true
+                        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    }
+                    val now = SystemClock.uptimeMillis()
+                    if (now - lastPointerSentMs >= 12) {
+                        sendPointer(if (dragging) 1 else 0, cursorGuestX, cursorGuestY)
+                        lastPointerSentMs = now
+                    }
+                    invalidate()
+                }
+                lastTouchX = x
+                lastTouchY = y
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (dragging) {
+                    sendPointer(0, cursorGuestX, cursorGuestY)
+                } else if (event.actionMasked == MotionEvent.ACTION_UP && !moved) {
+                    if (pointerMode == PointerMode.DIRECT) {
+                        val p = mapToGuest(event.x, event.y)
+                        cursorGuestX = p.first
+                        cursorGuestY = p.second
+                    }
+                    click(if (maxPointers >= 2) 4 else 1)
+                }
+                dragging = false
+                return true
+            }
         }
         return true
     }
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         if ((event.source and InputDevice.SOURCE_CLASS_POINTER) != 0) {
-            val (x, y) = mapToGuest(event.x, event.y)
+            val p = mapToGuest(event.x, event.y)
+            cursorGuestX = p.first
+            cursorGuestY = p.second
             when (event.actionMasked) {
                 MotionEvent.ACTION_HOVER_MOVE -> {
-                    sendPointer(0, x, y)
+                    sendPointer(0, cursorGuestX, cursorGuestY)
+                    invalidate()
                     return true
                 }
                 MotionEvent.ACTION_SCROLL -> {
                     val v = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
                     if (v != 0f) {
-                        sendPointer(if (v > 0) 8 else 16, x, y)
-                        sendPointer(0, x, y)
+                        sendPointer(if (v > 0) 8 else 16, cursorGuestX, cursorGuestY)
+                        sendPointer(0, cursorGuestX, cursorGuestY)
                         return true
                     }
                 }
@@ -408,6 +575,7 @@ class VncFramebufferView(context: Context) : View(context) {
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean { sendAndroidKey(false, keyCode, event); return true }
 
     fun sendAndroidKey(down: Boolean, keyCode: Int, event: KeyEvent? = null) {
+        if (down) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
         val keysym = when (keyCode) {
             KeyEvent.KEYCODE_ESCAPE -> 0xff1b
             KeyEvent.KEYCODE_TAB -> 0xff09
