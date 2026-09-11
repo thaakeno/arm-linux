@@ -1,8 +1,11 @@
 name: Vessel Final
 
 on:
+  # app/vessel-final is the head of PR #2, so every push to it already emits a
+  # pull_request:synchronize event. Do not also run this workflow on the same
+  # direct push or GitHub will compile/test the exact same commit twice.
   push:
-    branches: [ app/vessel-final, app/vessel-next ]
+    branches: [ app/vessel-next ]
   pull_request:
     branches: [ dev-1, app/vessel-next ]
   workflow_dispatch:
