@@ -5,6 +5,7 @@ layout(location = 1) out vec3 outWorldNormal;
 layout(location = 2) out vec3 outBaseColor;
 layout(location = 3) out vec3 outCameraPos;
 layout(location = 4) out vec2 outFaceUv;
+layout(location = 5) flat out int outMaterial;
 
 layout(push_constant) uniform Push {
     float yaw;
@@ -41,8 +42,6 @@ vec3 faceNormal(int face) {
 }
 
 vec3 faceColor(int face) {
-    // Neutral studio-gray material. Tiny face variation keeps edges readable
-    // without turning the benchmark into a neon/debug cube.
     if (face == 0) return vec3(0.49, 0.52, 0.57);
     if (face == 1) return vec3(0.45, 0.48, 0.53);
     if (face == 2) return vec3(0.53, 0.55, 0.59);
@@ -52,11 +51,31 @@ vec3 faceColor(int face) {
 }
 
 void main() {
-    int face = gl_VertexIndex / 6;
-    int corner = gl_VertexIndex - face * 6;
-    vec2 faceUv = quadCorner(corner);
-    vec3 worldPos = facePosition(face, faceUv);
-    vec3 worldNormal = faceNormal(face);
+    vec3 worldPos;
+    vec3 worldNormal;
+    vec3 baseColor;
+    vec2 uv;
+    int material;
+
+    if (gl_VertexIndex < 36) {
+        int face = gl_VertexIndex / 6;
+        int corner = gl_VertexIndex - face * 6;
+        uv = quadCorner(corner);
+        worldPos = facePosition(face, uv);
+        worldNormal = faceNormal(face);
+        baseColor = faceColor(face);
+        material = 0;
+    } else {
+        // A broad matte floor gives the object a visual scale reference and a
+        // place for the subtle contact shadow. It is generated procedurally,
+        // so the benchmark still has no model/texture asset dependency.
+        int corner = gl_VertexIndex - 36;
+        uv = quadCorner(corner);
+        worldPos = vec3(uv.x * 5.2, -1.28, uv.y * 5.2);
+        worldNormal = vec3(0.0, 1.0, 0.0);
+        baseColor = vec3(0.115, 0.125, 0.135);
+        material = 1;
+    }
 
     float cp = cos(pc.pitch);
     vec3 cameraPos = pc.cameraDistance * vec3(
@@ -74,15 +93,11 @@ void main() {
     float viewY = dot(rel, up);
     float viewZ = dot(rel, forward);
 
-    // Android Vulkan surfaces may expose the swapchain extent in the device's
-    // native orientation while SurfaceFlinger applies a 90/270-degree
-    // pre-transform for landscape. The old code used that portrait aspect
-    // directly, which expanded X by ~2x and made a real cube look like a box.
-    // The benchmark is landscape-only, so normalize to the visible landscape
-    // aspect regardless of which orientation the swapchain reports.
+    // SurfaceView reports the *visible* landscape size to native and that is
+    // the only aspect we use. This deliberately does not infer aspect from the
+    // swapchain extent because Android may expose that extent in the device's
+    // natural portrait orientation while applying a 90/270-degree transform.
     float safeAspect = max(pc.aspect, 0.01);
-    if (safeAspect < 1.0) safeAspect = 1.0 / safeAspect;
-
     float fovY = radians(46.0);
     float f = 1.0 / tan(fovY * 0.5);
     float nearPlane = 0.10;
@@ -96,7 +111,8 @@ void main() {
     gl_Position = vec4(clipX, clipY, clipZ, viewZ);
     outWorldPos = worldPos;
     outWorldNormal = worldNormal;
-    outBaseColor = faceColor(face);
+    outBaseColor = baseColor;
     outCameraPos = cameraPos;
-    outFaceUv = faceUv;
+    outFaceUv = uv;
+    outMaterial = material;
 }
