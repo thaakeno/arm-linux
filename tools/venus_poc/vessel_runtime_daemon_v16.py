@@ -12,8 +12,9 @@ embedded desktop experience:
 * the Plasma task manager is rewritten through the supported Plasma scripting
   API so stale launchers for applications that are not installed no longer show
   as blank generic icons; Konsole is pinned instead;
-* the existing low-latency remote profile (no compositing/animations, bounded
-  framebuffer, persistent VNC broker) remains unchanged.
+* Baloo indexing, session restore, compositing and desktop animations are kept
+  out of the phone VM path so warm starts stay lightweight;
+* the persistent VNC broker and Hextile framebuffer transport remain unchanged.
 """
 from __future__ import annotations
 
@@ -54,9 +55,17 @@ def state_v16(self: core.Runtime):
 
 def configure_remote_plasma_v16(self: core.Runtime) -> None:
     _original_configure_remote_plasma(self)
-    # Minimal Plasma was intentionally installed without recommends. Add one
-    # actually useful app and repair icon/service caches exactly once.
-    cmd = r'''if [ ! -f /root/.vessel-workstation-v16 ]; then
+    cmd = r'''mkdir -p /root/.config
+# Phone/remote desktop profile: no expensive background indexer or session restore.
+kwriteconfig5 --file /root/.config/baloofilerc --group "Basic Settings" --key Indexing-Enabled false 2>/dev/null || true
+kwriteconfig5 --file /root/.config/ksmserverrc --group General --key loginMode emptySession 2>/dev/null || true
+kwriteconfig5 --file /root/.config/kwinrc --group Compositing --key Enabled false 2>/dev/null || true
+kwriteconfig5 --file /root/.config/kdeglobals --group KDE --key AnimationDurationFactor 0 2>/dev/null || true
+balooctl disable >/dev/null 2>&1 || true
+
+# Minimal Plasma was intentionally installed without recommends. Add exactly one
+# useful workstation app and repair the icon/service cache once.
+if [ ! -f /root/.vessel-workstation-v16 ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
     konsole breeze-icon-theme >/tmp/vessel-workstation-v16.log 2>&1
@@ -110,8 +119,6 @@ fi
     try:
         v11.resilient_guest(self, command, 20.0, attempts=4)
     except Exception as exc:
-        # Cosmetic polish must never turn a working Linux desktop into a failed
-        # runtime. Keep the log for diagnostics and continue.
         self.append(f"\n[vessel-ui] panel polish skipped: {exc}\n")
         self.last_error = ""
 
