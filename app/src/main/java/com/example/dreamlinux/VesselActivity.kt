@@ -1,6 +1,6 @@
 package com.example.dreamlinux
 
-import android.app.ActivityInfo
+import android.content.pm.ActivityInfo
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
