@@ -9,33 +9,38 @@ layout(push_constant) uniform Push {
     float cameraDistance;
 } pc;
 
-const vec3 POSITIONS[36] = vec3[36](
-    vec3(-1,-1, 1), vec3( 1,-1, 1), vec3( 1, 1, 1),
-    vec3(-1,-1, 1), vec3( 1, 1, 1), vec3(-1, 1, 1),
-    vec3( 1,-1,-1), vec3(-1,-1,-1), vec3(-1, 1,-1),
-    vec3( 1,-1,-1), vec3(-1, 1,-1), vec3( 1, 1,-1),
-    vec3( 1,-1, 1), vec3( 1,-1,-1), vec3( 1, 1,-1),
-    vec3( 1,-1, 1), vec3( 1, 1,-1), vec3( 1, 1, 1),
-    vec3(-1,-1,-1), vec3(-1,-1, 1), vec3(-1, 1, 1),
-    vec3(-1,-1,-1), vec3(-1, 1, 1), vec3(-1, 1,-1),
-    vec3(-1, 1, 1), vec3( 1, 1, 1), vec3( 1, 1,-1),
-    vec3(-1, 1, 1), vec3( 1, 1,-1), vec3(-1, 1,-1),
-    vec3(-1,-1,-1), vec3( 1,-1,-1), vec3( 1,-1, 1),
-    vec3(-1,-1,-1), vec3( 1,-1, 1), vec3(-1,-1, 1)
-);
+vec2 quadCorner(int corner) {
+    if (corner == 0) return vec2(-1.0, -1.0);
+    if (corner == 1) return vec2( 1.0, -1.0);
+    if (corner == 2) return vec2( 1.0,  1.0);
+    if (corner == 3) return vec2(-1.0, -1.0);
+    if (corner == 4) return vec2( 1.0,  1.0);
+    return vec2(-1.0, 1.0);
+}
 
-const vec3 COLORS[6] = vec3[6](
-    vec3(0.18, 0.95, 0.72),
-    vec3(0.20, 0.52, 1.00),
-    vec3(0.92, 0.35, 0.40),
-    vec3(0.64, 0.36, 1.00),
-    vec3(1.00, 0.76, 0.22),
-    vec3(0.20, 0.78, 0.92)
-);
+vec3 facePosition(int face, vec2 q) {
+    if (face == 0) return vec3( q.x,  q.y,  1.0); // front
+    if (face == 1) return vec3(-q.x,  q.y, -1.0); // back
+    if (face == 2) return vec3( 1.0,  q.y, -q.x); // right
+    if (face == 3) return vec3(-1.0,  q.y,  q.x); // left
+    if (face == 4) return vec3( q.x,  1.0, -q.y); // top
+    return vec3(q.x, -1.0, q.y);                  // bottom
+}
+
+vec3 faceColor(int face) {
+    if (face == 0) return vec3(0.18, 0.95, 0.72);
+    if (face == 1) return vec3(0.20, 0.52, 1.00);
+    if (face == 2) return vec3(0.92, 0.35, 0.40);
+    if (face == 3) return vec3(0.64, 0.36, 1.00);
+    if (face == 4) return vec3(1.00, 0.76, 0.22);
+    return vec3(0.20, 0.78, 0.92);
+}
 
 void main() {
-    int index = gl_VertexIndex;
-    vec3 p = POSITIONS[index];
+    int face = gl_VertexIndex / 6;
+    int corner = gl_VertexIndex - face * 6;
+    vec2 q = quadCorner(corner);
+    vec3 p = facePosition(face, q);
 
     float cy = cos(pc.yaw);
     float sy = sin(pc.yaw);
@@ -49,14 +54,14 @@ void main() {
     float scale = 0.48 * zoom;
     float safeAspect = max(pc.aspect, 0.01);
 
-    // Procedural vertex generation removes the vertex-buffer/input path from the
-    // diagnostic completely. z=0.5 keeps every triangle safely inside Vulkan's
-    // 0..1 clip-depth range, so any valid draw must be visible.
+    // Keep every vertex safely inside Vulkan clip depth. Geometry is generated
+    // arithmetically from gl_VertexIndex instead of dynamically indexing large
+    // constant arrays, avoiding a driver-sensitive path on some Adreno builds.
     gl_Position = vec4(
         p.x * scale / safeAspect,
         -p.y * scale,
         0.5,
         1.0
     );
-    outColor = COLORS[index / 6];
+    outColor = faceColor(face);
 }
