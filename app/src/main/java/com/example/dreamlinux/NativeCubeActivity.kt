@@ -16,9 +16,7 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
 import kotlin.math.max
-import kotlin.math.min
 
 /**
  * Native Android Surface benchmark for Vessel's post-VNC display path.
@@ -176,7 +174,6 @@ private class CubeRenderer(
         GLES30.glEnable(GLES30.GL_DEPTH_TEST)
         GLES30.glEnable(GLES30.GL_CULL_FACE)
         GLES30.glCullFace(GLES30.GL_BACK)
-        GLES30.glEnable(GLES30.GL_MULTISAMPLE)
 
         rendererName = GLES30.glGetString(GLES30.GL_RENDERER) ?: "Android GPU"
         program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
