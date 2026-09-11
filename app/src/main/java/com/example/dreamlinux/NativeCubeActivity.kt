@@ -14,6 +14,7 @@ import android.view.SurfaceView
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
+import kotlin.math.max
 
 /**
  * Vulkan-only native Android Surface benchmark for Vessel.
@@ -41,7 +42,7 @@ class NativeCubeActivity : Activity() {
                 } else {
                     stats.setBackgroundColor(0xAA050807.toInt())
                 }
-                stats.text = "$text\nDrag to rotate · Pinch to zoom"
+                stats.text = "$text\nDrag to orbit · Pinch to zoom"
             }
             handler.postDelayed(this, 250L)
         }
@@ -56,7 +57,7 @@ class NativeCubeActivity : Activity() {
             setBackgroundColor(0xCC050807.toInt())
             textSize = 13f
             setPadding(28, 18, 28, 18)
-            text = "Vessel Native Vulkan\nWaiting for Android Surface…\nDrag to rotate · Pinch to zoom"
+            text = "Vessel Native Vulkan\nWaiting for Android Surface…\nDrag to orbit · Pinch to zoom"
         }
 
         nativeLoaded = try {
@@ -67,10 +68,8 @@ class NativeCubeActivity : Activity() {
             false
         }
 
-        // Important: the SurfaceView Surface is a separate compositor layer behind the
-        // Activity window. Do not give the View itself an opaque black background, because
-        // that regular View layer can cover the Vulkan Surface on some Android compositors.
-        // The parent owns the fallback background instead.
+        // SurfaceView owns a separate compositor layer. Keep the View transparent so the
+        // Vulkan swapchain remains visible; the parent supplies the black fallback color.
         surfaceView = SurfaceView(this).apply {
             background = null
             holder.setFormat(PixelFormat.OPAQUE)
@@ -92,18 +91,35 @@ class NativeCubeActivity : Activity() {
                     lastY = event.y
                     true
                 }
+
                 MotionEvent.ACTION_MOVE -> {
                     if (!scaleDetector.isInProgress && event.pointerCount == 1) {
                         val dx = event.x - lastX
                         val dy = event.y - lastY
                         val handle = rendererHandle
-                        if (handle != 0L) nativeRotate(handle, dx * 0.32f, dy * 0.32f)
+                        if (handle != 0L) {
+                            // Dimension-normalized orbit control. A full-width horizontal drag
+                            // maps to ~180° yaw and a full-height vertical drag to ~140° pitch.
+                            // Horizontal motion therefore cannot leak into vertical rotation.
+                            val yawDegrees = dx * (180f / max(surfaceView.width, 1))
+                            val pitchDegrees = -dy * (140f / max(surfaceView.height, 1))
+                            nativeRotate(handle, yawDegrees, pitchDegrees)
+                        }
                         lastX = event.x
                         lastY = event.y
                     }
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> true
+
+                MotionEvent.ACTION_POINTER_DOWN,
+                MotionEvent.ACTION_POINTER_UP -> {
+                    lastX = event.getX(0)
+                    lastY = event.getY(0)
+                    true
+                }
+
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> true
                 else -> true
             }
         }
