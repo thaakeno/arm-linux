@@ -98,11 +98,12 @@ class NativeCubeActivity : Activity() {
                         val dy = event.y - lastY
                         val handle = rendererHandle
                         if (handle != 0L) {
-                            // Dimension-normalized orbit control. A full-width horizontal drag
-                            // maps to ~180° yaw and a full-height vertical drag to ~140° pitch.
-                            // Horizontal motion therefore cannot leak into vertical rotation.
-                            val yawDegrees = dx * (180f / max(surfaceView.width, 1))
-                            val pitchDegrees = -dy * (140f / max(surfaceView.height, 1))
+                            // "Grab the object" orbit semantics: dragging right makes the
+                            // object appear to turn right, while vertical motion affects only
+                            // pitch. Lower sensitivity than the first prototype keeps small
+                            // phone movements controllable and Blender-like.
+                            val yawDegrees = -dx * (145f / max(surfaceView.width, 1))
+                            val pitchDegrees = -dy * (105f / max(surfaceView.height, 1))
                             nativeRotate(handle, yawDegrees, pitchDegrees)
                         }
                         lastX = event.x
@@ -135,13 +136,18 @@ class NativeCubeActivity : Activity() {
                 if (rendererHandle == 0L) {
                     showFatal("Vulkan renderer creation returned no native handle")
                 } else {
+                    // Push the actual visible SurfaceView dimensions immediately. On Android,
+                    // VkSurfaceCapabilitiesKHR.currentExtent can be expressed in the device's
+                    // natural orientation while SurfaceFlinger applies a 90/270° transform.
+                    // Using the View size avoids turning a square into a wide rectangle.
+                    nativeResize(rendererHandle, max(surfaceView.width, 1), max(surfaceView.height, 1))
                     stats.text = "Vessel Native Vulkan\nCreating VkInstance + Android swapchain…"
                 }
             }
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                 val handle = rendererHandle
-                if (handle != 0L) runCatching { nativeResize(handle) }
+                if (handle != 0L) runCatching { nativeResize(handle, max(width, 1), max(height, 1)) }
             }
 
             override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -210,7 +216,7 @@ class NativeCubeActivity : Activity() {
 
     private external fun nativeCreate(surface: Surface): Long
     private external fun nativeDestroy(handle: Long)
-    private external fun nativeResize(handle: Long)
+    private external fun nativeResize(handle: Long, width: Int, height: Int)
     private external fun nativeRotate(handle: Long, dxDegrees: Float, dyDegrees: Float)
     private external fun nativeZoom(handle: Long, scaleFactor: Float)
     private external fun nativeStatus(handle: Long): String
