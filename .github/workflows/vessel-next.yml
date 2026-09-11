@@ -87,7 +87,10 @@ jobs:
                   'TRACKPAD', 'getHistoricalX', 'showKeyboard', 'out.flush()',
               ],
               'app/src/main/java/com/example/dreamlinux/VesselActivity.kt': [
-                  'FullscreenDesktop', 'Vulkan 3D test',
+                  'FullscreenDesktop', 'Open native 3D cube', 'protocol 22', '8 GB UML memory',
+              ],
+              'app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt': [
+                  'GLSurfaceView', 'RENDERMODE_CONTINUOUSLY', 'Drag to rotate', 'Pinch to zoom',
               ],
           }
           for path, needles in checks.items():
