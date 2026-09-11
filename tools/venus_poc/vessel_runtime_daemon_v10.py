@@ -309,7 +309,7 @@ rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
             time.sleep(0.4)
         else:
             tail = guest_retry(self, "tail -n 120 /tmp/vessel-vnc.log 2>/dev/null || true", 8.0)
-            raise RuntimeError("KDE/TigerVNC package installation exceeded 15 minutes: " + tail[-7000:])
+            raise RuntimeError("TigerVNC failed to start: " + tail[-6000:])
 
         if self.vnc_proxy is None:
             self.vnc_proxy = core.ReverseVncProxy(self)
