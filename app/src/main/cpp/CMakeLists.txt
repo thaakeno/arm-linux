@@ -63,6 +63,12 @@ add_custom_target(vessel_vulkan_shaders DEPENDS "${VERT_HEADER}" "${FRAG_HEADER}
 add_library(vessel_vulkan SHARED native_vulkan_cube.cpp)
 add_dependencies(vessel_vulkan vessel_vulkan_shaders)
 target_compile_features(vessel_vulkan PRIVATE cxx_std_17)
-target_compile_options(vessel_vulkan PRIVATE -Wall -Wextra -Werror)
+# Android Vulkan platform types/functions are hidden by vulkan.h unless this is defined
+# before inclusion. Defining it at the target level keeps the native source portable and
+# guarantees VkAndroidSurfaceCreateInfoKHR / vkCreateAndroidSurfaceKHR are declared.
+target_compile_definitions(vessel_vulkan PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
+# Vulkan's C structs are intentionally initialized with sType and then populated field-by-field.
+# Clang's -Wmissing-field-initializers is therefore noise here, while all other warnings stay fatal.
+target_compile_options(vessel_vulkan PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
 target_include_directories(vessel_vulkan PRIVATE "${GENERATED_DIR}")
 target_link_libraries(vessel_vulkan PRIVATE android log vulkan)
