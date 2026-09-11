@@ -3,7 +3,7 @@
 
 Protocol 13 finally produced a live Plasma desktop, but the embedded viewer
 could still trigger a false fatal error because every Android VNC connection
-asked the guest command agent to launch a one-shot reverse helper.  That made
+asked the guest command agent to launch a one-shot reverse helper. That made
 VNC reconnects depend on the command RPC channel and could race with the
 short-lived guest agent connection.
 
@@ -11,8 +11,8 @@ Protocol 14 starts one persistent guest-side VNC broker after Plasma is ready.
 The broker continuously connects the private Xtigervnc Unix socket to Vessel's
 reverse listener. Android VNC reconnects therefore never execute guest
 commands. It also applies a remote-desktop Plasma profile: compositing and
-animations are disabled to avoid wasting CPU/GPU work that VNC immediately
-re-encodes anyway.
+animations are disabled, the guest framebuffer is capped to a phone-friendly
+size, and QML modules omitted by earlier minimal installs are repaired.
 """
 from __future__ import annotations
 
@@ -96,20 +96,28 @@ while True:
 
 
 def configure_remote_plasma(self: core.Runtime) -> None:
-    # KWin X11 compositing adds latency and causes large continuously-changing
-    # regions that are expensive for a remote framebuffer. KDE itself supports
-    # disabling compositing under X11, which is ideal for this VNC-backed UI.
+    # KWin X11 compositing adds latency and causes continuously-changing pixels
+    # that VNC must encode again. For a remote framebuffer, non-composited X11
+    # is both lower latency and cheaper to transmit.
     cmd = r'''mkdir -p /root/.config
 kwriteconfig5 --file /root/.config/kwinrc --group Compositing --key Enabled false 2>/dev/null || true
 kwriteconfig5 --file /root/.config/kdeglobals --group KDE --key AnimationDurationFactor 0 2>/dev/null || true
-# Ensure the QML modules used by Kickoff are present. Earlier --no-install-
-# recommends installs could leave an otherwise-running shell with broken menu
-# pages on partially-upgraded images.
-export DEBIAN_FRONTEND=noninteractive
-apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
-  qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels >/tmp/vessel-plasma-qml-fix.log 2>&1 || true
+
+# Earlier Vessel builds intentionally used --no-install-recommends. On Debian
+# Bookworm that can leave Kickoff visibly broken even though plasmashell starts:
+# org.kde.kitemmodels and Qt.labs.platform are common missing QML modules in
+# minimal/Termux KDE installs. Repair only these small runtime modules once.
+if [ ! -f /root/.vessel-plasma-qml-v14 ]; then
+  export DEBIAN_FRONTEND=noninteractive
+  dpkg --configure -a >/tmp/vessel-plasma-qml-fix.log 2>&1 || true
+  apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
+    qml-module-org-kde-kirigami2 \
+    qml-module-org-kde-kitemmodels \
+    qml-module-qt-labs-platform >>/tmp/vessel-plasma-qml-fix.log 2>&1
+  touch /root/.vessel-plasma-qml-v14
+fi
 '''
-    v11.resilient_guest(self, cmd, 180.0)
+    v11.resilient_guest(self, cmd, 240.0)
 
 
 def start_persistent_broker(self: core.Runtime) -> None:
@@ -166,9 +174,12 @@ def desktop_v14(self: core.Runtime, width: int = 1280, height: int = 800, dpi: i
 
     with lock:
         self.start()
-        width = max(960, min(width, 1920))
-        height = max(600, min(height, 1200))
-        dpi = max(96, min(dpi, 180))
+        # The Android viewer is phone-sized. Rendering a ~1500x1600 raw desktop
+        # only wastes bandwidth and decoding time. 1280x800 is still sharper
+        # than the in-app viewport on typical phones and dramatically cheaper.
+        width = max(960, min(width, 1280))
+        height = max(600, min(height, 800))
+        dpi = max(96, min(dpi, 160))
         self.last_error = ""
 
         self.set_progress("desktop_check", 60, "Checking KDE Plasma X11 and TigerVNC")
@@ -179,8 +190,6 @@ def desktop_v14(self: core.Runtime, width: int = 1280, height: int = 800, dpi: i
         install_persistent_reverse_helper(self)
 
         v13.start_xtigervnc_unix(self, width, height, dpi)
-        # Force no compositor for this session as well as persistent kwinrc.
-        old_start_plasma = v12._start_plasma
         self.set_progress("vnc_start", 94, "Starting KDE Plasma X11 session")
         command = r'''mkdir -p /tmp/vessel-runtime
 chmod 700 /tmp/vessel-runtime
