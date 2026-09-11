@@ -20,7 +20,7 @@ class TermuxUmlController(private val context: Context) {
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = 5901
-        const val REQUIRED_PROTOCOL = 19
+        const val REQUIRED_PROTOCOL = 20
 
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
@@ -50,7 +50,7 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) starting"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) starting protocol 20"
               set -e
               cd ~/venus-poc
               echo "[vessel-launch] fetching app/vessel-final"
@@ -76,8 +76,8 @@ class TermuxUmlController(private val context: Context) {
               fi
 
               export VESSEL_POC_DIR=~/vessel-poc-runtime
-              echo "[vessel-launch] exec runtime daemon protocol 19"
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v19.py
+              echo "[vessel-launch] exec runtime daemon protocol 20"
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v20.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
@@ -106,9 +106,28 @@ class TermuxUmlController(private val context: Context) {
         }
     }
 
+    private fun requireOk(action: String, obj: JSONObject): JSONObject {
+        if (!obj.optBoolean("ok", false)) {
+            val reason = obj.optString("error").ifBlank {
+                obj.optString("lastError").ifBlank { "$action failed" }
+            }
+            throw IllegalStateException(reason)
+        }
+        return obj
+    }
+
     suspend fun ensureDaemon(): JSONObject = withContext(Dispatchers.IO) {
         val existing = runCatching { requestBlocking(JSONObject().put("action", "status"), 900) }.getOrNull()
-        if (existing != null && existing.optInt("protocolVersion", 0) >= REQUIRED_PROTOCOL) return@withContext existing
+        if (existing != null && existing.optInt("protocolVersion", 0) >= REQUIRED_PROTOCOL) {
+            return@withContext existing
+        }
+
+        // Protocol upgrades must not orphan a live UML process. Ask the previous
+        // daemon to shut the guest down cleanly before its controller is replaced.
+        if (existing != null) {
+            runCatching { requestBlocking(JSONObject().put("action", "stop"), 15_000) }
+            delay(250)
+        }
 
         launchDaemon()
         var last: Throwable? = null
@@ -127,7 +146,8 @@ class TermuxUmlController(private val context: Context) {
     }
 
     suspend fun start(): JSONObject = withContext(Dispatchers.IO) {
-        ensureDaemon(); requestBlocking(JSONObject().put("action", "start").put("timeout", 80), 95_000)
+        ensureDaemon()
+        requireOk("Start Debian", requestBlocking(JSONObject().put("action", "start").put("timeout", 80), 95_000))
     }
 
     suspend fun stop(): JSONObject = withContext(Dispatchers.IO) {
@@ -137,11 +157,23 @@ class TermuxUmlController(private val context: Context) {
 
     suspend fun startDesktop(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) {
         ensureDaemon()
-        requestBlocking(JSONObject().put("action", "desktop").put("width", width).put("height", height).put("dpi", dpi), 22 * 60 * 1_000)
+        requireOk(
+            "Start Plasma",
+            requestBlocking(
+                JSONObject().put("action", "desktop").put("width", width).put("height", height).put("dpi", dpi),
+                22 * 60 * 1_000
+            )
+        )
     }
 
     suspend fun guest(command: String, timeoutSeconds: Int = 45): JSONObject = withContext(Dispatchers.IO) {
         ensureDaemon()
-        requestBlocking(JSONObject().put("action", "guest").put("command", command).put("timeout", timeoutSeconds), (timeoutSeconds + 10) * 1_000)
+        requireOk(
+            "Guest command",
+            requestBlocking(
+                JSONObject().put("action", "guest").put("command", command).put("timeout", timeoutSeconds),
+                (timeoutSeconds + 10) * 1_000
+            )
+        )
     }
 }
