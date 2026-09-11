@@ -91,9 +91,12 @@ cp "$OUT/.config" "$ART/vessel-uml-smp.config"
   sha256sum "$ART/linux-umshm" "$ART/stub_exe-umshm"
 } | tee "$ART/SHA256SUMS.txt"
 
-# Prove that this is an SMP-capable UML binary before publishing it.
-if ! "$ART/linux-umshm" --help 2>&1 | grep -q 'ncpus='; then
-  echo 'rebuilt kernel does not advertise ncpus=; refusing artifact' >&2
+# The hosted Actions runner is x86_64 while linux-umshm is an Android/bionic
+# AArch64 executable. Executing it here would fail with ENOEXEC even when the
+# kernel is perfectly valid. Verify the compiled-in UML setup/help string in
+# the binary instead; CONFIG_SMP/NR_CPUS were already verified above.
+if ! strings "$ART/linux-umshm" | grep -Fq 'ncpus=<# of desired CPUs>'; then
+  echo 'rebuilt kernel is missing the compiled-in ncpus= UML option' >&2
   exit 1
 fi
 
