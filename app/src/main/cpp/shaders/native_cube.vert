@@ -4,6 +4,7 @@ layout(location = 0) out vec3 outWorldPos;
 layout(location = 1) out vec3 outWorldNormal;
 layout(location = 2) out vec3 outBaseColor;
 layout(location = 3) out vec3 outCameraPos;
+layout(location = 4) out vec2 outFaceUv;
 
 layout(push_constant) uniform Push {
     float yaw;
@@ -40,25 +41,23 @@ vec3 faceNormal(int face) {
 }
 
 vec3 faceColor(int face) {
-    // Blender-like neutral material with a very small per-face tint so the
-    // silhouette stays readable even before the lighting contribution.
-    if (face == 0) return vec3(0.48, 0.54, 0.63);
-    if (face == 1) return vec3(0.43, 0.49, 0.58);
-    if (face == 2) return vec3(0.54, 0.58, 0.66);
-    if (face == 3) return vec3(0.46, 0.51, 0.60);
-    if (face == 4) return vec3(0.58, 0.61, 0.68);
-    return vec3(0.40, 0.46, 0.55);
+    // Neutral studio-gray material. Tiny face variation keeps edges readable
+    // without turning the benchmark into a neon/debug cube.
+    if (face == 0) return vec3(0.49, 0.52, 0.57);
+    if (face == 1) return vec3(0.45, 0.48, 0.53);
+    if (face == 2) return vec3(0.53, 0.55, 0.59);
+    if (face == 3) return vec3(0.47, 0.50, 0.55);
+    if (face == 4) return vec3(0.57, 0.59, 0.62);
+    return vec3(0.42, 0.45, 0.50);
 }
 
 void main() {
     int face = gl_VertexIndex / 6;
     int corner = gl_VertexIndex - face * 6;
-    vec3 worldPos = facePosition(face, quadCorner(corner));
+    vec2 faceUv = quadCorner(corner);
+    vec3 worldPos = facePosition(face, faceUv);
     vec3 worldNormal = faceNormal(face);
 
-    // Orbit camera: horizontal drag changes yaw around world-up, vertical drag
-    // changes pitch around the camera's local right axis. This feels much more
-    // like Blender's orbit control than rotating the object in screen space.
     float cp = cos(pc.pitch);
     vec3 cameraPos = pc.cameraDistance * vec3(
         cp * sin(pc.yaw),
@@ -75,13 +74,20 @@ void main() {
     float viewY = dot(rel, up);
     float viewZ = dot(rel, forward);
 
+    // Android Vulkan surfaces may expose the swapchain extent in the device's
+    // native orientation while SurfaceFlinger applies a 90/270-degree
+    // pre-transform for landscape. The old code used that portrait aspect
+    // directly, which expanded X by ~2x and made a real cube look like a box.
+    // The benchmark is landscape-only, so normalize to the visible landscape
+    // aspect regardless of which orientation the swapchain reports.
     float safeAspect = max(pc.aspect, 0.01);
-    float fovY = radians(43.0);
+    if (safeAspect < 1.0) safeAspect = 1.0 / safeAspect;
+
+    float fovY = radians(46.0);
     float f = 1.0 / tan(fovY * 0.5);
     float nearPlane = 0.10;
     float farPlane = 64.0;
 
-    // Vulkan NDC uses z in [0, 1]. Keep +Y visually upright by flipping clip Y.
     float clipX = viewX * f / safeAspect;
     float clipY = -viewY * f;
     float clipZ = (farPlane / (farPlane - nearPlane)) * viewZ
@@ -92,4 +98,5 @@ void main() {
     outWorldNormal = worldNormal;
     outBaseColor = faceColor(face);
     outCameraPos = cameraPos;
+    outFaceUv = faceUv;
 }
