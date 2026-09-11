@@ -26,7 +26,7 @@ import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.max
 
-/** Persistent native Vulkan diagnostic kept in the finished Vessel app. */
+/** Permanent native Android Vulkan benchmark and future Debian A/B reference renderer. */
 class NativeCubeActivity : Activity() {
     private lateinit var stats: TextView
     private lateinit var logs: TextView
@@ -50,6 +50,8 @@ class NativeCubeActivity : Activity() {
     private var physicsEnabled = true
     private var rtEnabled = true
     private var interactMode = false
+    private var lightFocusMode = false
+    private var statsExpanded = true
     private var quality = 72
     private var lastPublishedNativeLog = ""
     private val logHistory = ArrayDeque<String>()
@@ -66,28 +68,33 @@ class NativeCubeActivity : Activity() {
                 val logText = runCatching { nativeLogs(handle) }
                     .getOrElse { "log read failed: ${it.message ?: it.javaClass.simpleName}" }
                 stats.background = rounded(
-                    if (status.startsWith("ERROR:")) 0xDB3B171A.toInt() else 0xB80A0E0D.toInt(),
-                    14f,
-                    0x354FD1B5
+                    if (status.startsWith("ERROR:")) 0xD9321216.toInt() else 0xA90A0D0C.toInt(),
+                    12f,
+                    if (status.startsWith("ERROR:")) 0x99FF776F.toInt() else 0x384ADBC0
                 )
-                val gesture = if (interactMode) "Drag objects · release to throw" else "Orbit · pinch zoom"
-                stats.text = "$status\n$gesture"
+                val gesture = when {
+                    lightFocusMode -> "Move light · drag anywhere · release to place/throw"
+                    interactMode -> "Interact · drag objects · release to throw"
+                    else -> "Orbit · pinch zoom"
+                }
+                val lines = status.lines()
+                stats.text = if (statsExpanded) "$status\n$gesture" else lines.firstOrNull().orEmpty()
                 absorbNativeLog(logText)
                 val now = System.currentTimeMillis()
                 if (now - lastStatusSnapshotMs > 1_000L && status != lastStatusSnapshot) {
                     lastStatusSnapshot = status
                     lastStatusSnapshotMs = now
-                    appendLog("PERF  ${status.lineSequence().firstOrNull().orEmpty()}")
+                    appendLog("PERF  ${lines.firstOrNull().orEmpty()}")
                 }
-                logs.text = logHistory.takeLast(16).joinToString("\n")
-                val merged = "$status\n${logHistory.joinToString("\n")}".takeLast(120_000)
+                logs.text = logHistory.takeLast(18).joinToString("\n")
+                val merged = "$status\n${logHistory.joinToString("\n")}".takeLast(160_000)
                 if (merged != lastPublishedNativeLog) {
                     lastPublishedNativeLog = merged
                     val s = VmSessionService.state.value
                     val marker = "[Native Vulkan Studio]"
                     val old = s.console.substringBeforeLast(marker).trimEnd()
                     VmSessionService.state.value = s.copy(
-                        console = (old + "\n\n$marker\n" + merged).takeLast(200_000)
+                        console = (old + "\n\n$marker\n" + merged).takeLast(220_000)
                     )
                 }
             }
@@ -102,15 +109,23 @@ class NativeCubeActivity : Activity() {
         stats = TextView(this).apply {
             setTextColor(Color.WHITE)
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
-            textSize = 10.4f
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            text = "Vessel Vulkan Studio v5\nWaiting for Android Surface…"
+            textSize = 9.2f
+            setLineSpacing(0f, 0.96f)
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            text = "Vessel Vulkan Studio v6\nLoading photoreal courtyard…"
+            setOnClickListener {
+                statsExpanded = !statsExpanded
+                animate().scaleX(if (statsExpanded) 1.015f else .985f).scaleY(if (statsExpanded) 1.015f else .985f).setDuration(90).withEndAction {
+                    animate().scaleX(1f).scaleY(1f).setDuration(100).start()
+                }.start()
+            }
         }
         logs = TextView(this).apply {
             setTextColor(0xFFE8F0EC.toInt())
             typeface = Typeface.MONOSPACE
-            textSize = 8.6f
-            setPadding(dp(11), dp(8), dp(11), dp(9))
+            textSize = 7.8f
+            setLineSpacing(0f, .94f)
+            setPadding(dp(9), dp(6), dp(9), dp(7))
             setTextIsSelectable(true)
             text = "renderer not started"
         }
@@ -132,7 +147,9 @@ class NativeCubeActivity : Activity() {
             this,
             object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
                 override fun onScale(detector: ScaleGestureDetector): Boolean {
-                    if (!interactMode && rendererHandle != 0L) nativeZoom(rendererHandle, detector.scaleFactor)
+                    if (!interactMode && !lightFocusMode && rendererHandle != 0L) {
+                        nativeZoom(rendererHandle, detector.scaleFactor)
+                    }
                     return true
                 }
             }
@@ -143,15 +160,18 @@ class NativeCubeActivity : Activity() {
             val handle = rendererHandle
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    lastX = event.x; lastY = event.y
-                    if (interactMode && handle != 0L) {
-                        nativeGrabStart(handle, event.x / max(surfaceView.width, 1), event.y / max(surfaceView.height, 1))
+                    lastX = event.x
+                    lastY = event.y
+                    if (handle != 0L && (interactMode || lightFocusMode)) {
+                        val nx = event.x / max(surfaceView.width, 1)
+                        val ny = event.y / max(surfaceView.height, 1)
+                        if (lightFocusMode) nativeGrabLightStart(handle, nx, ny) else nativeGrabStart(handle, nx, ny)
                     }
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (!scaleDetector.isInProgress && event.pointerCount == 1 && handle != 0L) {
-                        if (interactMode) {
+                        if (interactMode || lightFocusMode) {
                             nativeGrabMove(handle, event.x / max(surfaceView.width, 1), event.y / max(surfaceView.height, 1))
                         } else {
                             nativeRotate(
@@ -160,15 +180,18 @@ class NativeCubeActivity : Activity() {
                                 -(event.y - lastY) * (105f / max(surfaceView.height, 1))
                             )
                         }
-                        lastX = event.x; lastY = event.y
+                        lastX = event.x
+                        lastY = event.y
                     }
                     true
                 }
                 MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_POINTER_UP -> {
-                    lastX = event.getX(0); lastY = event.getY(0); true
+                    lastX = event.getX(0)
+                    lastY = event.getY(0)
+                    true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (interactMode && handle != 0L) nativeGrabEnd(handle)
+                    if ((interactMode || lightFocusMode) && handle != 0L) nativeGrabEnd(handle)
                     true
                 }
                 else -> true
@@ -178,8 +201,7 @@ class NativeCubeActivity : Activity() {
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
                 if (!nativeLoaded || rendererHandle != 0L) return
-                val surface: Surface = holder.surface
-                rendererHandle = runCatching { nativeCreate(surface) }.getOrElse {
+                rendererHandle = runCatching { nativeCreate(holder.surface) }.getOrElse {
                     showFatal("Vulkan renderer creation failed: ${it.message ?: it.javaClass.simpleName}")
                     0L
                 }
@@ -199,108 +221,243 @@ class NativeCubeActivity : Activity() {
             override fun surfaceDestroyed(holder: SurfaceHolder) = destroyRenderer()
         })
 
-        controlsCard = buildControls().apply { visibility = View.GONE }
-        logCard = buildLogCard().apply { visibility = View.GONE }
+        controlsCard = buildControls().apply { visibility = View.GONE; alpha = 0f; translationX = dp(16).toFloat() }
+        logCard = buildLogCard().apply { visibility = View.GONE; alpha = 0f; translationY = dp(12).toFloat() }
         val quickBar = buildQuickBar()
 
+        val panelWidth = minOf(dp(224), (resources.displayMetrics.widthPixels * .31f).toInt())
+        val logWidth = minOf(dp(326), (resources.displayMetrics.widthPixels * .48f).toInt())
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         root.addView(surfaceView, FrameLayout.LayoutParams(-1, -1))
-        root.addView(stats, FrameLayout.LayoutParams(-2, -2).apply { leftMargin = dp(10); topMargin = dp(9) })
-        root.addView(quickBar, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { topMargin = dp(9); rightMargin = dp(10) })
-        root.addView(controlsCard, FrameLayout.LayoutParams(dp(270), -2, Gravity.TOP or Gravity.END).apply { topMargin = dp(52); rightMargin = dp(10) })
-        root.addView(logCard, FrameLayout.LayoutParams(dp(360), dp(176), Gravity.BOTTOM or Gravity.START).apply { leftMargin = dp(10); bottomMargin = dp(10) })
+        root.addView(stats, FrameLayout.LayoutParams(-2, -2).apply { leftMargin = dp(7); topMargin = dp(7) })
+        root.addView(quickBar, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { topMargin = dp(7); rightMargin = dp(7) })
+        root.addView(controlsCard, FrameLayout.LayoutParams(panelWidth, -2, Gravity.TOP or Gravity.END).apply { topMargin = dp(39); rightMargin = dp(7) })
+        root.addView(logCard, FrameLayout.LayoutParams(logWidth, dp(148), Gravity.BOTTOM or Gravity.START).apply { leftMargin = dp(7); bottomMargin = dp(7) })
         setContentView(root)
         handler.post(statsPoll)
     }
 
     private fun buildQuickBar(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
-        background = rounded(0xA8080C0B.toInt(), 14f, 0x284FD1B5)
-        setPadding(dp(4), dp(4), dp(4), dp(4))
-        addView(hudButton("Tune") { controlsCard.visibility = if (controlsCard.visibility == View.VISIBLE) View.GONE else View.VISIBLE })
-        addView(hudButton("Logs") { logCard.visibility = if (logCard.visibility == View.VISIBLE) View.GONE else View.VISIBLE })
+        background = rounded(0x93070A09.toInt(), 12f, 0x304ADBC0)
+        setPadding(dp(3), dp(3), dp(3), dp(3))
+        addView(iconButton("≡", "Tune renderer") { togglePanel(controlsCard, horizontal = true) })
+        addView(iconButton("▤", "Vulkan log") { togglePanel(logCard, horizontal = false) })
     }
 
-    private fun hudButton(label: String, click: () -> Unit) = Button(this).apply {
-        text = label; isAllCaps = false; textSize = 9.4f; setTextColor(Color.WHITE)
-        minHeight = 0; minWidth = 0; setPadding(dp(10), dp(5), dp(10), dp(5))
-        background = rounded(0xB4141B18.toInt(), 11f, 0x204FD1B5)
+    private fun iconButton(icon: String, description: String, click: () -> Unit) = TextView(this).apply {
+        text = icon
+        contentDescription = description
+        gravity = Gravity.CENTER
+        textSize = 15f
+        setTextColor(0xFFF3FFFA.toInt())
+        setPadding(dp(9), dp(4), dp(9), dp(4))
+        background = rounded(0x8E111714.toInt(), 9f, 0x254ADBC0)
         setOnClickListener { click() }
+    }
+
+    private fun togglePanel(view: View, horizontal: Boolean) {
+        if (view.visibility == View.VISIBLE) {
+            view.animate().alpha(0f)
+                .translationX(if (horizontal) dp(14).toFloat() else 0f)
+                .translationY(if (horizontal) 0f else dp(10).toFloat())
+                .setDuration(150)
+                .withEndAction { view.visibility = View.GONE }
+                .start()
+        } else {
+            view.visibility = View.VISIBLE
+            view.alpha = 0f
+            view.translationX = if (horizontal) dp(14).toFloat() else 0f
+            view.translationY = if (horizontal) 0f else dp(10).toFloat()
+            view.animate().alpha(1f).translationX(0f).translationY(0f).setDuration(180).start()
+        }
     }
 
     private fun buildControls(): LinearLayout {
         fun button(label: String, accent: Boolean = false, click: (Button) -> Unit) = Button(this).apply {
-            text = label; textSize = 9.2f; isAllCaps = false; setTextColor(Color.WHITE)
-            minHeight = 0; minWidth = 0; setPadding(dp(9), dp(6), dp(9), dp(6))
-            background = rounded(if (accent) 0xD51A6D5E.toInt() else 0xC8141B18.toInt(), 11f, if (accent) 0x705DE0BE else 0x25485A54)
-            setOnClickListener { click(this) }
+            text = label
+            textSize = 8.1f
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            minHeight = 0
+            minWidth = 0
+            setPadding(dp(5), dp(3), dp(5), dp(3))
+            background = rounded(if (accent) 0xC8177767.toInt() else 0xB8111714.toInt(), 9f, if (accent) 0x795DE8C7 else 0x29445650)
+            setOnClickListener {
+                animate().scaleX(.96f).scaleY(.96f).setDuration(55).withEndAction {
+                    animate().scaleX(1f).scaleY(1f).setDuration(85).start()
+                }.start()
+                click(this)
+            }
+        }
+        fun row(vararg views: View) = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            views.forEach { addView(it, LinearLayout.LayoutParams(0, dp(35), 1f).apply { marginEnd = dp(3) }) }
         }
         fun section(text: String) = TextView(this).apply {
-            this.text = text; textSize = 8.2f; setTextColor(0xFF8FA39B.toInt()); setPadding(0, dp(4), 0, dp(3)); letterSpacing = 0.08f
+            this.text = text
+            textSize = 7.2f
+            setTextColor(0xFF8FA79E.toInt())
+            setPadding(0, dp(4), 0, dp(2))
+            letterSpacing = .10f
         }
+
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(11), dp(9), dp(11), dp(10))
-            background = rounded(0xD70A0E0D.toInt(), 16f, 0x354FD1B5)
+            setPadding(dp(9), dp(8), dp(8), dp(8))
+            background = rounded(0xD7070B09.toInt(), 14f, 0x3B4ADBC0)
+            addView(LinearLayout(this@NativeCubeActivity).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                addView(TextView(this@NativeCubeActivity).apply {
+                    text = "VULKAN STUDIO"
+                    textSize = 10.4f
+                    setTextColor(Color.WHITE)
+                    typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+                }, LinearLayout.LayoutParams(0, -2, 1f))
+                addView(TextView(this@NativeCubeActivity).apply {
+                    text = "v6"
+                    textSize = 7.4f
+                    gravity = Gravity.CENTER
+                    setTextColor(0xFFD8F7ED.toInt())
+                    setPadding(dp(6), dp(2), dp(6), dp(2))
+                    background = rounded(0x75455F57, 7f)
+                })
+            })
             addView(TextView(this@NativeCubeActivity).apply {
-                text = "VULKAN STUDIO v5"; textSize = 11.6f; setTextColor(Color.WHITE); typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+                text = "Photoreal courtyard · HW ray queries"
+                textSize = 7.2f
+                setTextColor(0xFF9BA9A4.toInt())
+                setPadding(0, dp(1), 0, dp(2))
             })
             addView(section("GRAPHICS"))
-            qualityLabel = TextView(this@NativeCubeActivity).apply { setTextColor(0xFFEAF7F1.toInt()); textSize = 9.6f; text = "Quality $quality / 100" }
+            qualityLabel = TextView(this@NativeCubeActivity).apply {
+                setTextColor(0xFFEAF7F1.toInt())
+                textSize = 8.1f
+                text = "Quality  $quality / 100"
+            }
             addView(qualityLabel)
             qualitySeek = SeekBar(this@NativeCubeActivity).apply {
-                max = 100; progress = quality
+                max = 100
+                progress = quality
+                setPadding(0, 0, 0, 0)
                 setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                     override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                        quality = progress; qualityLabel.text = "Quality $quality / 100"; if (rendererHandle != 0L) nativeSetQuality(rendererHandle, quality)
+                        quality = progress
+                        qualityLabel.text = "Quality  $quality / 100"
+                        if (rendererHandle != 0L) nativeSetQuality(rendererHandle, quality)
                     }
                     override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
                     override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
                 })
             }
-            addView(qualitySeek)
-            val presets = LinearLayout(this@NativeCubeActivity).apply { orientation = LinearLayout.HORIZONTAL }
-            presets.addView(button("Low") { setQualityPreset(15) }); presets.addView(button("120Hz") { setQualityPreset(62) }); presets.addView(button("Ultra", true) { setQualityPreset(100) }); addView(presets)
-            addView(section("RENDER"))
-            val row1 = LinearLayout(this@NativeCubeActivity).apply { orientation = LinearLayout.HORIZONTAL }
-            modeButton = button("Quality") { b -> stressMode = !stressMode; b.text = if (stressMode) "Stress" else "Quality"; if (rendererHandle != 0L) nativeSetStress(rendererHandle, stressMode) }
-            physicsButton = button("Physics on") { b -> physicsEnabled = !physicsEnabled; b.text = if (physicsEnabled) "Physics on" else "Physics off"; if (rendererHandle != 0L) nativeSetPhysics(rendererHandle, physicsEnabled) }
-            row1.addView(modeButton); row1.addView(physicsButton); addView(row1)
-            val row2 = LinearLayout(this@NativeCubeActivity).apply { orientation = LinearLayout.HORIZONTAL }
-            rtButton = button("RT on", true) { b -> rtEnabled = !rtEnabled; b.text = if (rtEnabled) "RT on" else "RT off"; if (rendererHandle != 0L) nativeSetRt(rendererHandle, rtEnabled) }
-            interactButton = button("Orbit") { b -> interactMode = !interactMode; b.text = if (interactMode) "Interact" else "Orbit"; updateInteractionHint(); if (!interactMode && rendererHandle != 0L) nativeGrabEnd(rendererHandle) }
-            row2.addView(rtButton); row2.addView(interactButton); addView(row2)
+            addView(qualitySeek, LinearLayout.LayoutParams(-1, dp(28)))
+            addView(row(
+                button("Low") { setQualityPreset(20) },
+                button("120Hz") { setQualityPreset(68) },
+                button("Ultra RT", true) { setQualityPreset(100) }
+            ))
+            addView(section("RENDER + PHYSICS"))
+            modeButton = button("Courtyard") { b ->
+                stressMode = !stressMode
+                b.text = if (stressMode) "Stress" else "Courtyard"
+                if (rendererHandle != 0L) nativeSetStress(rendererHandle, stressMode)
+            }
+            physicsButton = button("Physics ON") { b ->
+                physicsEnabled = !physicsEnabled
+                b.text = if (physicsEnabled) "Physics ON" else "Physics OFF"
+                if (rendererHandle != 0L) nativeSetPhysics(rendererHandle, physicsEnabled)
+            }
+            addView(row(modeButton, physicsButton))
+            rtButton = button("RT ON", true) { b ->
+                rtEnabled = !rtEnabled
+                b.text = if (rtEnabled) "RT ON" else "RT OFF"
+                if (rendererHandle != 0L) nativeSetRt(rendererHandle, rtEnabled)
+            }
+            interactButton = button("Orbit") { b ->
+                interactMode = !interactMode
+                lightFocusMode = false
+                b.text = if (interactMode) "Interact" else "Orbit"
+                updateInteractionHint()
+                if (!interactMode && rendererHandle != 0L) nativeGrabEnd(rendererHandle)
+            }
+            addView(row(rtButton, interactButton))
             addView(section("INTERACTION"))
-            interactionHint = TextView(this@NativeCubeActivity).apply { textSize = 8.2f; setTextColor(0xFFA7B7B0.toInt()); setPadding(dp(2), 0, dp(2), dp(4)) }
-            addView(interactionHint); updateInteractionHint()
-            val row3 = LinearLayout(this@NativeCubeActivity).apply { orientation = LinearLayout.HORIZONTAL }
-            row3.addView(button("Move light", true) { interactMode = true; interactButton.text = "Interact"; updateInteractionHint(true) })
-            row3.addView(button("Reset") { if (rendererHandle != 0L) nativeResetPhysics(rendererHandle) }); addView(row3)
+            interactionHint = TextView(this@NativeCubeActivity).apply {
+                textSize = 7.1f
+                setTextColor(0xFFA9B8B2.toInt())
+                setPadding(dp(1), 0, dp(1), dp(3))
+                maxLines = 2
+            }
+            addView(interactionHint)
+            updateInteractionHint()
+            addView(row(
+                button("Light", true) {
+                    lightFocusMode = true
+                    interactMode = true
+                    interactButton.text = "Interact"
+                    updateInteractionHint(true)
+                },
+                button("Reset") { if (rendererHandle != 0L) nativeResetPhysics(rendererHandle) }
+            ))
         }
     }
 
     private fun buildLogCard(): LinearLayout {
-        val header = TextView(this).apply { text = "VULKAN LOG · retained"; textSize = 8.7f; setTextColor(0xFF9FB2AA.toInt()); setPadding(dp(11), dp(7), dp(8), dp(3)) }
-        val scroll = ScrollView(this).apply { isFillViewport = true; addView(logs, FrameLayout.LayoutParams(-1, -2)) }
+        val header = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(9), dp(5), dp(5), dp(2))
+            addView(TextView(this@NativeCubeActivity).apply {
+                text = "VULKAN LOG · V6"
+                textSize = 7.4f
+                setTextColor(0xFFAFC4BB.toInt())
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(iconButton("×", "Close log") { togglePanel(logCard, horizontal = false) })
+        }
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(logs, FrameLayout.LayoutParams(-1, -2))
+        }
         val actions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; setPadding(dp(6), dp(3), dp(6), dp(6))
-            addView(hudButton("Copy") {
-                val text = buildString { append(stats.text); append("\n\nVULKAN LOG\n"); append(logHistory.joinToString("\n")) }
-                getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Vessel Vulkan Studio logs", text))
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(5), dp(2), dp(5), dp(5))
+            addView(smallAction("Copy") {
+                val text = buildString {
+                    append(stats.text)
+                    append("\n\nVULKAN LOG\n")
+                    append(logHistory.joinToString("\n"))
+                }
+                getSystemService(ClipboardManager::class.java)
+                    .setPrimaryClip(ClipData.newPlainText("Vessel Vulkan Studio logs", text))
                 Toast.makeText(this@NativeCubeActivity, "Full Vulkan log copied", Toast.LENGTH_SHORT).show()
             })
-            addView(hudButton("Clear") { logHistory.clear(); appendLog("log history cleared"); logs.text = logHistory.joinToString("\n") })
-            addView(hudButton("Close") { logCard.visibility = View.GONE })
+            addView(smallAction("Clear") {
+                logHistory.clear()
+                appendLog("log history cleared")
+                logs.text = logHistory.joinToString("\n")
+            })
         }
         return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; background = rounded(0xD5080C0B.toInt(), 14f, 0x304FD1B5)
-            addView(header); addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f)); addView(actions)
+            orientation = LinearLayout.VERTICAL
+            background = rounded(0xD3070B09.toInt(), 13f, 0x384ADBC0)
+            addView(header)
+            addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+            addView(actions)
         }
+    }
+
+    private fun smallAction(label: String, click: () -> Unit) = TextView(this).apply {
+        text = label
+        gravity = Gravity.CENTER
+        textSize = 7.5f
+        setTextColor(Color.WHITE)
+        setPadding(dp(10), dp(4), dp(10), dp(4))
+        background = rounded(0xA8111714.toInt(), 8f, 0x254ADBC0)
+        setOnClickListener { click() }
     }
 
     private fun setQualityPreset(value: Int) {
         quality = value.coerceIn(0, 100)
-        qualityLabel.text = "Quality $quality / 100"
+        qualityLabel.text = "Quality  $quality / 100"
         if (::qualitySeek.isInitialized && qualitySeek.progress != quality) qualitySeek.progress = quality
         if (rendererHandle != 0L) nativeSetQuality(rendererHandle, quality)
         appendLog("preset -> Q$quality")
@@ -309,45 +466,72 @@ class NativeCubeActivity : Activity() {
     private fun updateInteractionHint(lightFocus: Boolean = false) {
         if (!::interactionHint.isInitialized) return
         interactionHint.text = when {
-            lightFocus -> "Drag the warm light orb. Pause physics to park it."
-            interactMode -> "Touch a body, drag, release to throw."
-            else -> "Orbit mode. Interact grabs objects."
+            lightFocus || lightFocusMode -> "Light focus: drag anywhere to move the physical warm key light."
+            interactMode -> "Touch an object, drag naturally, release to throw."
+            else -> "Orbit mode. Pinch to zoom; Interact grabs physics objects."
         }
     }
 
     private fun absorbNativeLog(text: String) {
-        val lines = text.lineSequence().filter { it.isNotBlank() }.toList(); if (lines.isEmpty()) return
-        val tail = lines.last(); if (tail == lastNativeTail && lines.size == 1) return
+        val lines = text.lineSequence().filter { it.isNotBlank() }.toList()
+        if (lines.isEmpty()) return
+        val tail = lines.last()
+        if (tail == lastNativeTail && lines.size == 1) return
         var start = 0
-        if (lastNativeTail.isNotEmpty()) { val idx = lines.indexOfLast { it == lastNativeTail }; if (idx >= 0) start = idx + 1 }
-        for (i in start until lines.size) appendLog(lines[i]); lastNativeTail = tail
+        if (lastNativeTail.isNotEmpty()) {
+            val idx = lines.indexOfLast { it == lastNativeTail }
+            if (idx >= 0) start = idx + 1
+        }
+        for (i in start until lines.size) appendLog(lines[i])
+        lastNativeTail = tail
     }
 
     private fun appendLog(line: String) {
         if (line.isBlank() || logHistory.lastOrNull() == line) return
-        logHistory.addLast(line); while (logHistory.size > 300) logHistory.removeFirst()
+        logHistory.addLast(line)
+        while (logHistory.size > 420) logHistory.removeFirst()
     }
 
     private fun rounded(color: Int, radiusDp: Float, strokeColor: Int? = null): GradientDrawable =
-        GradientDrawable().apply { shape = GradientDrawable.RECTANGLE; setColor(color); cornerRadius = dp(radiusDp.toInt()).toFloat(); if (strokeColor != null) setStroke(dp(1), strokeColor) }
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(color)
+            cornerRadius = dp(radiusDp.toInt()).toFloat()
+            if (strokeColor != null) setStroke(dp(1), strokeColor)
+        }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
-    override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus) enterImmersiveMode() }
-    override fun onDestroy() { handler.removeCallbacksAndMessages(null); destroyRenderer(); super.onDestroy() }
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enterImmersiveMode()
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        destroyRenderer()
+        super.onDestroy()
+    }
 
     private fun enterImmersiveMode() {
         @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+            View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
     }
 
     private fun destroyRenderer() {
-        val h = rendererHandle; rendererHandle = 0L
+        val h = rendererHandle
+        rendererHandle = 0L
         if (h != 0L && nativeLoaded) runCatching { nativeDestroy(h) }
     }
 
     private fun showFatal(message: String) {
-        runOnUiThread { stats.background = rounded(0xE63B171A.toInt(), 14f, 0x99FF7D73.toInt()); stats.text = "Native Vulkan error\n$message\nPress Back to return to Vessel" }
+        runOnUiThread {
+            stats.background = rounded(0xE6321216.toInt(), 12f, 0x99FF776F.toInt())
+            stats.text = "Native Vulkan error\n$message\nPress Back to return to Vessel"
+        }
     }
 
     private external fun nativeCreate(surface: Surface): Long
@@ -361,6 +545,7 @@ class NativeCubeActivity : Activity() {
     private external fun nativeSetQuality(handle: Long, quality: Int)
     private external fun nativeResetPhysics(handle: Long)
     private external fun nativeGrabStart(handle: Long, nx: Float, ny: Float)
+    private external fun nativeGrabLightStart(handle: Long, nx: Float, ny: Float)
     private external fun nativeGrabMove(handle: Long, nx: Float, ny: Float)
     private external fun nativeGrabEnd(handle: Long)
     private external fun nativeStatus(handle: Long): String
