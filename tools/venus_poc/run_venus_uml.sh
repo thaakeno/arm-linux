@@ -31,17 +31,25 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Read /proc/<pid>/cmdline without a shell input-redirection race. Android can
+# reap a short-lived process between -r and opening cmdline; cat suppresses that
+# harmless ENOENT instead of dumping it into Vessel's live log.
+proc_cmdline() {
+  local proc="$1"
+  cat "$proc/cmdline" 2>/dev/null | tr '\0' ' ' || true
+}
+
 # A daemon/APK restart can lose ownership of an already-running UML process.
 # UML then keeps an advisory lock on the raw ext4 image and the next boot panics
 # with "Failed to lock debian-docker.ext4". Clean only linux-umshm processes
 # that are using THIS runtime directory/image, never unrelated UML instances.
 cleanup_stale_uml() {
-  local found=0 pid cmd cwd
+  local found=0 pid cmd cwd proc alive
   for proc in /proc/[0-9]*; do
     pid="${proc##*/}"
     [ "$pid" = "$$" ] && continue
-    [ -r "$proc/cmdline" ] || continue
-    cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+    cmd="$(proc_cmdline "$proc")"
+    [ -n "$cmd" ] || continue
     case "$cmd" in
       *linux-umshm*ubd0=debian-docker.ext4*) ;;
       *) continue ;;
@@ -56,14 +64,17 @@ cleanup_stale_uml() {
 
   if [ "$found" = "1" ]; then
     for _ in $(seq 1 40); do
-      local alive=0
+      alive=0
       for proc in /proc/[0-9]*; do
-        [ -r "$proc/cmdline" ] || continue
-        cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+        cmd="$(proc_cmdline "$proc")"
+        [ -n "$cmd" ] || continue
         case "$cmd" in
           *linux-umshm*ubd0=debian-docker.ext4*)
             cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
-            if [ "$cwd" = "$UML_DIR" ] || [[ "$cmd" == *"$UML_DIR/linux-umshm"* ]]; then alive=1; break; fi
+            if [ "$cwd" = "$UML_DIR" ] || [[ "$cmd" == *"$UML_DIR/linux-umshm"* ]]; then
+              alive=1
+              break
+            fi
             ;;
         esac
       done
@@ -74,8 +85,8 @@ cleanup_stale_uml() {
     # Escalate only if a matching stale UML process ignored TERM.
     for proc in /proc/[0-9]*; do
       pid="${proc##*/}"
-      [ -r "$proc/cmdline" ] || continue
-      cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+      cmd="$(proc_cmdline "$proc")"
+      [ -n "$cmd" ] || continue
       case "$cmd" in
         *linux-umshm*ubd0=debian-docker.ext4*)
           cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
