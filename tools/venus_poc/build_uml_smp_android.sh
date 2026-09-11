@@ -58,7 +58,8 @@ EOF
 # our config fragment and our umshm source transform.
 export TREE="$SRC"
 export O="$OUT"
-export ART="$ART/upstream"
+UPSTREAM_ART="$ART/upstream"
+export ART="$UPSTREAM_ART"
 export EXTRA_CONFIG="$CONFIG"
 export JOBS
 if [ -n "$NDK" ]; then
@@ -67,8 +68,10 @@ fi
 
 bash "$SRC/tools/um-arm64/harness/build-bionic.sh"
 
-KERNEL="$ART/upstream/linux-bionic"
-STUB="$ART/upstream/stub_exe_bionic"
+# build-bionic.sh writes directly into the ART directory supplied above.
+# Keep that location separate from Vessel's final renamed artifact files.
+KERNEL="$UPSTREAM_ART/linux-bionic"
+STUB="$UPSTREAM_ART/stub_exe_bionic"
 [ -s "$KERNEL" ] || { echo "missing rebuilt UML kernel: $KERNEL" >&2; exit 1; }
 [ -s "$STUB" ] || { echo "missing rebuilt UML stub: $STUB" >&2; exit 1; }
 
