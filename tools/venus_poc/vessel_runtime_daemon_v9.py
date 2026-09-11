@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Protocol-9 Vessel runtime entrypoint.
 
-The UML PTY is now used only for bootstrapping the guest. Once Debian reaches a
-shell, a tiny Python bootstrap connects back to the Termux host through passt
-(guest gateway 10.0.2.2 -> host loopback) and receives the real command agent.
-All subsequent commands and output use this dedicated TCP socket, not the tty.
+The UML PTY is used only to boot Debian and launch one tiny bootstrap command.
+The bootstrap opens an outbound TCP connection through passt to the Termux host
+(guest gateway 10.0.2.2 maps to host loopback), downloads the real command
+agent, and keeps that socket for all later commands.
 
-This removes the remaining failure class from protocols 3-8: canonical/raw tty
-line discipline, terminal control characters, partial PTY framing, prompt races,
-and child processes accidentally consuming console bytes.
+All command framing and output therefore bypass the terminal line discipline.
+This removes the failure class seen in protocols 3-8: canonical line limits,
+raw/cooked tty transitions, control-character interpretation, prompt races,
+partial PTY frames, and child processes consuming command bytes.
 """
 from __future__ import annotations
 
@@ -31,9 +32,8 @@ READY = b"VSL9READY"
 MAX_COMMAND = 16 * 1024 * 1024
 MAX_RECORD = 16 * 1024 * 1024
 
-# Guest-side program is transferred over the socket itself, so the PTY bootstrap
-# remains tiny and never carries a large encoded payload.
-AGENT_SOURCE = r'''import socket,struct,subprocess,sys
+# This source is transferred over TCP, never through the tty.
+AGENT_SOURCE = r'''import socket,struct,subprocess
 s=globals()["s"]
 
 def rx(n):
@@ -122,59 +122,64 @@ def recv_exact(sock: socket.socket, n: int, deadline: float) -> bytes:
 def close_agent(self: core.Runtime) -> None:
     sock = getattr(self, "agent_socket", None)
     self.agent_socket = None
-    if sock is not None:
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            sock.close()
-        except OSError:
-            pass
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 def _ensure_agent(self: core.Runtime) -> None:
-    sock = getattr(self, "agent_socket", None)
-    if sock is not None:
+    if getattr(self, "agent_socket", None) is not None:
         return
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind((AGENT_HOST, AGENT_PORT))
+    try:
+        listener.bind((AGENT_HOST, AGENT_PORT))
+    except OSError as exc:
+        listener.close()
+        raise RuntimeError(f"cannot bind guest command channel {AGENT_HOST}:{AGENT_PORT}: {exc}") from exc
     listener.listen(1)
-    listener.settimeout(12.0)
+    listener.settimeout(15.0)
 
-    # This is the only command sent through the interactive UML tty. It is kept
-    # deliberately short. It connects to the mapped host-loopback gateway,
-    # downloads a length-prefixed Python agent, and execs it on the same socket.
+    # The one tty command is <1 KiB. socket.MSG_WAITALL makes the bootstrap's
+    # length/source reads exact; the real protocol starts only after TCP setup.
     bootstrap_py = (
         "import socket,struct;"
-        f"s=socket.create_connection(({GUEST_HOST_GATEWAY!r},{AGENT_PORT}),8);"
-        "r=lambda n:(lambda b:b)(b'');"
-        "n=struct.unpack('!I',s.recv(4))[0];"
-        "b=bytearray();"
-        "exec('while len(b)<n: b.extend(s.recv(n-len(b)))');"
-        "exec(compile(bytes(b),'<vessel-agent>','exec'),{'s':s})"
+        f"s=socket.create_connection(({GUEST_HOST_GATEWAY!r},{AGENT_PORT}),10);"
+        "h=s.recv(4,socket.MSG_WAITALL);"
+        "n=struct.unpack('!I',h)[0];"
+        "src=s.recv(n,socket.MSG_WAITALL);"
+        "exec(compile(src,'<vessel-agent>','exec'),{'s':s})"
     )
     command = "stty -echo 2>/dev/null || true; exec python3 -u -c " + shlex.quote(bootstrap_py) + "\n"
-    if len(command.encode("utf-8")) > 1200:
+    if len(command.encode("utf-8")) >= 1024:
         listener.close()
-        raise RuntimeError("guest socket bootstrap unexpectedly too large")
+        raise RuntimeError("guest socket bootstrap unexpectedly exceeds safe tty size")
 
     try:
         full_write(self, command)
         conn, _ = listener.accept()
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         conn.sendall(struct.pack("!I", len(AGENT_BYTES)) + AGENT_BYTES)
-        ready = recv_exact(conn, len(READY), time.monotonic() + 8.0)
+        ready = recv_exact(conn, len(READY), time.monotonic() + 10.0)
         if ready != READY:
             conn.close()
-            raise RuntimeError(f"bad guest agent handshake: {ready!r}")
+            raise RuntimeError(f"bad guest command-agent handshake: {ready!r}")
+        conn.settimeout(None)
         self.agent_socket = conn
-        self.append("\n[vessel-agent] socket command channel ready\n")
-    except Exception:
+        self.append("\n[vessel-agent] dedicated socket command channel ready\n")
+    except Exception as exc:
         close_agent(self)
-        raise
+        with self.lock:
+            tail = self.console_text[-2500:]
+        raise RuntimeError(f"guest socket command channel failed: {exc}. Console tail:\n{tail}") from exc
     finally:
         listener.close()
 
@@ -225,11 +230,13 @@ def socket_guest(self: core.Runtime, command: str, timeout: float = 45.0) -> str
                 if kind == b"E":
                     raise RuntimeError("guest command agent error: " + body.decode("utf-8", "replace"))
                 raise RuntimeError(f"unknown guest agent record type: {kind!r}")
-        except Exception:
-            # A broken stream must never be reused. The next request will create
-            # a fresh reverse connection rather than inheriting desynchronised bytes.
+        except Exception as exc:
             close_agent(self)
-            raise
+            # Once the exec'd socket agent exits there is deliberately no shell
+            # left to fall back to. Mark this boot unusable instead of silently
+            # attempting another PTY protocol and creating another hang.
+            self.guest_ready = False
+            raise RuntimeError(f"guest command socket failed; restart Debian runtime: {exc}") from exc
 
 
 def prepare_with_socket_agent(self: core.Runtime) -> None:
@@ -261,6 +268,12 @@ def serialized_stop(self: core.Runtime):
         self.lifecycle_lock = threading.RLock()
         lock = self.lifecycle_lock
     with lock:
+        # Flush the ext4 guest before the base implementation terminates UML.
+        if getattr(self, "agent_socket", None) is not None and self.guest_ready:
+            try:
+                socket_guest(self, "sync", 8.0)
+            except Exception:
+                pass
         close_agent(self)
         return _original_stop(self)
 
