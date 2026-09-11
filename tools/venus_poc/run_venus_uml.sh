@@ -1,6 +1,14 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
+# UML ptrace mode represents guest execution contexts with host-side file
+# descriptors. A full Plasma session can exhaust Android/Termux's inherited
+# soft RLIMIT_NOFILE even when RAM is still available, at which point UML logs
+# `socketpair failed, errno = 24` and guest forks misleadingly report ENOMEM.
+# Raise the soft limit to the process hard limit before umnet/UML starts.
+HARD_NOFILE="$(ulimit -Hn 2>/dev/null || echo 8192)"
+ulimit -Sn "$HARD_NOFILE" 2>/dev/null || ulimit -Sn 8192 2>/dev/null || true
+
 POC_DIR="${POC_DIR:-$HOME/venus-poc}"
 UML_DIR="${UML_DIR:-$HOME/uml-test}"
 VENUS_SOCK="${VENUS_SOCK:-$PREFIX/tmp/venus.sock}"
