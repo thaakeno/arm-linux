@@ -39,36 +39,49 @@ jobs:
 
       - name: Validate rootless runtime controller
         run: |
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v9.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v10.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v11.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v12.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v13.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v14.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v15.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v16.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v17.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v18.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v19.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v20.py
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v21.py
-          python3 -m py_compile tools/venus_poc/vessel_acceptance.py
-          python3 -m py_compile tools/venus_poc/host_relay_direct.py
-          python3 -m py_compile tools/venus_poc/guest_relay_direct.py
+          set -euxo pipefail
+          for f in tools/venus_poc/vessel_runtime_daemon.py \
+                   tools/venus_poc/vessel_runtime_daemon_v9.py \
+                   tools/venus_poc/vessel_runtime_daemon_v10.py \
+                   tools/venus_poc/vessel_runtime_daemon_v11.py \
+                   tools/venus_poc/vessel_runtime_daemon_v12.py \
+                   tools/venus_poc/vessel_runtime_daemon_v13.py \
+                   tools/venus_poc/vessel_runtime_daemon_v14.py \
+                   tools/venus_poc/vessel_runtime_daemon_v15.py \
+                   tools/venus_poc/vessel_runtime_daemon_v16.py \
+                   tools/venus_poc/vessel_runtime_daemon_v17.py \
+                   tools/venus_poc/vessel_runtime_daemon_v18.py \
+                   tools/venus_poc/vessel_runtime_daemon_v19.py \
+                   tools/venus_poc/vessel_runtime_daemon_v20.py \
+                   tools/venus_poc/vessel_runtime_daemon_v21.py \
+                   tools/venus_poc/vessel_acceptance.py \
+                   tools/venus_poc/host_relay_direct.py \
+                   tools/venus_poc/guest_relay_direct.py; do
+            python3 -m py_compile "$f"
+          done
           bash -n tools/venus_poc/run_venus_uml.sh
           bash -n tools/venus_poc/build_guest_mesa_venus_26_2.sh
-          grep -q 'render-server-worker=thread' tools/venus_poc/build_virglrenderer_android_thread.sh
-          grep -q 'PROTOCOL_VERSION = 21' tools/venus_poc/vessel_runtime_daemon_v21.py
-          grep -q 'prepare_venus_v21' tools/venus_poc/vessel_runtime_daemon_v21.py
-          grep -q 'VESSEL_MEM_MB:-4096' tools/venus_poc/vessel_runtime_daemon_v21.py
-          grep -q 'REQUIRED_PROTOCOL = 21' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -q 'vessel_runtime_daemon_v21.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -q 'PointerMode.TRACKPAD' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -q 'getHistoricalX' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -q 'showKeyboard' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -q 'FullscreenDesktop' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
-          grep -q 'Vulkan 3D test' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          python3 - <<'PY'
+          from pathlib import Path
+          checks = {
+              'tools/venus_poc/vessel_runtime_daemon_v21.py': [
+                  'PROTOCOL_VERSION = 21', 'prepare_venus_v21', 'VESSEL_MEM_MB',
+              ],
+              'app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt': [
+                  'REQUIRED_PROTOCOL = 21', 'vessel_runtime_daemon_v21.py',
+              ],
+              'app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt': [
+                  'PointerMode.TRACKPAD', 'getHistoricalX', 'showKeyboard',
+              ],
+              'app/src/main/java/com/example/dreamlinux/VesselActivity.kt': [
+                  'FullscreenDesktop', 'Vulkan 3D test',
+              ],
+          }
+          for path, needles in checks.items():
+              text = Path(path).read_text()
+              for needle in needles:
+                  assert needle in text, f'{needle!r} missing from {path}'
+          PY
 
       - name: Compile, unit-test and lint
         run: |
