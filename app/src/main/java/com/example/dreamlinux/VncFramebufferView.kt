@@ -5,7 +5,9 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
+import android.os.SystemClock
 import android.view.GestureDetector
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -16,23 +18,24 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import java.util.Arrays
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 /**
- * Small RFB 3.8 client used by Vessel's embedded KDE desktop.
+ * Embedded RFB 3.8 client for Vessel's KDE desktop.
  *
- * The server is deliberately loopback-only on Android.  The runtime daemon
- * reverse-tunnels each VNC connection through passt, so no guest port is
- * exposed to Wi-Fi or cellular networks.
+ * Protocol 14 keeps the server private inside Debian and uses a persistent
+ * reverse bridge. The viewer prefers Hextile rather than raw framebuffer
+ * updates: static Plasma UI then costs a small fraction of the bytes and CPU
+ * required by full 32-bpp raw rectangles.
  */
 class VncFramebufferView(context: Context) : View(context) {
     companion object { @Volatile var active: VncFramebufferView? = null }
 
     private val running = AtomicBoolean(false)
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val wireLock = Any()
     @Volatile private var bitmap: Bitmap? = null
     @Volatile private var fbWidth = 0
     @Volatile private var fbHeight = 0
@@ -43,6 +46,7 @@ class VncFramebufferView(context: Context) : View(context) {
     private var zoom = 1f
     private var panX = 0f
     private var panY = 0f
+    private var lastPointerSentMs = 0L
 
     private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
@@ -107,15 +111,17 @@ class VncFramebufferView(context: Context) : View(context) {
     }
 
     private fun connectionLoop() {
-        var backoff = 300L
+        var backoff = 120L
         while (running.get()) {
             try {
                 val s = Socket()
                 s.tcpNoDelay = true
                 s.keepAlive = true
+                s.receiveBufferSize = 1024 * 1024
+                s.sendBufferSize = 128 * 1024
                 s.connect(InetSocketAddress("127.0.0.1", TermuxUmlController.VNC_PORT), 2500)
                 socket = s
-                backoff = 300L
+                backoff = 120L
                 runSession(s)
             } catch (t: Throwable) {
                 lastError = t.message ?: t.javaClass.simpleName
@@ -127,31 +133,33 @@ class VncFramebufferView(context: Context) : View(context) {
             }
             if (running.get()) {
                 Thread.sleep(backoff)
-                backoff = (backoff * 2).coerceAtMost(2500L)
+                backoff = (backoff * 2).coerceAtMost(1200L)
             }
         }
     }
 
     private fun runSession(socket: Socket) {
-        val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 128 * 1024))
-        val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 128 * 1024))
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 512 * 1024))
+        val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
         output = out
 
         val version = ByteArray(12)
         input.readFully(version)
         val banner = String(version, Charsets.US_ASCII)
         check(banner.startsWith("RFB ")) { "Not an RFB server: $banner" }
-        out.write("RFB 003.008\n".toByteArray(Charsets.US_ASCII)); out.flush()
+        synchronized(wireLock) {
+            out.write("RFB 003.008\n".toByteArray(Charsets.US_ASCII)); out.flush()
+        }
 
         val count = input.readUnsignedByte()
         check(count > 0) { "VNC server rejected the connection" }
         val security = ByteArray(count)
         input.readFully(security)
         check(security.any { it.toInt() and 0xff == 1 }) { "VNC None security unavailable" }
-        out.writeByte(1); out.flush()
+        synchronized(wireLock) { out.writeByte(1); out.flush() }
         check(input.readInt() == 0) { "VNC security negotiation failed" }
 
-        out.writeByte(1); out.flush()
+        synchronized(wireLock) { out.writeByte(1); out.flush() }
         fbWidth = input.readUnsignedShort()
         fbHeight = input.readUnsignedShort()
         val serverPixelFormat = ByteArray(16)
@@ -172,7 +180,7 @@ class VncFramebufferView(context: Context) : View(context) {
         while (running.get()) {
             when (input.readUnsignedByte()) {
                 0 -> readFramebufferUpdate(input, out)
-                2 -> Unit
+                2 -> Unit // Bell
                 3 -> {
                     input.skipBytes(3)
                     val len = input.readInt()
@@ -183,25 +191,115 @@ class VncFramebufferView(context: Context) : View(context) {
         }
     }
 
-    private fun sendPixelFormat(out: DataOutputStream) {
+    private fun sendPixelFormat(out: DataOutputStream) = synchronized(wireLock) {
         out.writeByte(0); out.write(byteArrayOf(0, 0, 0))
+        // 32bpp, depth 24, little endian, true colour, RGB shifts 16/8/0.
         out.writeByte(32); out.writeByte(24); out.writeByte(0); out.writeByte(1)
         out.writeShort(255); out.writeShort(255); out.writeShort(255)
         out.writeByte(16); out.writeByte(8); out.writeByte(0)
         out.write(byteArrayOf(0, 0, 0)); out.flush()
     }
 
-    private fun sendEncodings(out: DataOutputStream) {
-        out.writeByte(2); out.writeByte(0); out.writeShort(1)
-        out.writeInt(0) // raw: deterministic, universally supported
+    private fun sendEncodings(out: DataOutputStream) = synchronized(wireLock) {
+        out.writeByte(2); out.writeByte(0); out.writeShort(2)
+        out.writeInt(5) // Hextile: much cheaper for desktop UI than raw.
+        out.writeInt(0) // Raw fallback.
         out.flush()
     }
 
-    private fun requestUpdate(out: DataOutputStream, incremental: Boolean) {
+    private fun requestUpdate(out: DataOutputStream, incremental: Boolean) = synchronized(wireLock) {
         out.writeByte(3); out.writeByte(if (incremental) 1 else 0)
         out.writeShort(0); out.writeShort(0)
         out.writeShort(fbWidth); out.writeShort(fbHeight)
         out.flush()
+    }
+
+    private fun readPixel(input: DataInputStream): Int {
+        val b = input.readUnsignedByte()
+        val g = input.readUnsignedByte()
+        val r = input.readUnsignedByte()
+        input.readUnsignedByte()
+        return -0x1000000 or (r shl 16) or (g shl 8) or b
+    }
+
+    private fun decodeRaw(input: DataInputStream, bmp: Bitmap, x: Int, y: Int, w: Int, h: Int) {
+        val rowBytes = ByteArray(w * 4)
+        val row = IntArray(w)
+        repeat(h) { yy ->
+            input.readFully(rowBytes)
+            var p = 0
+            for (xx in 0 until w) {
+                val b = rowBytes[p++].toInt() and 0xff
+                val g = rowBytes[p++].toInt() and 0xff
+                val r = rowBytes[p++].toInt() and 0xff
+                p++
+                row[xx] = -0x1000000 or (r shl 16) or (g shl 8) or b
+            }
+            synchronized(bmp) { bmp.setPixels(row, 0, w, x, y + yy, w, 1) }
+        }
+    }
+
+    private fun decodeHextile(input: DataInputStream, bmp: Bitmap, x: Int, y: Int, w: Int, h: Int) {
+        val tile = IntArray(16 * 16)
+        var bg = 0
+        var fg = 0
+        var bgValid = false
+        var fgValid = false
+
+        var ty = 0
+        while (ty < h) {
+            val th = minOf(16, h - ty)
+            var tx = 0
+            while (tx < w) {
+                val tw = minOf(16, w - tx)
+                val sub = input.readUnsignedByte()
+                if ((sub and 1) != 0) {
+                    decodeRaw(input, bmp, x + tx, y + ty, tw, th)
+                    bgValid = false
+                    fgValid = false
+                    tx += 16
+                    continue
+                }
+
+                if ((sub and 2) != 0) {
+                    bg = readPixel(input)
+                    bgValid = true
+                }
+                check(bgValid) { "Hextile background missing" }
+                Arrays.fill(tile, 0, tw * th, bg)
+
+                if ((sub and 4) != 0) {
+                    fg = readPixel(input)
+                    fgValid = true
+                }
+
+                val any = (sub and 8) != 0
+                val coloured = (sub and 16) != 0
+                if (any) {
+                    val count = input.readUnsignedByte()
+                    repeat(count) {
+                        val color = if (coloured) readPixel(input) else {
+                            check(fgValid) { "Hextile foreground missing" }
+                            fg
+                        }
+                        val xy = input.readUnsignedByte()
+                        val wh = input.readUnsignedByte()
+                        val sx = xy ushr 4
+                        val sy = xy and 0x0f
+                        val sw = (wh ushr 4) + 1
+                        val sh = (wh and 0x0f) + 1
+                        check(sx + sw <= tw && sy + sh <= th) { "Invalid Hextile subrectangle" }
+                        for (yy in sy until sy + sh) {
+                            Arrays.fill(tile, yy * tw + sx, yy * tw + sx + sw, color)
+                        }
+                    }
+                }
+                synchronized(bmp) { bmp.setPixels(tile, 0, tw, x + tx, y + ty, tw, th) }
+                if (coloured) fgValid = false
+                tx += 16
+            }
+            ty += 16
+        }
     }
 
     private fun readFramebufferUpdate(input: DataInputStream, out: DataOutputStream) {
@@ -214,16 +312,14 @@ class VncFramebufferView(context: Context) : View(context) {
             val w = input.readUnsignedShort()
             val h = input.readUnsignedShort()
             val encoding = input.readInt()
-            check(encoding == 0) { "Unexpected VNC encoding $encoding" }
             check(x + w <= bmp.width && y + h <= bmp.height) { "Invalid VNC rectangle" }
-            val bytes = ByteArray(w * h * 4)
-            input.readFully(bytes)
-            val ints = IntArray(w * h)
-            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-            for (i in ints.indices) ints[i] = -0x1000000 or (buffer.int and 0x00ffffff)
-            synchronized(bmp) { bmp.setPixels(ints, 0, w, x, y, w, h) }
+            when (encoding) {
+                0 -> decodeRaw(input, bmp, x, y, w, h)
+                5 -> decodeHextile(input, bmp, x, y, w, h)
+                else -> error("Unexpected VNC encoding $encoding")
+            }
         }
-        postInvalidate()
+        postInvalidateOnAnimation()
         requestUpdate(out, true)
     }
 
@@ -279,8 +375,33 @@ class VncFramebufferView(context: Context) : View(context) {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> 0
             else -> pointerMask
         }
-        sendPointer(pointerMask, x, y)
+        val now = SystemClock.uptimeMillis()
+        if (event.actionMasked != MotionEvent.ACTION_MOVE || now - lastPointerSentMs >= 16) {
+            sendPointer(pointerMask, x, y)
+            lastPointerSentMs = now
+        }
         return true
+    }
+
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if ((event.source and InputDevice.SOURCE_CLASS_POINTER) != 0) {
+            val (x, y) = mapToGuest(event.x, event.y)
+            when (event.actionMasked) {
+                MotionEvent.ACTION_HOVER_MOVE -> {
+                    sendPointer(0, x, y)
+                    return true
+                }
+                MotionEvent.ACTION_SCROLL -> {
+                    val v = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+                    if (v != 0f) {
+                        sendPointer(if (v > 0) 8 else 16, x, y)
+                        sendPointer(0, x, y)
+                        return true
+                    }
+                }
+            }
+        }
+        return super.onGenericMotionEvent(event)
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean { sendAndroidKey(true, keyCode, event); return true }
@@ -306,15 +427,19 @@ class VncFramebufferView(context: Context) : View(context) {
         if (keysym != 0) sendKey(down, keysym)
     }
 
-    private fun sendKey(down: Boolean, keysym: Int) = synchronized(this) {
-        val out = output ?: return@synchronized
-        runCatching {
-            out.writeByte(4); out.writeByte(if (down) 1 else 0); out.writeShort(0); out.writeInt(keysym); out.flush()
+    private fun sendKey(down: Boolean, keysym: Int) {
+        val out = output ?: return
+        synchronized(wireLock) {
+            runCatching {
+                out.writeByte(4); out.writeByte(if (down) 1 else 0); out.writeShort(0); out.writeInt(keysym); out.flush()
+            }
         }
     }
 
-    private fun sendPointer(mask: Int, x: Int, y: Int) = synchronized(this) {
-        val out = output ?: return@synchronized
-        runCatching { out.writeByte(5); out.writeByte(mask); out.writeShort(x); out.writeShort(y); out.flush() }
+    private fun sendPointer(mask: Int, x: Int, y: Int) {
+        val out = output ?: return
+        synchronized(wireLock) {
+            runCatching { out.writeByte(5); out.writeByte(mask); out.writeShort(x); out.writeShort(y); out.flush() }
+        }
     }
 }
