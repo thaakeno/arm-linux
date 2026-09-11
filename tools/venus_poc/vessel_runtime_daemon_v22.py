@@ -189,4 +189,7 @@ core.Runtime.desktop_action = desktop_action_v22
 
 
 if __name__ == "__main__":
-    core.main()
+    try:
+        core.serve()
+    finally:
+        core.runtime.stop()
