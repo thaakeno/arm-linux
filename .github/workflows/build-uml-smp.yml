@@ -55,7 +55,7 @@ jobs:
           ART=.kernel-build/artifacts
           grep -qx 'CONFIG_SMP=y' "$ART/vessel-uml-smp.config"
           grep -qx 'CONFIG_NR_CPUS=8' "$ART/vessel-uml-smp.config"
-          "$ART/linux-umshm" --help 2>&1 | grep -F 'ncpus='
+          strings "$ART/linux-umshm" | grep -F 'ncpus=<# of desired CPUs>'
           file "$ART/linux-umshm" | grep -Ei 'aarch64|ARM aarch64'
           test -s "$ART/stub_exe-umshm"
           cat "$ART/SHA256SUMS.txt"
