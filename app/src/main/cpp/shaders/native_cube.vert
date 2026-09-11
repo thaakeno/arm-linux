@@ -12,6 +12,7 @@ layout(push_constant) uniform Push {
     float pitch;
     float aspect;
     float cameraDistance;
+    float preRotation;
 } pc;
 
 vec2 quadCorner(int corner) {
@@ -41,15 +42,6 @@ vec3 faceNormal(int face) {
     return vec3(0.0, -1.0, 0.0);
 }
 
-vec3 faceColor(int face) {
-    if (face == 0) return vec3(0.49, 0.52, 0.57);
-    if (face == 1) return vec3(0.45, 0.48, 0.53);
-    if (face == 2) return vec3(0.53, 0.55, 0.59);
-    if (face == 3) return vec3(0.47, 0.50, 0.55);
-    if (face == 4) return vec3(0.57, 0.59, 0.62);
-    return vec3(0.42, 0.45, 0.50);
-}
-
 void main() {
     vec3 worldPos;
     vec3 worldNormal;
@@ -63,17 +55,16 @@ void main() {
         uv = quadCorner(corner);
         worldPos = facePosition(face, uv);
         worldNormal = faceNormal(face);
-        baseColor = faceColor(face);
+        // One coherent neutral material. Face readability now comes from the
+        // lighting and micro-surface response rather than debug face colors.
+        baseColor = vec3(0.46, 0.49, 0.52);
         material = 0;
     } else {
-        // A broad matte floor gives the object a visual scale reference and a
-        // place for the subtle contact shadow. It is generated procedurally,
-        // so the benchmark still has no model/texture asset dependency.
         int corner = gl_VertexIndex - 36;
         uv = quadCorner(corner);
-        worldPos = vec3(uv.x * 5.2, -1.28, uv.y * 5.2);
+        worldPos = vec3(uv.x * 6.5, -1.30, uv.y * 6.5);
         worldNormal = vec3(0.0, 1.0, 0.0);
-        baseColor = vec3(0.115, 0.125, 0.135);
+        baseColor = vec3(0.105, 0.112, 0.120);
         material = 1;
     }
 
@@ -93,22 +84,29 @@ void main() {
     float viewY = dot(rel, up);
     float viewZ = dot(rel, forward);
 
-    // SurfaceView reports the *visible* landscape size to native and that is
-    // the only aspect we use. This deliberately does not infer aspect from the
-    // swapchain extent because Android may expose that extent in the device's
-    // natural portrait orientation while applying a 90/270-degree transform.
     float safeAspect = max(pc.aspect, 0.01);
-    float fovY = radians(46.0);
-    float f = 1.0 / tan(fovY * 0.5);
+    float f = 1.0 / tan(radians(43.0) * 0.5);
     float nearPlane = 0.10;
-    float farPlane = 64.0;
+    float farPlane = 80.0;
 
-    float clipX = viewX * f / safeAspect;
-    float clipY = -viewY * f;
+    vec2 clip = vec2(viewX * f / safeAspect, -viewY * f);
+
+    // Android Vulkan pre-rotation. The swapchain is allocated in the display's
+    // identity orientation and currentTransform is applied here in clip space.
+    // 0 = identity, 1 = 90 degrees, 2 = 180 degrees, 3 = 270 degrees.
+    int rot = int(pc.preRotation + 0.5);
+    if (rot == 1) {
+        clip = vec2(-clip.y, clip.x);
+    } else if (rot == 2) {
+        clip = -clip;
+    } else if (rot == 3) {
+        clip = vec2(clip.y, -clip.x);
+    }
+
     float clipZ = (farPlane / (farPlane - nearPlane)) * viewZ
                 - (farPlane * nearPlane / (farPlane - nearPlane));
 
-    gl_Position = vec4(clipX, clipY, clipZ, viewZ);
+    gl_Position = vec4(clip, clipZ, viewZ);
     outWorldPos = worldPos;
     outWorldNormal = worldNormal;
     outBaseColor = baseColor;
