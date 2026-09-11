@@ -35,15 +35,17 @@ struct PushConstants {
     float pitch;
     float aspect;
     float cameraDistance;
+    float preRotation;
 };
 
 class VulkanCubeRenderer {
 public:
     explicit VulkanCubeRenderer(ANativeWindow* window) : window_(window) {
         if (!window_) throw std::runtime_error("ANativeWindow_fromSurface returned null");
-        visibleWidth_.store(std::max(1, ANativeWindow_getWidth(window_)), std::memory_order_relaxed);
-        visibleHeight_.store(std::max(1, ANativeWindow_getHeight(window_)), std::memory_order_relaxed);
-        lastInteractionNs_.store(nowNs(), std::memory_order_relaxed);
+        visibleWidth_.store(
+            std::max(1, ANativeWindow_getWidth(window_)), std::memory_order_relaxed);
+        visibleHeight_.store(
+            std::max(1, ANativeWindow_getHeight(window_)), std::memory_order_relaxed);
     }
 
     ~VulkanCubeRenderer() {
@@ -71,17 +73,17 @@ public:
             std::memory_order_relaxed);
         float nextPitch =
             pitch_.load(std::memory_order_relaxed) + pitchDegrees * 0.01745329252f;
-        // Avoid the camera basis becoming unstable at the exact poles.
-        constexpr float kPitchLimit = 1.30f;
-        pitch_.store(std::clamp(nextPitch, -kPitchLimit, kPitchLimit), std::memory_order_relaxed);
-        lastInteractionNs_.store(nowNs(), std::memory_order_relaxed);
+        constexpr float kPitchLimit = 1.28f;
+        pitch_.store(
+            std::clamp(nextPitch, -kPitchLimit, kPitchLimit),
+            std::memory_order_relaxed);
     }
 
     void zoom(float scaleFactor) {
         if (!(scaleFactor > 0.01f)) return;
-        float next = cameraDistance_.load(std::memory_order_relaxed) / scaleFactor;
-        cameraDistance_.store(std::clamp(next, 3.4f, 10.5f), std::memory_order_relaxed);
-        lastInteractionNs_.store(nowNs(), std::memory_order_relaxed);
+        const float next = cameraDistance_.load(std::memory_order_relaxed) / scaleFactor;
+        cameraDistance_.store(
+            std::clamp(next, 3.7f, 11.5f), std::memory_order_relaxed);
     }
 
     void resize(int width, int height) {
@@ -96,18 +98,12 @@ public:
     }
 
 private:
-    static int64_t nowNs() {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                   Clock::now().time_since_epoch())
-            .count();
-    }
-
     void setStatus(const std::string& value) {
         std::lock_guard<std::mutex> lock(statusMutex_);
         status_ = value;
     }
 
-    uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags properties) {
+    uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags properties) const {
         VkPhysicalDeviceMemoryProperties memory{};
         vkGetPhysicalDeviceMemoryProperties(physicalDevice_, &memory);
         for (uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
@@ -119,18 +115,21 @@ private:
         throw std::runtime_error("No suitable Vulkan memory type");
     }
 
-    bool deviceHasSwapchain(VkPhysicalDevice physical) {
+    bool deviceHasSwapchain(VkPhysicalDevice physical) const {
         uint32_t count = 0;
         vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, nullptr);
         std::vector<VkExtensionProperties> extensions(count);
-        vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, extensions.data());
+        vkEnumerateDeviceExtensionProperties(
+            physical, nullptr, &count, extensions.data());
         for (const auto& ext : extensions) {
-            if (std::strcmp(ext.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0) return true;
+            if (std::strcmp(ext.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0) {
+                return true;
+            }
         }
         return false;
     }
 
-    bool findQueueFamily(VkPhysicalDevice physical, uint32_t* outIndex) {
+    bool findQueueFamily(VkPhysicalDevice physical, uint32_t* outIndex) const {
         uint32_t count = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
         std::vector<VkQueueFamilyProperties> props(count);
@@ -146,7 +145,7 @@ private:
         return false;
     }
 
-    VkFormat chooseDepthFormat() {
+    VkFormat chooseDepthFormat() const {
         constexpr std::array<VkFormat, 3> candidates = {
             VK_FORMAT_D32_SFLOAT,
             VK_FORMAT_D24_UNORM_S8_UINT,
@@ -155,11 +154,32 @@ private:
         for (VkFormat format : candidates) {
             VkFormatProperties props{};
             vkGetPhysicalDeviceFormatProperties(physicalDevice_, format, &props);
-            if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            if (props.optimalTilingFeatures &
+                VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
                 return format;
             }
         }
         throw std::runtime_error("No supported Vulkan depth format");
+    }
+
+    static bool isQuarterTurn(VkSurfaceTransformFlagBitsKHR transform) {
+        return transform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
+               transform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
+    }
+
+    static float rotationCode(VkSurfaceTransformFlagBitsKHR transform) {
+        if (transform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR) return 1.0f;
+        if (transform == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR) return 2.0f;
+        if (transform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR) return 3.0f;
+        return 0.0f;
+    }
+
+    static const char* rotationName(VkSurfaceTransformFlagBitsKHR transform) {
+        if (transform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR) return "rot90";
+        if (transform == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR) return "rot180";
+        if (transform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR) return "rot270";
+        if (transform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) return "identity";
+        return "other-transform";
     }
 
     void initVulkan() {
@@ -177,11 +197,13 @@ private:
 
         VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
         instanceInfo.pApplicationInfo = &appInfo;
-        instanceInfo.enabledExtensionCount = static_cast<uint32_t>(instanceExtensions.size());
+        instanceInfo.enabledExtensionCount =
+            static_cast<uint32_t>(instanceExtensions.size());
         instanceInfo.ppEnabledExtensionNames = instanceExtensions.data();
         checkVk(vkCreateInstance(&instanceInfo, nullptr, &instance_), "vkCreateInstance");
 
-        VkAndroidSurfaceCreateInfoKHR surfaceInfo{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
+        VkAndroidSurfaceCreateInfoKHR surfaceInfo{
+            VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
         surfaceInfo.window = window_;
         checkVk(
             vkCreateAndroidSurfaceKHR(instance_, &surfaceInfo, nullptr, &surface_),
@@ -227,15 +249,20 @@ private:
         deviceInfo.pQueueCreateInfos = &queueInfo;
         deviceInfo.enabledExtensionCount = 1;
         deviceInfo.ppEnabledExtensionNames = &deviceExtension;
-        checkVk(vkCreateDevice(physicalDevice_, &deviceInfo, nullptr, &device_), "vkCreateDevice");
+        checkVk(
+            vkCreateDevice(physicalDevice_, &deviceInfo, nullptr, &device_),
+            "vkCreateDevice");
         vkGetDeviceQueue(device_, queueFamily_, 0, &queue_);
 
         VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         poolInfo.queueFamilyIndex = queueFamily_;
-        checkVk(vkCreateCommandPool(device_, &poolInfo, nullptr, &commandPool_), "vkCreateCommandPool");
+        checkVk(
+            vkCreateCommandPool(device_, &poolInfo, nullptr, &commandPool_),
+            "vkCreateCommandPool");
 
-        VkCommandBufferAllocateInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        VkCommandBufferAllocateInfo commandInfo{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         commandInfo.commandPool = commandPool_;
         commandInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         commandInfo.commandBufferCount = 1;
@@ -255,12 +282,16 @@ private:
         checkVk(
             vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &renderFinished_),
             "vkCreateSemaphore(renderFinished)");
+
         VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-        checkVk(vkCreateFence(device_, &fenceInfo, nullptr, &frameFence_), "vkCreateFence");
+        checkVk(
+            vkCreateFence(device_, &fenceInfo, nullptr, &frameFence_),
+            "vkCreateFence");
     }
 
-    VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) {
+    VkSurfaceFormatKHR chooseSurfaceFormat(
+        const std::vector<VkSurfaceFormatKHR>& formats) const {
         for (const auto& format : formats) {
             if (format.format == VK_FORMAT_R8G8B8A8_UNORM ||
                 format.format == VK_FORMAT_B8G8R8A8_UNORM) {
@@ -270,8 +301,9 @@ private:
         return formats.front();
     }
 
-    VkCompositeAlphaFlagBitsKHR chooseCompositeAlpha(VkCompositeAlphaFlagsKHR supported) {
-        const std::array<VkCompositeAlphaFlagBitsKHR, 4> choices = {
+    VkCompositeAlphaFlagBitsKHR chooseCompositeAlpha(
+        VkCompositeAlphaFlagsKHR supported) const {
+        constexpr std::array<VkCompositeAlphaFlagBitsKHR, 4> choices = {
             VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
             VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
             VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
@@ -295,7 +327,9 @@ private:
         imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
         imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        checkVk(vkCreateImage(device_, &imageInfo, nullptr, &depthImage_), "vkCreateImage(depth)");
+        checkVk(
+            vkCreateImage(device_, &imageInfo, nullptr, &depthImage_),
+            "vkCreateImage(depth)");
 
         VkMemoryRequirements requirements{};
         vkGetImageMemoryRequirements(device_, depthImage_, &requirements);
@@ -306,7 +340,9 @@ private:
         checkVk(
             vkAllocateMemory(device_, &allocInfo, nullptr, &depthMemory_),
             "vkAllocateMemory(depth)");
-        checkVk(vkBindImageMemory(device_, depthImage_, depthMemory_, 0), "vkBindImageMemory(depth)");
+        checkVk(
+            vkBindImageMemory(device_, depthImage_, depthMemory_, 0),
+            "vkBindImageMemory(depth)");
 
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         viewInfo.image = depthImage_;
@@ -315,7 +351,9 @@ private:
         viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
         viewInfo.subresourceRange.levelCount = 1;
         viewInfo.subresourceRange.layerCount = 1;
-        checkVk(vkCreateImageView(device_, &viewInfo, nullptr, &depthView_), "vkCreateImageView(depth)");
+        checkVk(
+            vkCreateImageView(device_, &viewInfo, nullptr, &depthView_),
+            "vkCreateImageView(depth)");
     }
 
     void recreateSwapchain() {
@@ -333,30 +371,41 @@ private:
             vkGetPhysicalDeviceSurfaceFormatsKHR(
                 physicalDevice_, surface_, &formatCount, nullptr),
             "vkGetPhysicalDeviceSurfaceFormatsKHR(count)");
-        if (formatCount == 0) throw std::runtime_error("Android Vulkan surface has no formats");
+        if (formatCount == 0) {
+            throw std::runtime_error("Android Vulkan surface has no formats");
+        }
         std::vector<VkSurfaceFormatKHR> formats(formatCount);
         checkVk(
             vkGetPhysicalDeviceSurfaceFormatsKHR(
                 physicalDevice_, surface_, &formatCount, formats.data()),
             "vkGetPhysicalDeviceSurfaceFormatsKHR");
-        const auto format = chooseSurfaceFormat(formats);
+        const VkSurfaceFormatKHR format = chooseSurfaceFormat(formats);
         swapchainFormat_ = format.format;
 
+        preTransform_ = static_cast<VkSurfaceTransformFlagBitsKHR>(caps.currentTransform);
+
+        // Android's recommended Vulkan pre-rotation path: allocate the swapchain
+        // in the display's identity orientation, advertise currentTransform as
+        // preTransform, and rotate the MVP in clip space. A landscape Activity
+        // on a portrait-native phone therefore renders into a portrait-shaped
+        // buffer and is presented as true landscape without SurfaceFlinger
+        // stretching or doing a separate rotation pass.
         if (caps.currentExtent.width != UINT32_MAX) {
             swapchainExtent_ = caps.currentExtent;
         } else {
-            const uint32_t width =
-                static_cast<uint32_t>(std::max(1, ANativeWindow_getWidth(window_)));
-            const uint32_t height =
-                static_cast<uint32_t>(std::max(1, ANativeWindow_getHeight(window_)));
-            swapchainExtent_.width =
-                std::clamp(width, caps.minImageExtent.width, caps.maxImageExtent.width);
-            swapchainExtent_.height =
-                std::clamp(height, caps.minImageExtent.height, caps.maxImageExtent.height);
+            swapchainExtent_.width = static_cast<uint32_t>(
+                std::max(1, ANativeWindow_getWidth(window_)));
+            swapchainExtent_.height = static_cast<uint32_t>(
+                std::max(1, ANativeWindow_getHeight(window_)));
+        }
+        if (isQuarterTurn(preTransform_)) {
+            std::swap(swapchainExtent_.width, swapchainExtent_.height);
         }
 
         uint32_t imageCount = caps.minImageCount + 1;
-        if (caps.maxImageCount > 0) imageCount = std::min(imageCount, caps.maxImageCount);
+        if (caps.maxImageCount > 0) {
+            imageCount = std::min(imageCount, caps.maxImageCount);
+        }
 
         VkSwapchainCreateInfoKHR info{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
         info.surface = surface_;
@@ -367,11 +416,13 @@ private:
         info.imageArrayLayers = 1;
         info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        info.preTransform = caps.currentTransform;
+        info.preTransform = preTransform_;
         info.compositeAlpha = chooseCompositeAlpha(caps.supportedCompositeAlpha);
         info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
         info.clipped = VK_TRUE;
-        checkVk(vkCreateSwapchainKHR(device_, &info, nullptr, &swapchain_), "vkCreateSwapchainKHR");
+        checkVk(
+            vkCreateSwapchainKHR(device_, &info, nullptr, &swapchain_),
+            "vkCreateSwapchainKHR");
 
         uint32_t actualCount = 0;
         checkVk(
@@ -379,7 +430,8 @@ private:
             "vkGetSwapchainImagesKHR(count)");
         swapchainImages_.resize(actualCount);
         checkVk(
-            vkGetSwapchainImagesKHR(device_, swapchain_, &actualCount, swapchainImages_.data()),
+            vkGetSwapchainImagesKHR(
+                device_, swapchain_, &actualCount, swapchainImages_.data()),
             "vkGetSwapchainImagesKHR");
 
         imageViews_.resize(actualCount);
@@ -401,7 +453,8 @@ private:
 
         framebuffers_.resize(actualCount);
         for (uint32_t i = 0; i < actualCount; ++i) {
-            const std::array<VkImageView, 2> attachments = {imageViews_[i], depthView_};
+            const std::array<VkImageView, 2> attachments = {
+                imageViews_[i], depthView_};
             VkFramebufferCreateInfo fbInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
             fbInfo.renderPass = renderPass_;
             fbInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
@@ -416,12 +469,14 @@ private:
         resizeRequested_.store(false, std::memory_order_relaxed);
     }
 
-    VkShaderModule createShaderModule(const uint32_t* code, size_t bytes) {
+    VkShaderModule createShaderModule(const uint32_t* code, size_t bytes) const {
         VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         info.codeSize = bytes;
         info.pCode = code;
         VkShaderModule module = VK_NULL_HANDLE;
-        checkVk(vkCreateShaderModule(device_, &info, nullptr, &module), "vkCreateShaderModule");
+        checkVk(
+            vkCreateShaderModule(device_, &info, nullptr, &module),
+            "vkCreateShaderModule");
         return module;
     }
 
@@ -479,7 +534,9 @@ private:
         rpInfo.pSubpasses = &subpass;
         rpInfo.dependencyCount = 1;
         rpInfo.pDependencies = &dependency;
-        checkVk(vkCreateRenderPass(device_, &rpInfo, nullptr, &renderPass_), "vkCreateRenderPass");
+        checkVk(
+            vkCreateRenderPass(device_, &rpInfo, nullptr, &renderPass_),
+            "vkCreateRenderPass");
 
         const VkShaderModule vert =
             createShaderModule(native_cube_vert_spv, native_cube_vert_spv_size);
@@ -496,10 +553,9 @@ private:
         fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
         fragStage.module = frag;
         fragStage.pName = "main";
-        const std::array<VkPipelineShaderStageCreateInfo, 2> stages = {vertStage, fragStage};
+        const std::array<VkPipelineShaderStageCreateInfo, 2> stages = {
+            vertStage, fragStage};
 
-        // Geometry is generated directly from gl_VertexIndex in the vertex
-        // shader. This keeps the benchmark tiny and avoids another upload path.
         VkPipelineVertexInputStateCreateInfo vertexInput{
             VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
 
@@ -512,7 +568,9 @@ private:
         viewportState.viewportCount = 1;
         viewportState.scissorCount = 1;
         const std::array<VkDynamicState, 2> dynamicStates = {
-            VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR,
+        };
         VkPipelineDynamicStateCreateInfo dynamic{
             VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
         dynamic.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
@@ -539,8 +597,10 @@ private:
 
         VkPipelineColorBlendAttachmentState blendAttachment{};
         blendAttachment.colorWriteMask =
-            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            VK_COLOR_COMPONENT_R_BIT |
+            VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT |
+            VK_COLOR_COMPONENT_A_BIT;
         VkPipelineColorBlendStateCreateInfo blend{
             VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
         blend.attachmentCount = 1;
@@ -572,29 +632,36 @@ private:
         pipelineInfo.layout = pipelineLayout_;
         pipelineInfo.renderPass = renderPass_;
         pipelineInfo.subpass = 0;
-        const VkResult pipelineResult = vkCreateGraphicsPipelines(
+
+        const VkResult result = vkCreateGraphicsPipelines(
             device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_);
         vkDestroyShaderModule(device_, vert, nullptr);
         vkDestroyShaderModule(device_, frag, nullptr);
-        checkVk(pipelineResult, "vkCreateGraphicsPipelines");
+        checkVk(result, "vkCreateGraphicsPipelines");
     }
 
     void recordCommandBuffer(uint32_t imageIndex) {
-        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        checkVk(vkBeginCommandBuffer(commandBuffer_, &beginInfo), "vkBeginCommandBuffer");
+        VkCommandBufferBeginInfo beginInfo{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        checkVk(
+            vkBeginCommandBuffer(commandBuffer_, &beginInfo),
+            "vkBeginCommandBuffer");
 
         std::array<VkClearValue, 2> clears{};
-        clears[0].color = {{0.009f, 0.012f, 0.014f, 1.0f}};
+        clears[0].color = {{0.008f, 0.010f, 0.013f, 1.0f}};
         clears[1].depthStencil = {1.0f, 0};
 
-        VkRenderPassBeginInfo renderInfo{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        VkRenderPassBeginInfo renderInfo{
+            VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         renderInfo.renderPass = renderPass_;
         renderInfo.framebuffer = framebuffers_[imageIndex];
         renderInfo.renderArea.extent = swapchainExtent_;
         renderInfo.clearValueCount = static_cast<uint32_t>(clears.size());
         renderInfo.pClearValues = clears.data();
-        vkCmdBeginRenderPass(commandBuffer_, &renderInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBeginRenderPass(
+            commandBuffer_, &renderInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(
+            commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
 
         VkViewport viewport{};
         viewport.width = static_cast<float>(swapchainExtent_.width);
@@ -614,11 +681,12 @@ private:
             std::max(1, visibleHeight_.load(std::memory_order_relaxed)));
         push.aspect = visibleW / visibleH;
         push.cameraDistance = cameraDistance_.load(std::memory_order_relaxed);
+        push.preRotation = rotationCode(preTransform_);
         vkCmdPushConstants(
             commandBuffer_, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
             0, sizeof(push), &push);
 
-        // 36 cube vertices + 6 vertices for the studio floor.
+        // 36 cube vertices + 6 floor vertices, generated by gl_VertexIndex.
         vkCmdDraw(commandBuffer_, 42, 1, 0, 0);
         vkCmdEndRenderPass(commandBuffer_);
         checkVk(vkEndCommandBuffer(commandBuffer_), "vkEndCommandBuffer");
@@ -630,8 +698,9 @@ private:
             "vkWaitForFences");
 
         uint32_t imageIndex = 0;
-        VkResult acquire = vkAcquireNextImageKHR(
-            device_, swapchain_, UINT64_MAX, imageAvailable_, VK_NULL_HANDLE, &imageIndex);
+        const VkResult acquire = vkAcquireNextImageKHR(
+            device_, swapchain_, UINT64_MAX,
+            imageAvailable_, VK_NULL_HANDLE, &imageIndex);
         if (acquire == VK_ERROR_OUT_OF_DATE_KHR) {
             recreateSwapchain();
             return;
@@ -641,10 +710,13 @@ private:
         }
 
         checkVk(vkResetFences(device_, 1, &frameFence_), "vkResetFences");
-        checkVk(vkResetCommandBuffer(commandBuffer_, 0), "vkResetCommandBuffer");
+        checkVk(
+            vkResetCommandBuffer(commandBuffer_, 0),
+            "vkResetCommandBuffer");
         recordCommandBuffer(imageIndex);
 
-        const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        const VkPipelineStageFlags waitStage =
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submit.waitSemaphoreCount = 1;
         submit.pWaitSemaphores = &imageAvailable_;
@@ -653,7 +725,9 @@ private:
         submit.pCommandBuffers = &commandBuffer_;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores = &renderFinished_;
-        checkVk(vkQueueSubmit(queue_, 1, &submit, frameFence_), "vkQueueSubmit");
+        checkVk(
+            vkQueueSubmit(queue_, 1, &submit, frameFence_),
+            "vkQueueSubmit");
 
         VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         present.waitSemaphoreCount = 1;
@@ -662,6 +736,7 @@ private:
         present.pSwapchains = &swapchain_;
         present.pImageIndices = &imageIndex;
         const VkResult result = vkQueuePresentKHR(queue_, &present);
+
         if (result == VK_ERROR_OUT_OF_DATE_KHR ||
             result == VK_SUBOPTIMAL_KHR ||
             resizeRequested_.load(std::memory_order_relaxed)) {
@@ -677,28 +752,15 @@ private:
             initVulkan();
             setStatus("Vulkan · " + gpuName_ + " · starting frames…");
 
-            auto lastFrame = Clock::now();
-            auto statStart = lastFrame;
+            auto statStart = Clock::now();
             uint32_t frames = 0;
             while (running_.load(std::memory_order_relaxed)) {
-                const auto now = Clock::now();
-                const float dt = std::chrono::duration<float>(now - lastFrame).count();
-                lastFrame = now;
-
-                // Slow idle turn only after the user has stopped interacting for a
-                // while. The old 220 ms timeout fought the finger and made orbiting
-                // feel like the axes were drifting.
-                const int64_t sinceInteraction =
-                    nowNs() - lastInteractionNs_.load(std::memory_order_relaxed);
-                if (sinceInteraction > 1800000000LL) {
-                    yaw_.store(
-                        yaw_.load(std::memory_order_relaxed) + std::min(dt, 0.05f) * 0.18f,
-                        std::memory_order_relaxed);
-                }
-
                 drawFrame();
                 ++frames;
-                const float elapsed = std::chrono::duration<float>(now - statStart).count();
+
+                const auto now = Clock::now();
+                const float elapsed =
+                    std::chrono::duration<float>(now - statStart).count();
                 if (elapsed >= 0.5f) {
                     const float fps = static_cast<float>(frames) / elapsed;
                     const int w = visibleWidth_.load(std::memory_order_relaxed);
@@ -706,8 +768,11 @@ private:
                     setStatus(
                         "Vulkan · " + gpuName_ + " · " +
                         std::to_string(fps).substr(0, 5) +
-                        " FPS · direct Android Surface · " +
-                        std::to_string(w) + "×" + std::to_string(h));
+                        " FPS · direct Android Surface · view " +
+                        std::to_string(w) + "×" + std::to_string(h) +
+                        " · buffer " + std::to_string(swapchainExtent_.width) +
+                        "×" + std::to_string(swapchainExtent_.height) +
+                        " · " + rotationName(preTransform_));
                     statStart = now;
                     frames = 0;
                 }
@@ -722,14 +787,19 @@ private:
 
     void destroySwapchain() {
         if (device_ == VK_NULL_HANDLE) return;
-        for (auto framebuffer : framebuffers_) {
-            if (framebuffer) vkDestroyFramebuffer(device_, framebuffer, nullptr);
+
+        for (VkFramebuffer framebuffer : framebuffers_) {
+            if (framebuffer) {
+                vkDestroyFramebuffer(device_, framebuffer, nullptr);
+            }
         }
         framebuffers_.clear();
 
         if (pipeline_) vkDestroyPipeline(device_, pipeline_, nullptr);
         pipeline_ = VK_NULL_HANDLE;
-        if (pipelineLayout_) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
+        if (pipelineLayout_) {
+            vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
+        }
         pipelineLayout_ = VK_NULL_HANDLE;
         if (renderPass_) vkDestroyRenderPass(device_, renderPass_, nullptr);
         renderPass_ = VK_NULL_HANDLE;
@@ -741,11 +811,12 @@ private:
         if (depthMemory_) vkFreeMemory(device_, depthMemory_, nullptr);
         depthMemory_ = VK_NULL_HANDLE;
 
-        for (auto view : imageViews_) {
+        for (VkImageView view : imageViews_) {
             if (view) vkDestroyImageView(device_, view, nullptr);
         }
         imageViews_.clear();
         swapchainImages_.clear();
+
         if (swapchain_) vkDestroySwapchainKHR(device_, swapchain_, nullptr);
         swapchain_ = VK_NULL_HANDLE;
     }
@@ -753,6 +824,7 @@ private:
     void cleanupVulkan() {
         if (device_ != VK_NULL_HANDLE) vkDeviceWaitIdle(device_);
         destroySwapchain();
+
         if (device_ != VK_NULL_HANDLE && frameFence_) {
             vkDestroyFence(device_, frameFence_, nullptr);
         }
@@ -770,6 +842,7 @@ private:
         }
         commandPool_ = VK_NULL_HANDLE;
         commandBuffer_ = VK_NULL_HANDLE;
+
         if (device_) vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
         if (instance_ != VK_NULL_HANDLE && surface_) {
@@ -786,10 +859,9 @@ private:
     mutable std::mutex statusMutex_;
     std::string status_ = "Vulkan · waiting for Surface…";
 
-    std::atomic<float> yaw_{-0.49f};
-    std::atomic<float> pitch_{0.38f};
-    std::atomic<float> cameraDistance_{6.2f};
-    std::atomic<int64_t> lastInteractionNs_{0};
+    std::atomic<float> yaw_{-0.55f};
+    std::atomic<float> pitch_{0.42f};
+    std::atomic<float> cameraDistance_{6.6f};
     std::atomic<bool> resizeRequested_{false};
     std::atomic<int> visibleWidth_{1};
     std::atomic<int> visibleHeight_{1};
@@ -805,6 +877,8 @@ private:
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkFormat swapchainFormat_ = VK_FORMAT_UNDEFINED;
     VkExtent2D swapchainExtent_{};
+    VkSurfaceTransformFlagBitsKHR preTransform_ =
+        VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     std::vector<VkImage> swapchainImages_;
     std::vector<VkImageView> imageViews_;
     std::vector<VkFramebuffer> framebuffers_;
@@ -855,19 +929,25 @@ Java_com_example_dreamlinux_NativeCubeActivity_nativeDestroy(
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_dreamlinux_NativeCubeActivity_nativeResize(
     JNIEnv*, jobject, jlong handle, jint width, jint height) {
-    if (auto* renderer = fromHandle(handle)) renderer->resize(width, height);
+    if (auto* renderer = fromHandle(handle)) {
+        renderer->resize(width, height);
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_dreamlinux_NativeCubeActivity_nativeRotate(
     JNIEnv*, jobject, jlong handle, jfloat yawDegrees, jfloat pitchDegrees) {
-    if (auto* renderer = fromHandle(handle)) renderer->rotate(yawDegrees, pitchDegrees);
+    if (auto* renderer = fromHandle(handle)) {
+        renderer->rotate(yawDegrees, pitchDegrees);
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_dreamlinux_NativeCubeActivity_nativeZoom(
     JNIEnv*, jobject, jlong handle, jfloat scale) {
-    if (auto* renderer = fromHandle(handle)) renderer->zoom(scale);
+    if (auto* renderer = fromHandle(handle)) {
+        renderer->zoom(scale);
+    }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
