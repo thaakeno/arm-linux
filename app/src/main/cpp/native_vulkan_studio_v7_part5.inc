@@ -7,13 +7,14 @@
     }
     void loopV7(){
         try{
-            setStatus("Vulkan Studio v10.0 · loading rainy house showcase…");initVulkan();loadTexturesV7();if(rtSupported_)rebuildTlasV7();rebuildDescriptorsV7();replacePipelineV7();
-            logV7("READY · 240 Hz physics · stable hybrid HWRT · reconstructed path lighting · rainy house interior");
+            setStatus("Vulkan Studio v10.0 · loading final rain-house renderer…");initVulkan();loadTexturesV7();if(rtSupported_)rebuildTlasV7();rebuildDescriptorsV7();replacePipelineV7();
+            logV7("READY · 240 Hz physics · stable hybrid HWRT · sparse reconstructed path lighting · Alpine rain windows");
+            logV7("final scene · steel + gummy + light orb + rubber · slime removed");
             auto last=Clock::now(),stat=last,start=last,telemetry=last;uint32_t frames=0;
             while(running_){
                 auto now=Clock::now();float dt=std::chrono::duration<float>(now-last).count();last=now;physicsStepV7(dt);updateBodyGpuV7();float t=std::chrono::duration<float>(now-start).count();if(!drawV7(t)){setStatus("ERROR: Vulkan Studio v10.0 · GPU device lost · renderer stopped safely");logV7("DEVICE LOST · renderer stopped; do not continue RT stress in this session");break;}adaptRtSafetyV7();++frames;
                 float e=std::chrono::duration<float>(now-stat).count();if(e>=.5f){float fps=frames/e;bool rt=rtActiveV7(),pt=pathTracing_.load();std::ostringstream o;o.setf(std::ios::fixed);o.precision(1);o<<"Vulkan Studio v10.0 · "<<gpuName_<<" · "<<fps<<" FPS · GPU "<<gpuMs_<<" ms\n";o<<"Q"<<quality_.load()<<" · "<<(stress_.load()?"SAFE STRESS":"RAIN HOUSE")<<" · Physics "<<(physics_.load()?"ON":"OFF")<<" · "<<(pt?"PATH QUALITY":(rt?"RT LOCAL HW":"RT BYPASSED"))<<"\n";o<<"bodies "<<activeBodiesV7()<<" · rain "<<int(wetness_.load()*100)<<"% · hero "<<((heroMaterial_.load()%10)==0?"CONCRETE":"VOLCANIC")<<" · RT budget "<<int(rtBudgetV7()*100)<<"%";setStatus(o.str());frames=0;stat=now;}
-                if(std::chrono::duration<float>(now-telemetry).count()>=2.0f){std::ostringstream l;l.setf(std::ios::fixed);l.precision(2);l<<"telemetry · GPU "<<gpuMs_<<" ms · bodies "<<activeBodiesV7()<<" · mode "<<(pathTracing_.load()?"PATH_QUALITY":(rtActiveV7()?"HYBRID_HWRT":"RASTER"))<<" · budget "<<rtBudgetV7()<<" · safety "<<rtSafety_.load()<<" · scale "<<(pathTracing_.load()?0.50:0.84);logV7(l.str());telemetry=now;}
+                if(std::chrono::duration<float>(now-telemetry).count()>=2.0f){std::ostringstream l;l.setf(std::ios::fixed);l.precision(2);l<<"telemetry · GPU "<<gpuMs_<<" ms · bodies "<<activeBodiesV7()<<" · mode "<<(pathTracing_.load()?"PATH_QUALITY":(rtActiveV7()?"HYBRID_HWRT":"RASTER"))<<" · budget "<<rtBudgetV7()<<" · safety "<<rtSafety_.load()<<" · scale "<<(pathTracing_.load()?0.42:0.80);logV7(l.str());telemetry=now;}
             }
         }catch(const std::exception&e){setStatus(std::string("ERROR: Vulkan Studio v10.0: ")+e.what());logV7(std::string("ERROR: ")+e.what());}
         cleanupV7();cleanup();
