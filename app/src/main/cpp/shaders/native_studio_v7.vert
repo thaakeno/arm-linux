@@ -43,10 +43,10 @@ void emitHero(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,ou
     P=c+N*(bevel+h*depth*seam); M=mod(pc.heroMaterial,10.0)<.5?0:6; O=1; basisFromNormal(N,T,B);
 }
 
-float floorH(vec2 uv){return textureLod(concreteHeight,fract(uv),0.0).r-.5;}
+float floorH(vec2 uv){return textureLod(floorHeight,fract(uv),0.0).r-.5;}
 void emitFloor(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
     int cell=local/6,corner=local-cell*6,x=cell%FLOOR_GRID,y=cell/FLOOR_GRID; vec2 tc=triCorner(corner); vec2 g=(vec2(x,y)+tc)/float(FLOOR_GRID);
-    uv=g*3.20; vec2 xz=(g*2.0-1.0)*7.05; float q=clamp(pc.quality/100.0,0.0,1.0),amp=mix(.026,.035,q),h=floorH(uv);
+    uv=g*3.20; vec2 xz=(g*2.0-1.0)*7.05; float q=clamp(pc.quality/100.0,0.0,1.0),amp=mix(.038,.058,q),h=floorH(uv);
     P=vec3(xz.x,FLOOR_Y+h*amp,xz.y);
     vec2 texel=vec2(1.0/2048.0); float hx=floorH(uv+vec2(texel.x,0))-floorH(uv-vec2(texel.x,0)); float hz=floorH(uv+vec2(0,texel.y))-floorH(uv-vec2(0,texel.y));
     N=normalize(vec3(-hx*amp*90.0,1.0,-hz*amp*90.0)); T=normalize(vec3(1.0,hx*amp*90.0,0)); B=normalize(cross(N,T)); M=1; O=0;
@@ -95,11 +95,13 @@ void poleSafeSphereVertex(int local,int su,int sv,out vec3 n,out vec2 uv){
     int cell=local/6,corner=local-cell*6,x=cell%su,y=cell/su; float u0=float(x)/float(su),u1=float(x+1)/float(su),v0=float(y)/float(sv),v1=float(y+1)/float(sv);
     vec3 p0,p1,p2; vec2 t0,t1,t2;
     if(y==0){
+        if(corner>=3){n=vec3(0,1,0);uv=vec2((u0+u1)*.5,0);return;}
         p0=vec3(0,1,0);p1=spherePoint(u1,v1);p2=spherePoint(u0,v1);t0=vec2((u0+u1)*.5,0);t1=vec2(u1,v1);t2=vec2(u0,v1);
-        int k=corner%3;n=k==0?p0:(k==1?p1:p2);uv=k==0?t0:(k==1?t1:t2);
+        n=corner==0?p0:(corner==1?p1:p2);uv=corner==0?t0:(corner==1?t1:t2);
     }else if(y==sv-1){
+        if(corner>=3){n=vec3(0,-1,0);uv=vec2((u0+u1)*.5,1);return;}
         p0=spherePoint(u0,v0);p1=spherePoint(u1,v0);p2=vec3(0,-1,0);t0=vec2(u0,v0);t1=vec2(u1,v0);t2=vec2((u0+u1)*.5,1);
-        int k=corner%3;n=k==0?p0:(k==1?p1:p2);uv=k==0?t0:(k==1?t1:t2);
+        n=corner==0?p0:(corner==1?p1:p2);uv=corner==0?t0:(corner==1?t1:t2);
     }else{
         vec2 tc=triCorner(corner);float u=(float(x)+tc.x)/float(su),v=(float(y)+tc.y)/float(sv);n=spherePoint(u,v);uv=vec2(u,v);
     }
@@ -107,8 +109,8 @@ void poleSafeSphereVertex(int local,int su,int sv,out vec3 n,out vec2 uv){
 void sphereVertex(int local,int su,int sv,int bodyIndex,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
     vec3 n; poleSafeSphereVertex(local,su,sv,n,uv); BodyGpu body=bodies[bodyIndex]; vec3 lp=n*body.posRad.w;
     if(body.meta.y==1){
-        bool slime=body.meta.z==1; float c=clamp(body.extra.x,-.045,slime?.46:.32); vec3 d=body.extra.yzw; float dl=length(d); d=dl>.0001?d/dl:vec3(0,1,0);
-        float alongScale=clamp(1.0-c,slime?.50:.64,1.05),perpScale=inversesqrt(alongScale),nd=dot(n,d),a=dot(lp,d); vec3 along=d*a,perp=lp-along;
+        bool slime=body.meta.z==1; float c=clamp(body.extra.x,-.025,slime?.34:.28); vec3 d=body.extra.yzw; float dl=length(d); d=dl>.0001?d/dl:vec3(0,1,0);
+        float alongScale=clamp(1.0-c,slime?.60:.70,1.025),perpScale=inversesqrt(alongScale),nd=dot(n,d),a=dot(lp,d); vec3 along=d*a,perp=lp-along;
         lp=along*alongScale+perp*perpScale; n=normalize(d*nd/max(alongScale,.001)+(n-d*nd)/max(perpScale,.001));
     }
     P=body.posRad.xyz+lp;N=normalize(n);M=body.meta.x;O=bodyIndex+STATIC_INSTANCES;basisFromNormal(N,T,B);
