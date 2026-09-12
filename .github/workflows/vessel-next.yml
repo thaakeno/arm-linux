@@ -37,13 +37,13 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
 
-      - name: Fetch Vulkan Studio v7 offline assets
+      - name: Fetch Vulkan Studio offline assets
         run: |
           set -euxo pipefail
           ASSETS=app/src/main/assets/vulkan_v7
           THIRD=app/src/main/cpp/third_party
           mkdir -p "$ASSETS" "$THIRD"
-          UA='Vessel-Vulkan-Studio-v8/1.0 (offline APK asset build)'
+          UA='Vessel-Vulkan-Studio-v10/1.0 (offline APK asset build)'
           get() { curl --fail --location --retry 4 --retry-delay 2 --user-agent "$UA" "$1" --output "$2"; test -s "$2"; }
 
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cobblestone_pavement/cobblestone_pavement_diff_2k.jpg' "$ASSETS/cobblestone_diff_2k.jpg"
@@ -65,7 +65,7 @@ jobs:
           get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$THIRD/stb_image.h"
           du -h "$ASSETS"/*
 
-      - name: Validate rootless runtime and Vulkan Studio v8
+      - name: Validate rootless runtime and Vulkan Studio v10
         run: |
           set -euxo pipefail
           for f in tools/venus_poc/vessel_runtime_daemon.py \
@@ -87,24 +87,28 @@ jobs:
                   'SurfaceView', 'System.loadLibrary("vessel_vulkan")', 'VULKAN TELEMETRY',
                   'nativeSetStress', 'nativeSetQuality', 'nativeSetPhysics', 'nativeSetRt', 'nativeGrabLightStart',
                   'nativeSetLightIntensity', 'nativeSetLightHaze', 'nativeSetLightBounce',
-                  'VULKAN STUDIO  //  v8.0'
+                  'VULKAN STUDIO  //  v10.0', 'RAIN HOUSE', '0.50x'
               ],
               'app/src/main/cpp/CMakeLists.txt': [
                   'add_library(vessel_vulkan SHARED native_vulkan_studio_v7.cpp)',
                   'native_studio_v7_rt.frag', 'target_link_libraries(vessel_vulkan PRIVATE android log vulkan)'
               ],
               'app/src/main/cpp/native_vulkan_studio_v7_part1.inc': [
-                  'adaptive RT budget', 'physical puddles', 'setWetness', 'setHeroMaterial', '0.60x',
-                  'setLightIntensity', 'setLightHaze', 'setLightBounce'
+                  'adaptive RT budget', 'physical puddles', 'setWetness', 'setHeroMaterial', '0.50x',
+                  'setLightIntensity', 'setLightHaze', 'setLightBounce', 'rain-window house'
               ],
               'app/src/main/cpp/native_vulkan_studio_v7_part4.inc': [
-                  'cmdUpdateTlasV7', 'rtBudgetV7', 'VK_ERROR_DEVICE_LOST', 'adaptRtSafetyV7', 'four fire sconces'
+                  'cmdUpdateTlasV7', 'rtBudgetV7', 'VK_ERROR_DEVICE_LOST', 'adaptRtSafetyV7',
+                  'house shell + furniture', 'dynamicSceneV7'
               ],
+              'app/src/main/cpp/native_vulkan_studio_v7_part5.inc': ['Vulkan Studio v10.0', 'RAIN HOUSE', '0.50'],
               'app/src/main/cpp/shaders/native_studio_v7_rt.frag': [
                   'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceScene', 'stablePathIndirect', 'heroWetMask', 'rtBudget',
-                  'TORCH2', 'TORCH3', 'orbHaze'
+                  'TORCH0', 'TORCH1', 'FIREPLACE', 'rainyLandscape', 'windowColor'
               ],
-              'app/src/main/cpp/shaders/native_studio_v7.vert': ['HERO_GRID=48', 'FLOOR_GRID=96', 'LEAVES=192', 'emitSky'],
+              'app/src/main/cpp/shaders/native_studio_v7.vert': [
+                  'HERO_GRID=48', 'FLOOR_GRID=96', 'LEAVES=192', 'emitSky', 'rainy window L', 'wall TV'
+              ],
           }
           for path, needles in checks.items():
               text = Path(path).read_text()
