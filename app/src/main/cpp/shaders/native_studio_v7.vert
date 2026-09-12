@@ -109,9 +109,11 @@ void poleSafeSphereVertex(int local,int su,int sv,out vec3 n,out vec2 uv){
 void sphereVertex(int local,int su,int sv,int bodyIndex,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
     vec3 n; poleSafeSphereVertex(local,su,sv,n,uv); BodyGpu body=bodies[bodyIndex]; vec3 lp=n*body.posRad.w;
     if(body.meta.y==1){
-        bool slime=body.meta.z==1; float c=clamp(body.extra.x,-.025,slime?.34:.28); vec3 d=body.extra.yzw; float dl=length(d); d=dl>.0001?d/dl:vec3(0,1,0);
-        float alongScale=clamp(1.0-c,slime?.60:.70,1.025),perpScale=inversesqrt(alongScale),nd=dot(n,d),a=dot(lp,d); vec3 along=d*a,perp=lp-along;
-        lp=along*alongScale+perp*perpScale; n=normalize(d*nd/max(alongScale,.001)+(n-d*nd)/max(perpScale,.001));
+        bool slime=body.meta.z==1; float c=clamp(body.extra.x,-.025,slime?.50:(body.meta.x==3?.40:.30)); vec3 d=body.extra.yzw; float dl=length(d); d=dl>.0001?d/dl:vec3(0,1,0);
+        float minAlong=slime?.48:(body.meta.x==3?.60:.70),alongScale=clamp(1.0-c,minAlong,1.025),perpScale=inversesqrt(alongScale),nd=dot(n,d),a=dot(lp,d); vec3 along=d*a,perp=lp-along;
+        lp=along*alongScale+perp*perpScale;
+        if(slime){float skirt=smoothstep(.35,-.75,n.y);float spread=1.0+c*(.22+.34*skirt);lp.xz*=spread;lp.y-=body.posRad.w*c*.07*(1.0-n.y);}
+        n=normalize(d*nd/max(alongScale,.001)+(n-d*nd)/max(perpScale,.001));
     }
     P=body.posRad.xyz+lp;N=normalize(n);M=body.meta.x;O=bodyIndex+STATIC_INSTANCES;basisFromNormal(N,T,B);
 }
