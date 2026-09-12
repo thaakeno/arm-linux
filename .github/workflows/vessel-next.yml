@@ -43,7 +43,7 @@ jobs:
           ASSETS=app/src/main/assets/vulkan_v7
           THIRD=app/src/main/cpp/third_party
           mkdir -p "$ASSETS" "$THIRD"
-          UA='Vessel-Vulkan-Studio-v7/1.0 (offline APK asset build)'
+          UA='Vessel-Vulkan-Studio-v8/1.0 (offline APK asset build)'
           get() { curl --fail --location --retry 4 --retry-delay 2 --user-agent "$UA" "$1" --output "$2"; test -s "$2"; }
 
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cobblestone_pavement/cobblestone_pavement_diff_2k.jpg' "$ASSETS/cobblestone_diff_2k.jpg"
@@ -65,7 +65,7 @@ jobs:
           get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$THIRD/stb_image.h"
           du -h "$ASSETS"/*
 
-      - name: Validate rootless runtime and Vulkan Studio v7
+      - name: Validate rootless runtime and Vulkan Studio v8
         run: |
           set -euxo pipefail
           for f in tools/venus_poc/vessel_runtime_daemon.py \
@@ -84,22 +84,25 @@ jobs:
               'tools/venus_poc/vessel_runtime_daemon_v22.py': ['PROTOCOL_VERSION = 22', 'network_v22', 'VESSEL_MEM_MB'],
               'app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt': ['REQUIRED_PROTOCOL = 22', 'VESSEL_MEM_MB=8192'],
               'app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt': [
-                  'SurfaceView', 'System.loadLibrary("vessel_vulkan")', 'VULKAN LOG',
+                  'SurfaceView', 'System.loadLibrary("vessel_vulkan")', 'VULKAN TELEMETRY',
                   'nativeSetStress', 'nativeSetQuality', 'nativeSetPhysics', 'nativeSetRt', 'nativeGrabLightStart',
-                  'VULKAN STUDIO  //  v7.7'
+                  'nativeSetLightIntensity', 'nativeSetLightHaze', 'nativeSetLightBounce',
+                  'VULKAN STUDIO  //  v8.0'
               ],
               'app/src/main/cpp/CMakeLists.txt': [
                   'add_library(vessel_vulkan SHARED native_vulkan_studio_v7.cpp)',
                   'native_studio_v7_rt.frag', 'target_link_libraries(vessel_vulkan PRIVATE android log vulkan)'
               ],
               'app/src/main/cpp/native_vulkan_studio_v7_part1.inc': [
-                  'adaptive RT budget', 'physical puddles', 'setWetness', 'setHeroMaterial', '0.70x'
+                  'adaptive RT budget', 'physical puddles', 'setWetness', 'setHeroMaterial', '0.60x',
+                  'setLightIntensity', 'setLightHaze', 'setLightBounce'
               ],
               'app/src/main/cpp/native_vulkan_studio_v7_part4.inc': [
-                  'cmdUpdateTlasV7', 'rtBudgetV7', 'VK_ERROR_DEVICE_LOST', 'adaptRtSafetyV7'
+                  'cmdUpdateTlasV7', 'rtBudgetV7', 'VK_ERROR_DEVICE_LOST', 'adaptRtSafetyV7', 'four fire sconces'
               ],
               'app/src/main/cpp/shaders/native_studio_v7_rt.frag': [
-                  'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceScene', 'pathIndirect', 'heroWetMask', 'rtBudget'
+                  'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceScene', 'stablePathIndirect', 'heroWetMask', 'rtBudget',
+                  'TORCH2', 'TORCH3', 'orbHaze'
               ],
               'app/src/main/cpp/shaders/native_studio_v7.vert': ['HERO_GRID=48', 'FLOOR_GRID=96', 'LEAVES=192', 'emitSky'],
           }
