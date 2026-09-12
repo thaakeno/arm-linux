@@ -52,9 +52,10 @@ jobs:
       - name: Apply v11 compatibility then v12 overhaul
         run: |
           set -euxo pipefail
-          python3 -m py_compile tools/venus_poc/apply_v11_showcase.py tools/venus_poc/apply_v12_showcase.py
+          python3 -m py_compile tools/venus_poc/apply_v11_showcase.py tools/venus_poc/apply_v12_showcase.py tools/venus_poc/apply_v12_shader_fix.py
           python3 tools/venus_poc/apply_v11_showcase.py
           python3 tools/venus_poc/apply_v12_showcase.py
+          python3 tools/venus_poc/apply_v12_shader_fix.py
       - name: Validate v12 markers
         run: |
           set -euxo pipefail
