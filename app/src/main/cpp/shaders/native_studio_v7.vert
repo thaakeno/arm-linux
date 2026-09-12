@@ -1,4 +1,5 @@
 #version 460
+// Vulkan Studio v10.0 house showcase. Geometry stays procedural to keep the APK light and the Adreno vertex path cheap.
 
 layout(location=0) out vec3 outWorldPos;
 layout(location=1) out vec3 outWorldNormal;
@@ -55,38 +56,40 @@ void emitFloor(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,o
 void emitBox(int local,vec3 center,vec3 scale,int mat,int obj,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
     int face=local/6,corner=local-face*6; vec2 q=quadCorner(corner); vec3 p=boxPos(face,q); P=center+p*scale; N=normalize(boxN(face)/max(scale,vec3(.001))); uv=q*.5+.5; M=mat; O=obj; basisFromNormal(N,T,B);
 }
+
+// 18 cheap boxes compose the room shell and furniture. The openings are intentionally broad so the window material can show the landscape.
 void archInfo(int block,out vec3 c,out vec3 s,out int mat){
     mat=5;c=vec3(0);s=vec3(1);
-    if(block==0){c=vec3(0,1.25,-7.02);s=vec3(7.05,2.25,.16);}
-    else if(block==1){c=vec3(-7.02,.55,0);s=vec3(.16,1.55,7.05);}
-    else if(block==2){c=vec3(7.02,.55,0);s=vec3(.16,1.55,7.05);}
-    else if(block==3){c=vec3(-4.95,-.42,-4.95);s=vec3(1.50,.58,.82);mat=12;}
-    else if(block==4){c=vec3(4.95,-.42,-4.95);s=vec3(1.50,.58,.82);mat=12;}
-    else if(block==5){c=vec3(0,-.50,-5.85);s=vec3(2.55,.50,.50);mat=12;}
-    else if(block==6){c=vec3(-5.42,1.28,-5.72);s=vec3(.34,2.18,.34);}
-    else if(block==7){c=vec3(5.42,1.28,-5.72);s=vec3(.34,2.18,.34);}
-    else if(block==8){c=vec3(-5.30,1.42,-5.30);s=vec3(.075,.52,.075);mat=15;}
-    else if(block==9){c=vec3(5.30,1.42,-5.30);s=vec3(.075,.52,.075);mat=15;}
-    else if(block==10){c=vec3(-2.55,.34,-6.70);s=vec3(.075,.52,.075);mat=15;}
-    else if(block==11){c=vec3(2.55,.34,-6.70);s=vec3(.075,.52,.075);mat=15;}
-    else if(block==12){c=vec3(-3.75,-.52,4.95);s=vec3(1.25,.12,.44);mat=14;}
-    else if(block==13){c=vec3(-4.60,-.76,4.95);s=vec3(.10,.36,.36);mat=12;}
-    else if(block==14){c=vec3(-2.90,-.76,4.95);s=vec3(.10,.36,.36);mat=12;}
-    else if(block==15){c=vec3(0,1.30,-6.82);s=vec3(1.72,.54,.025);mat=12;}
-    else if(block==16){c=vec3(-5.15,-.20,4.95);s=vec3(1.28,.82,.46);mat=12;}
-    else{c=vec3(5.15,-.20,4.95);s=vec3(1.28,.82,.46);mat=12;}
+    if(block==0){c=vec3(0,-.02,-6.95);s=vec3(6.82,.98,.16);mat=5;}                 // back lower wall
+    else if(block==1){c=vec3(0,4.00,-6.95);s=vec3(6.82,.50,.16);mat=5;}           // back header
+    else if(block==2){c=vec3(-5.55,2.20,-6.95);s=vec3(1.27,1.22,.16);mat=5;}      // left pillar
+    else if(block==3){c=vec3(0,2.20,-6.95);s=vec3(.62,1.22,.16);mat=5;}           // center pillar
+    else if(block==4){c=vec3(5.55,2.20,-6.95);s=vec3(1.27,1.22,.16);mat=5;}       // right pillar
+    else if(block==5){c=vec3(-3.12,2.20,-6.87);s=vec3(1.79,1.17,.025);mat=16;}    // rainy window L
+    else if(block==6){c=vec3(3.12,2.20,-6.87);s=vec3(1.79,1.17,.025);mat=16;}     // rainy window R
+    else if(block==7){c=vec3(-6.95,1.75,0);s=vec3(.16,2.75,6.95);mat=5;}          // left wall
+    else if(block==8){c=vec3(6.95,1.75,0);s=vec3(.16,2.75,6.95);mat=5;}           // right wall
+    else if(block==9){c=vec3(-6.70,1.55,-1.65);s=vec3(.055,.50,.18);mat=15;}      // left flame
+    else if(block==10){c=vec3(6.70,1.55,-1.65);s=vec3(.055,.50,.18);mat=15;}      // right flame
+    else if(block==11){c=vec3(.10,-.94,2.85);s=vec3(2.65,.035,1.48);mat=18;}      // rug
+    else if(block==12){c=vec3(-3.78,-.48,3.25);s=vec3(1.55,.52,.82);mat=17;}      // sofa seat
+    else if(block==13){c=vec3(-3.78,.27,3.78);s=vec3(1.55,.82,.28);mat=17;}       // sofa back
+    else if(block==14){c=vec3(3.15,-.42,3.58);s=vec3(.92,.60,.68);mat=20;}        // furnace housing
+    else if(block==15){c=vec3(3.15,-.34,2.895);s=vec3(.67,.39,.025);mat=22;}      // furnace fire
+    else if(block==16){c=vec3(6.73,.82,2.35);s=vec3(.035,1.02,1.68);mat=19;}      // wall TV
+    else{c=vec3(5.80,-.61,2.35);s=vec3(.78,.39,1.72);mat=14;}                     // media console
 }
-void emitLeaf(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
-    int leaf=local/6,c=local-leaf*6,planter=leaf%3,k=leaf/3; vec3 base=planter==0?vec3(-4.95,.17,-4.95):(planter==1?vec3(4.95,.17,-4.95):vec3(0,.08,-5.85));
-    float a=2.0*PI*hash11(float(k)*1.73+float(planter)*8.1),r=.12+1.05*sqrt(hash11(float(k)*2.41+7.0)),h=.20+.58*hash11(float(k)*3.11+2.0);
-    vec3 stem=base+vec3(cos(a)*r,h,sin(a)*r*.58); float yaw=a+(hash11(float(k)*5.7)-.5)*1.1; vec3 side=normalize(vec3(cos(yaw),0,sin(yaw))),up=normalize(vec3(cos(yaw)*.22,.92,sin(yaw)*.22));
-    float w=.075+.075*hash11(float(k)*4.2+1.0),l=.22+.26*hash11(float(k)*6.4+3.0); vec3 tip=stem+up*l,left=stem+up*(l*.48)-side*w,right=stem+up*(l*.48)+side*w;
-    if(c==0)P=stem;else if(c==1)P=left;else if(c==2)P=tip;else if(c==3)P=stem;else if(c==4)P=tip;else P=right;
-    N=normalize(cross(side,up));if(dot(N,vec3(0,1,0))<0)N=-N; uv=vec2(c==1?0.0:(c==5?1.0:.5),c==0||c==3?0.0:(c==2||c==4?1.0:.52)); M=10;O=40+leaf;T=side;B=up;
+
+void emitPainting(int leaf,int c,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
+    int side=leaf&1;int row=leaf>>1;vec2 q=quadCorner(c);float z=-4.50+float(row)*2.15;float y=2.55;float x=side==0?-6.74:6.74;vec3 right=vec3(0,0,side==0?1:-1),up=vec3(0,1,0);P=vec3(x,y,z)+right*q.x*.72+up*q.y*.52;N=vec3(side==0?1:-1,0,0);uv=q*.5+.5;M=21;O=40+leaf;T=right;B=up;
 }
+void emitPlantLeaf(int leaf,int c,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
+    int k=leaf-4;int pot=k&1;int n=k>>1;vec3 base=pot==0?vec3(-5.35,-.90,-5.45):vec3(5.35,-.90,-5.45);float a=2.0*PI*hash11(float(n)*1.73+float(pot)*8.1),r=.08+.52*sqrt(hash11(float(n)*2.41+7.0)),h=.20+.74*hash11(float(n)*3.11+2.0);vec3 stem=base+vec3(cos(a)*r,h,sin(a)*r*.60);float yaw=a+(hash11(float(n)*5.7)-.5)*1.1;vec3 side=normalize(vec3(cos(yaw),0,sin(yaw))),up=normalize(vec3(cos(yaw)*.18,.94,sin(yaw)*.18));float w=.05+.055*hash11(float(n)*4.2+1.0),l=.17+.23*hash11(float(n)*6.4+3.0);vec3 tip=stem+up*l,left=stem+up*(l*.48)-side*w,right=stem+up*(l*.48)+side*w;if(c==0)P=stem;else if(c==1)P=left;else if(c==2)P=tip;else if(c==3)P=stem;else if(c==4)P=tip;else P=right;N=normalize(cross(side,up));if(dot(N,vec3(0,1,0))<0)N=-N;uv=vec2(c==1?0.0:(c==5?1.0:.5),c==0||c==3?0.0:(c==2||c==4?1.0:.52));M=10;O=40+leaf;T=side;B=up;
+}
+void emitLeaf(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){int leaf=local/6,c=local-leaf*6;if(leaf<4)emitPainting(leaf,c,P,N,uv,M,O,T,B);else emitPlantLeaf(leaf,c,P,N,uv,M,O,T,B);}
 void emitSky(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){int face=local/6,corner=local-face*6;vec2 q=quadCorner(corner);P=boxPos(face,q)*45.0;N=-boxN(face);uv=q*.5+.5;M=13;O=900;basisFromNormal(N,T,B);}
 void emitArchitecture(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
-    int boxes=ARCH_BOXES*BOX_VERTS;if(local<boxes){int block=local/BOX_VERTS,l=local-block*BOX_VERTS;vec3 c,s;int mat;archInfo(block,c,s,mat);emitBox(l,c,s,mat,2+block,P,N,uv,M,O,T,B);if(block>=8&&block<=11){float fy=clamp((P.y-(c.y-s.y))/max(2.0*s.y,.001),0.0,1.0);float taper=mix(1.0,.20,smoothstep(.18,1.0,fy));P.xz=c.xz+(P.xz-c.xz)*taper;float sway=sin(pc.time*3.1+float(block)*1.71+fy*3.0)*.030*fy;P.x+=sway;P.z+=cos(pc.time*2.6+float(block)*.91+fy*2.0)*.018*fy;N=normalize(N+vec3(sway*.8,0,.02*sin(pc.time*2.2+float(block))));basisFromNormal(N,T,B);}return;}
+    int boxes=ARCH_BOXES*BOX_VERTS;if(local<boxes){int block=local/BOX_VERTS,l=local-block*BOX_VERTS;vec3 c,s;int mat;archInfo(block,c,s,mat);emitBox(l,c,s,mat,2+block,P,N,uv,M,O,T,B);if(block==9||block==10){float fy=clamp((P.y-(c.y-s.y))/max(2.0*s.y,.001),0.0,1.0);float sway=sin(pc.time*6.1+float(block)*1.3+fy*4.0)*.045*fy;P.z+=sway;P.y+=sin(pc.time*8.0+fy*5.0)*.012*fy;N=normalize(N+vec3(0,.05*sin(pc.time*4.7+fy),sway));basisFromNormal(N,T,B);}return;}
     int leafLocal=local-boxes;if(leafLocal<LEAF_VERTS){emitLeaf(leafLocal,P,N,uv,M,O,T,B);return;}emitSky(leafLocal-LEAF_VERTS,P,N,uv,M,O,T,B);
 }
 
@@ -101,9 +104,9 @@ void poleSafeSphereVertex(int local,int su,int sv,out vec3 n,out vec2 uv){
 void sphereVertex(int local,int su,int sv,int bodyIndex,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
     vec3 n;poleSafeSphereVertex(local,su,sv,n,uv);BodyGpu body=bodies[bodyIndex];vec3 lp=n*body.posRad.w;
     if(body.meta.y==1){
-        bool slime=body.meta.z==1;float c=clamp(body.extra.x,-.030,slime?.58:(body.meta.x==3?.48:.34));vec3 d=body.extra.yzw;float dl=length(d);d=dl>.0001?d/dl:vec3(0,1,0);
-        float minAlong=slime?.40:(body.meta.x==3?.54:.66),alongScale=clamp(1.0-c,minAlong,1.030),perpScale=inversesqrt(alongScale),nd=dot(n,d),a=dot(lp,d);vec3 along=d*a,perp=lp-along;lp=along*alongScale+perp*perpScale;
-        if(slime){float lower=1.0-smoothstep(-.70,.18,n.y);float dent=.030*c*(.5+.5*sin(n.x*5.1+n.z*3.7));lp.xz*=1.0-dent;float flatY=-body.posRad.w*alongScale*.82;lp.y=max(lp.y,flatY);lp.y-=body.posRad.w*c*.025*lower;}
+        bool slime=body.meta.z==1;float c=clamp(body.extra.x,-.040,slime?.62:(body.meta.x==3?.50:.42));vec3 d=body.extra.yzw;float dl=length(d);d=dl>.0001?d/dl:vec3(0,1,0);
+        float minAlong=slime?.36:(body.meta.x==3?.50:.58),alongScale=clamp(1.0-c,minAlong,1.040),perpScale=inversesqrt(alongScale),nd=dot(n,d),a=dot(lp,d);vec3 along=d*a,perp=lp-along;lp=along*alongScale+perp*perpScale;
+        if(slime){float lower=1.0-smoothstep(-.74,.22,n.y);float dome=smoothstep(-.20,.95,n.y);float wobble=(sin(n.x*6.0+n.z*4.0+pc.time*.65)+sin(n.z*7.0-n.x*3.0+1.7))*.006*body.posRad.w;lp.xz*=1.0+(lower*.030*c);lp.y+=wobble*dome;float flatY=-body.posRad.w*alongScale*.88;lp.y=max(lp.y,flatY);}
         n=normalize(d*nd/max(alongScale,.001)+(n-d*nd)/max(perpScale,.001));
     }
     P=body.posRad.xyz+lp;N=normalize(n);M=body.meta.x;O=bodyIndex+STATIC_INSTANCES;basisFromNormal(N,T,B);
