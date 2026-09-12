@@ -1,5 +1,5 @@
 #version 460
-// Vulkan Studio v10.1 house showcase. The old TV/painting test props are gone; the room now prioritizes architecture, fire, windows and the benchmark objects.
+// Vulkan Studio v10.1 house showcase. TV/slime/fake-painting test props are gone; geometry is focused on the room, fire, real HDRI windows and benchmark objects.
 
 layout(location=0) out vec3 outWorldPos;
 layout(location=1) out vec3 outWorldNormal;
@@ -74,14 +74,17 @@ void archInfo(int block,out vec3 c,out vec3 s,out int mat){
     else if(block==13){c=vec3(-3.78,.27,3.78);s=vec3(1.55,.82,.28);mat=17;}
     else if(block==14){c=vec3(3.15,-.42,3.58);s=vec3(.92,.60,.68);mat=20;}
     else if(block==15){c=vec3(3.15,-.34,2.895);s=vec3(.67,.39,.025);mat=22;}
-    else if(block==16){c=vec3(0,4.46,0);s=vec3(6.84,.06,6.84);mat=5;}            // ceiling trim, replaces TV
-    else{c=vec3(0,-.93,-5.78);s=vec3(2.15,.05,.48);mat=14;}                     // low timber bench, replaces media console
+    else if(block==16){c=vec3(0,4.46,0);s=vec3(6.84,.06,6.84);mat=5;}
+    else{c=vec3(0,-.93,-5.78);s=vec3(2.15,.05,.48);mat=14;}
 }
 
+void emitCushion16(int qid,int c,vec3 center,vec3 scale,int obj,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
+    int gx=qid%4,gy=qid/4;vec2 tc=triCorner(c);float u=(float(gx)+tc.x)/4.0,v=(float(gy)+tc.y)/4.0;float th=u*2.0*PI,ph=v*PI,s=sin(ph);vec3 l=vec3(cos(th)*s,cos(ph),sin(th)*s);P=center+l*scale;N=normalize(l/max(scale,vec3(.001)));uv=vec2(u,v);M=17;O=obj;basisFromNormal(N,T,B);
+}
 void emitPlantLeaf(int leaf,int c,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
     int pot=leaf&1;int n=leaf>>1;vec3 base=pot==0?vec3(-5.35,-.90,-5.45):vec3(5.35,-.90,-5.45);float a=2.0*PI*hash11(float(n)*1.73+float(pot)*8.1),r=.08+.52*sqrt(hash11(float(n)*2.41+7.0)),h=.20+.74*hash11(float(n)*3.11+2.0);vec3 stem=base+vec3(cos(a)*r,h,sin(a)*r*.60);float yaw=a+(hash11(float(n)*5.7)-.5)*1.1;vec3 side=normalize(vec3(cos(yaw),0,sin(yaw))),up=normalize(vec3(cos(yaw)*.18,.94,sin(yaw)*.18));float w=.05+.055*hash11(float(n)*4.2+1.0),l=.17+.23*hash11(float(n)*6.4+3.0);vec3 tip=stem+up*l,left=stem+up*(l*.48)-side*w,right=stem+up*(l*.48)+side*w;if(c==0)P=stem;else if(c==1)P=left;else if(c==2)P=tip;else if(c==3)P=stem;else if(c==4)P=tip;else P=right;N=normalize(cross(side,up));if(dot(N,vec3(0,1,0))<0)N=-N;uv=vec2(c==1?0.0:(c==5?1.0:.5),c==0||c==3?0.0:(c==2||c==4?1.0:.52));M=10;O=40+leaf;T=side;B=up;
 }
-void emitLeaf(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){int leaf=local/6,c=local-leaf*6;emitPlantLeaf(leaf,c,P,N,uv,M,O,T,B);}
+void emitLeaf(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){int leaf=local/6,c=local-leaf*6;if(leaf<16){emitCushion16(leaf,c,vec3(-4.56,-.10,3.16),vec3(.72,.30,.70),70,P,N,uv,M,O,T,B);return;}if(leaf<32){emitCushion16(leaf-16,c,vec3(-3.00,-.10,3.16),vec3(.72,.30,.70),71,P,N,uv,M,O,T,B);return;}if(leaf<48){emitCushion16(leaf-32,c,vec3(-4.56,.48,3.68),vec3(.72,.66,.24),72,P,N,uv,M,O,T,B);return;}if(leaf<64){emitCushion16(leaf-48,c,vec3(-3.00,.48,3.68),vec3(.72,.66,.24),73,P,N,uv,M,O,T,B);return;}emitPlantLeaf(leaf-64,c,P,N,uv,M,O,T,B);}
 void emitSky(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){int face=local/6,corner=local-face*6;vec2 q=quadCorner(corner);P=boxPos(face,q)*45.0;N=-boxN(face);uv=q*.5+.5;M=13;O=900;basisFromNormal(N,T,B);}
 void emitArchitecture(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
     int boxes=ARCH_BOXES*BOX_VERTS;if(local<boxes){int block=local/BOX_VERTS,l=local-block*BOX_VERTS;vec3 c,s;int mat;archInfo(block,c,s,mat);emitBox(l,c,s,mat,2+block,P,N,uv,M,O,T,B);if(block==9||block==10){float fy=clamp((P.y-(c.y-s.y))/max(2.0*s.y,.001),0.0,1.0);float sway=sin(pc.time*7.3+float(block)*1.3+fy*5.0)*.060*fy;P.z+=sway;P.y+=sin(pc.time*10.0+fy*6.0)*.016*fy;N=normalize(N+vec3(0,.08*sin(pc.time*6.2+fy),sway));basisFromNormal(N,T,B);}return;}
