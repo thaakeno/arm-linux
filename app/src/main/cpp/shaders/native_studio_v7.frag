@@ -29,46 +29,47 @@ layout(push_constant) uniform Push {float yaw;float pitch;float aspect;float cam
 const float PI=3.14159265358979323846;
 struct Material{vec3 base;float metallic;float roughness;float clearcoat;float transmission;float ior;vec3 absorption;vec3 emission;float anisotropy;float ao;};
 float hash21(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
+float fbm2(vec2 p){float f=0.0,a=.55;for(int i=0;i<3;i++){f+=a*hash21(floor(p));p=p*2.03+17.1;a*=.48;}return f;}
 vec2 envUv(vec3 d){d=normalize(d);return vec2(atan(d.z,d.x)/(2.0*PI)+.5,acos(clamp(d.y,-1.0,1.0))/PI);}
 vec3 envSample(vec3 d,float lod){return textureLod(environmentMap,envUv(d),lod).rgb;}
-vec3 skySample(vec3 d){d=normalize(d);float h=clamp(d.y*.5+.5,0.0,1.0);vec3 zen=vec3(.19,.38,.68),hor=vec3(.72,.72,.66);vec3 c=mix(hor,zen,smoothstep(.10,.88,h));vec3 sunD=normalize(vec3(-.53,.67,.52));float sun=pow(max(dot(d,sunD),0.0),900.0);float glow=pow(max(dot(d,sunD),0.0),18.0);c+=vec3(7.0,4.9,2.8)*sun+vec3(.34,.20,.09)*glow;float ground=smoothstep(.50,.43,h);c=mix(c,vec3(.18,.20,.17),ground);return c;}
+vec3 skySample(vec3 d){d=normalize(d);float h=clamp(d.y*.5+.5,0.0,1.0);vec3 zen=vec3(.16,.32,.58),hor=vec3(.78,.72,.61);vec3 c=mix(hor,zen,smoothstep(.08,.90,h));vec3 sunD=normalize(vec3(-.53,.67,.52));float sun=pow(max(dot(d,sunD),0.0),1000.0);float glow=pow(max(dot(d,sunD),0.0),20.0);c+=vec3(8.0,5.5,3.0)*sun+vec3(.42,.24,.10)*glow;float ground=smoothstep(.50,.43,h);return mix(c,vec3(.15,.17,.14),ground);}
 vec3 fresnelSchlick(float c,vec3 F0){return F0+(1.0-F0)*pow(1.0-c,5.0);}
 float Dggx(float NoH,float r){float a=max(.028,r*r),a2=a*a,d=NoH*NoH*(a2-1.0)+1.0;return a2/max(PI*d*d,1e-5);}
 float Gsmith(float NoV,float NoL,float r){float k=(r+1.0)*(r+1.0)/8.0;return NoV/(NoV*(1.0-k)+k)*NoL/(NoL*(1.0-k)+k);}
 vec3 tangentNormal(sampler2D tex,vec2 uv,vec3 N,vec3 T,vec3 B,float strength){vec3 n=texture(tex,uv).xyz*2.0-1.0;n.xy*=strength;return normalize(mat3(normalize(T),normalize(B),normalize(N))*normalize(n));}
-float waterCoverage(vec2 uv){float h=texture(floorHeight,fract(uv)).r,wet=clamp(pc.wetness,0.0,1.0),level=mix(.32,.61,wet);float basin=1.0-smoothstep(level-.055,level+.028,h);vec2 f=fract(uv);float edge=min(min(f.x,f.y),min(1.0-f.x,1.0-f.y));float joints=1.0-smoothstep(.024,.068,edge);return clamp(max(basin,joints*wet*.82),0.0,1.0);}
+float waterCoverage(vec2 uv){float h=texture(floorHeight,fract(uv)).r,wet=clamp(pc.wetness,0.0,1.0),level=mix(.31,.70,wet);float basin=1.0-smoothstep(level-.075,level+.022,h);vec2 f=fract(uv);float edge=min(min(f.x,f.y),min(1.0-f.x,1.0-f.y));float joints=1.0-smoothstep(.018,.082,edge);float breakup=fbm2(uv*9.0);return clamp(max(basin*(.82+.18*breakup),joints*wet),0.0,1.0);}
 
 Material materialAt(int m,vec3 P,vec2 uv,out float water){
     Material a;a.base=vec3(.5);a.metallic=0;a.roughness=.5;a.clearcoat=0;a.transmission=0;a.ior=1.5;a.absorption=vec3(0);a.emission=vec3(0);a.anisotropy=0;a.ao=1;water=0;
     if(m==0){vec2 t=fract(uv*1.28);vec4 arm=texture(concreteArm,t);a.base=texture(concreteAlbedo,t).rgb;a.roughness=clamp(arm.g,.28,.92);a.ao=arm.r;}
-    else if(m==1){vec2 t=fract(uv);vec4 arm=texture(floorArm,t);water=waterCoverage(t);vec3 dry=texture(floorAlbedo,t).rgb;a.base=dry*mix(1.0,.56,water*.88);a.roughness=mix(clamp(arm.g,.38,.94),.075,water);a.clearcoat=water*.82;a.ao=arm.r;}
-    else if(m==2){float scratch=.5+.5*sin(uv.y*420.0+sin(uv.x*37.0)*3.0);a.base=vec3(.19,.205,.22);a.metallic=1;a.roughness=mix(.28,.40,scratch*.35);a.anisotropy=.28;}
-    else if(m==3){float pores=hash21(floor(uv*180.0));a.base=mix(vec3(.48,.012,.010),vec3(.72,.026,.018),pores*.18);a.roughness=.54;a.clearcoat=.08;a.ao=.97;}
-    else if(m==4){a.base=vec3(.94,.72,.43);a.roughness=.34;a.clearcoat=.18;a.emission=vec3(6.2,3.15,1.25);}
-    else if(m==5){vec2 t=fract(uv*1.15);vec4 arm=texture(concreteArm,t);a.base=texture(concreteAlbedo,t).rgb*vec3(.72,.67,.57);a.roughness=clamp(arm.g+.10,.56,.96);a.ao=arm.r;}
+    else if(m==1){vec2 t=fract(uv);vec4 arm=texture(floorArm,t);water=waterCoverage(t);vec3 dry=texture(floorAlbedo,t).rgb;float dirt=.90+.12*fbm2(t*23.0);a.base=dry*dirt*mix(1.0,.42,water*.96);a.roughness=mix(clamp(arm.g,.36,.94),.035,water);a.clearcoat=water;a.ao=arm.r;}
+    else if(m==2){float grain=fbm2(uv*260.0),scratch=smoothstep(.965,.995,hash21(vec2(floor(uv.y*430.0),floor(uv.x*31.0))));float worn=smoothstep(.48,.95,abs(sin((uv.x+uv.y)*16.0)));a.base=mix(vec3(.105,.115,.125),vec3(.24,.245,.25),grain*.34+worn*.08);a.base=mix(a.base,vec3(.42,.39,.34),scratch*.38);a.metallic=1;a.roughness=clamp(.24+grain*.22+scratch*.18,.20,.52);a.anisotropy=.32;}
+    else if(m==3){float pores=fbm2(uv*210.0),scuff=smoothstep(.88,.99,fbm2(uv*34.0+9.0));a.base=mix(vec3(.42,.010,.008),vec3(.74,.025,.016),pores*.30);a.base*=1.0-scuff*.18;a.roughness=clamp(.64+pores*.18-scuff*.12,.52,.82);a.clearcoat=.015;a.ao=.96;}
+    else if(m==4){float pulse=.92+.08*sin(pc.time*4.0);a.base=vec3(1.0,.54,.20);a.roughness=.18;a.clearcoat=.46;a.emission=vec3(7.4,3.35,1.10)*pulse;}
+    else if(m==5){vec2 t=fract(uv*1.15);vec4 arm=texture(concreteArm,t);float stain=.80+.20*fbm2(P.xz*2.7+uv*8.0);a.base=texture(concreteAlbedo,t).rgb*vec3(.72,.67,.57)*stain;a.roughness=clamp(arm.g+.10,.56,.96);a.ao=arm.r;}
     else if(m==6){vec2 t=fract(uv*1.20);vec4 arm=texture(darkArm,t);a.base=texture(darkAlbedo,t).rgb*vec3(.22,.235,.25);a.roughness=clamp(arm.g*.82,.24,.80);a.clearcoat=.06;a.ao=arm.r;}
-    else if(m==7){a.base=vec3(.12,.20,.26);a.roughness=.62;a.clearcoat=.03;a.ao=.96;}
+    else if(m==7){float grain=fbm2(uv*170.0),scuff=smoothstep(.90,.99,fbm2(uv*29.0+4.0));a.base=mix(vec3(.060,.085,.105),vec3(.14,.19,.22),grain*.34);a.base*=1.0-scuff*.20;a.roughness=clamp(.68+grain*.18-scuff*.16,.56,.88);a.clearcoat=.01;a.ao=.95;}
     else if(m==8){a.base=vec3(.40,.18,.055);a.metallic=.82;a.roughness=.35;}
     else if(m==9){a.base=vec3(.32,.37,.40);a.roughness=.70;}
     else if(m==10){float n=hash21(floor(P.xz*15.0+P.yy*7.0));a.base=mix(vec3(.045,.13,.052),vec3(.12,.29,.10),n);a.roughness=.72;a.ao=.84;}
-    else if(m==12){a.base=vec3(.075,.082,.086);a.roughness=.72;a.metallic=.04;}
+    else if(m==12){float stain=.75+.25*fbm2(P.xz*5.0+P.yy);a.base=vec3(.075,.082,.086)*stain;a.roughness=.78;a.metallic=.02;}
     else if(m==14){float grain=.5+.5*sin(uv.y*75.0+sin(uv.x*14.0)*2.0);a.base=mix(vec3(.16,.060,.020),vec3(.31,.13,.045),grain*.32);a.roughness=.58;}
     return a;
 }
-vec3 materialNormal(int m,vec3 P,vec2 uv,vec3 N,vec3 T,vec3 B,float water){float q=clamp(pc.quality/100.0,0.0,1.0),detail=mix(.35,1.0,q);if(m==0)return tangentNormal(concreteNormal,fract(uv*1.28),N,T,B,.88*detail);if(m==1)return tangentNormal(floorNormal,fract(uv),N,T,B,mix(.92,.30,water)*detail);if(m==6)return tangentNormal(darkNormal,fract(uv*1.20),N,T,B,.78*detail);if(m==2){float s=sin(uv.y*520.0)*.012;return normalize(N+T*s);}return normalize(N);}
+vec3 materialNormal(int m,vec3 P,vec2 uv,vec3 N,vec3 T,vec3 B,float water){float q=clamp(pc.quality/100.0,0.0,1.0),detail=mix(.35,1.0,q);if(m==0)return tangentNormal(concreteNormal,fract(uv*1.28),N,T,B,.88*detail);if(m==1)return tangentNormal(floorNormal,fract(uv),N,T,B,mix(.96,.24,water)*detail);if(m==6)return tangentNormal(darkNormal,fract(uv*1.20),N,T,B,.78*detail);if(m==2||m==3||m==7){float n1=fbm2(uv*190.0)-.5,n2=fbm2(uv.yx*233.0+11.0)-.5;float amp=m==2?.030:(m==3?.022:.026);return normalize(N+(T*n1+B*n2)*amp*detail);}return normalize(N);}
 vec3 brdf(Material m,vec3 N,vec3 T,vec3 B,vec3 V,vec3 L,vec3 radiance){float NoL=max(dot(N,L),0.0),NoV=max(dot(N,V),.001);if(NoL<=0)return vec3(0);vec3 H=normalize(V+L);float NoH=max(dot(N,H),0.0),VoH=max(dot(V,H),0.0);vec3 F0=mix(vec3(.04),m.base,m.metallic),F=fresnelSchlick(VoH,F0);float D=Dggx(NoH,m.roughness);vec3 spec=D*Gsmith(NoV,NoL,m.roughness)*F/max(4.0*NoV*NoL,.001);vec3 kd=(1.0-F)*(1.0-m.metallic);return (kd*m.base/PI+spec)*NoL*radiance;}
-vec3 envSpec(vec3 R,float rough){return skySample(R)*mix(1.0,.62,rough);}
-vec3 ibl(Material m,vec3 N,vec3 V){vec3 R=reflect(-V,N),F0=mix(vec3(.04),m.base,m.metallic),F=fresnelSchlick(max(dot(N,V),0.0),F0);vec3 ambientTint=mix(vec3(.78,.86,.95),envSample(N,8.0),.10);vec3 diff=ambientTint*m.base*(1.0-m.metallic)*(.35*m.ao);vec3 spec=envSpec(R,m.roughness)*F;if(m.clearcoat>0)spec+=envSpec(R,max(.05,m.roughness*.65))*fresnelSchlick(max(dot(N,V),0.0),vec3(.04))*m.clearcoat*.42;return diff+spec;}
+vec3 envSpec(vec3 R,float rough){vec3 primary=skySample(R);vec3 hdr=envSample(R,mix(1.0,7.5,rough));return mix(primary,hdr,.16)*mix(1.0,.60,rough);}
+vec3 ibl(Material m,vec3 N,vec3 V){vec3 R=reflect(-V,N),F0=mix(vec3(.04),m.base,m.metallic),F=fresnelSchlick(max(dot(N,V),0.0),F0);vec3 ambientTint=mix(vec3(.78,.86,.95),envSample(N,8.0),.12);vec3 diff=ambientTint*m.base*(1.0-m.metallic)*(.34*m.ao);vec3 spec=envSpec(R,m.roughness)*F;if(m.clearcoat>0)spec+=envSpec(R,max(.035,m.roughness*.58))*fresnelSchlick(max(dot(N,V),0.0),vec3(.04))*m.clearcoat*.50;return diff+spec;}
 vec3 aces(vec3 x){x*=exp2(pc.exposure);const float a=2.51,b=.03,c=2.43,d=.59,e=.14;return clamp((x*(a*x+b))/(x*(c*x+d)+e),0.0,1.0);}
 
 void main(){
     if(inMaterial==13){vec3 d=normalize(inWorldPos-inCameraPos);outColor=vec4(pow(aces(skySample(d)),vec3(1.0/2.2)),1);return;}
-    float water;Material m=materialAt(inMaterial,inWorldPos,inUv,water);vec3 V=normalize(inCameraPos-inWorldPos),T=normalize(inTangent),B=normalize(inBitangent),N=materialNormal(inMaterial,inWorldPos,inUv,normalize(inWorldNormal),T,B,water);if(dot(N,V)<=-.12)discard;
-    if(length(m.emission)>0){vec3 e=m.emission+m.base*.15;outColor=vec4(pow(aces(e),vec3(1.0/2.2)),1);return;}
+    float water;Material m=materialAt(inMaterial,inWorldPos,inUv,water);vec3 V=normalize(inCameraPos-inWorldPos),T=normalize(inTangent),B=normalize(inBitangent),N=materialNormal(inMaterial,inWorldPos,inUv,normalize(inWorldNormal),T,B,water);
+    if(length(m.emission)>0){float rim=pow(1.0-max(dot(N,V),0.0),2.0);vec3 e=m.emission+m.base*(.25+rim*1.1);outColor=vec4(pow(aces(e),vec3(1.0/2.2)),1);return;}
     vec3 sunL=normalize(vec3(-.53,.67,.52));vec3 color=ibl(m,N,V)+brdf(m,N,T,B,V,sunL,vec3(2.25,1.78,1.30));
-    vec3 lp=bodies[2].posRad.xyz,d=lp-inWorldPos;color+=brdf(m,N,T,B,V,normalize(d),vec3(1.0,.62,.31)*(24.0/max(dot(d,d),.38)));
+    vec3 lp=bodies[2].posRad.xyz,d=lp-inWorldPos;color+=brdf(m,N,T,B,V,normalize(d),vec3(1.0,.62,.31)*(25.0/max(dot(d,d),.34)));
     if(inMaterial==10){float back=max(dot(-N,sunL),0.0);color+=m.base*vec3(.8,.48,.18)*back*.35;}
-    if(inMaterial==3){float rim=pow(1.0-max(dot(N,V),0.0),2.2);color+=m.base*vec3(1.15,.18,.12)*rim*.22;}
-    if(inMaterial==1&&water>.02){vec3 R=reflect(-V,N);vec3 wetRefl=envSpec(R,mix(.06,.18,1.0-water));float f=.04+.24*pow(1.0-max(dot(N,V),0.0),5.0);color=mix(color,wetRefl,clamp(water*(.16+f),0.0,.52));}
+    if(inMaterial==3){float rim=pow(1.0-max(dot(N,V),0.0),2.0);color+=m.base*vec3(.85,.10,.08)*rim*.12;}
+    if(inMaterial==1&&water>.01){vec3 R=reflect(-V,N);vec3 wetRefl=envSpec(R,mix(.025,.13,1.0-water));float f=.055+.34*pow(1.0-max(dot(N,V),0.0),5.0);color=mix(color,wetRefl,clamp(water*(.28+f),0.0,.72));}
     outColor=vec4(pow(aces(max(color,vec3(0))),vec3(1.0/2.2)),1);
 }
