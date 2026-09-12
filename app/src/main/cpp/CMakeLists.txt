@@ -39,7 +39,7 @@ function(vessel_shader SOURCE STAGE SYMBOL)
     set(HEADER "${GENERATED_DIR}/${SYMBOL}_spv.h")
     add_custom_command(
         OUTPUT "${SPV}" "${HEADER}"
-        COMMAND "${GLSLC}" --target-env=vulkan1.2 -fshader-stage=${STAGE} "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE}" -o "${SPV}"
+        COMMAND "${GLSLC}" --target-env=vulkan1.2 -Dpatch=wetPatch -fshader-stage=${STAGE} "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE}" -o "${SPV}"
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_spv.py" "${SPV}" "${HEADER}" ${SYMBOL}_spv
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_spv.py"
         VERBATIM)
