@@ -9,7 +9,7 @@
         darkHeight_=createTexture8("vulkan_v7/dark_rock_disp_2k.png",VK_FORMAT_R8G8B8A8_UNORM);
         darkHeightCpu_=loadHeight("vulkan_v7/dark_rock_disp_2k.png");
         environment_=createTextureHdr("vulkan_v7/evening_museum_courtyard_1k.hdr");
-        logV7("assets · wet stone + plaster/rock + wood/fabric/glass material atlas ready");
+        logV7("assets · wet stone + plaster/rock + fabric/glass + Alpine HDRI ready");
     }
 
     int activeBodiesV7()const{
@@ -24,11 +24,11 @@
             Body&b=bodies_[i];b.p=p;b.v={};b.r=r;b.material=mat;b.restitution=rest;b.friction=fric;b.gummy=gummy;b.deform=b.deformV=0;
             b.mass=std::max(.18f,4.18879f*r*r*r*density);deformDir_[i]={0,1,0};sleepTimer_[i]=0;impactFx_[i]=0;
         };
-        setup(0,{-2.35f,kFloorY+.68f,-.10f},.68f,2,.028f,.68f,19.5f,false); // dense steel: weight from mass + impact response, not cartoon bounce
-        setup(1,{ .45f,kFloorY+.72f,.25f},.72f,3,.94f,.54f,1.08f,true);        // elastic gummy: strong squash and rebound
+        setup(0,{-2.35f,kFloorY+.68f,-.10f},.68f,2,.028f,.68f,19.5f,false); // dense steel
+        setup(1,{ .45f,kFloorY+.72f,.25f},.72f,3,.94f,.54f,1.08f,true);        // elastic gummy
         setup(2,{-.40f,2.35f,-2.10f},.28f,4,.02f,.45f,.70f,false);             // physical emissive orb
-        setup(3,{ 2.05f,kFloorY+.64f,-.05f},.64f,7,.86f,.72f,1.18f,true);      // high-rebound deformable rubber
-        setup(4,{ 3.00f,kFloorY+.60f,1.45f},.60f,8,.0f,1.62f,1.12f,true);      // viscous adhesive slime blob
+        setup(3,{ 2.05f,kFloorY+.64f,-.05f},.64f,7,.86f,.72f,1.18f,true);      // deformable rubber
+        setup(4,{ 3.00f,kFloorY+.58f,1.45f},.58f,7,.80f,.70f,1.20f,true);      // reserve stress rubber; slime removed
         for(int i=5;i<kBodyCount;++i){
             int n=i-5,gx=n%6,gz=n/6;float r=.22f+.020f*float((n*5)%4);
             int mat=(n%4==0)?2:7;float density=mat==2?8.5f:1.25f;
@@ -40,7 +40,8 @@
     float floorSurfaceYV7(float x,float z)const{
         float gx=std::clamp(x/14.10f+.5f,0.0f,1.0f),gz=std::clamp(z/14.10f+.5f,0.0f,1.0f);
         float u=gx*3.20f,v=gz*3.20f;float h=sampleHeight(floorHeightCpu_,u,v)-.5f;
-        return kFloorY+h*.058f;
+        float q=std::clamp(float(quality_.load())/100.0f,0.0f,1.0f);
+        return kFloorY+h*.058f*q;
     }
     Vec3 clampInsideV7(Vec3 p,float r)const{
         p.x=std::clamp(p.x,-kV7RoomHalf+r,kV7RoomHalf-r);
@@ -51,9 +52,9 @@
 
     float supportRadiusV7(const Body&b,int i,Vec3 n)const{
         if(!b.gummy)return b.r;
-        float maxC=b.material==8?.62f:(b.material==3?.50f:.42f);
+        float maxC=b.material==3?.50f:.42f;
         float c=std::clamp(b.deform,-.040f,maxC);Vec3 d=deformDir_[i];float dl=len(d);if(dl<1e-5f)d={0,1,0};else d=d/dl;
-        float minAlong=b.material==8?.36f:(b.material==3?.50f:.58f);
+        float minAlong=b.material==3?.50f:.58f;
         float along=std::clamp(1.0f-c,minAlong,1.040f),perp=1.0f/std::sqrt(along);float nd=std::clamp(dot(n,d),-1.0f,1.0f);float nd2=nd*nd;
         return b.r*std::sqrt(along*along*nd2+perp*perp*(1.0f-nd2));
     }
@@ -70,7 +71,6 @@
     std::vector<Vec3>floorTrianglesV7(){std::vector<Vec3>v;v.reserve(kV7FloorVerts);auto point=[&](float gx,float gy){float u=gx*3.20f,vv=gy*3.20f;float h=sampleHeight(floorHeightCpu_,u,vv)-.5f;return Vec3{(gx*2.0f-1.0f)*7.05f,kFloorY+h*.058f,(gy*2.0f-1.0f)*7.05f};};for(uint32_t y=0;y<kV7FloorGrid;++y)for(uint32_t x=0;x<kV7FloorGrid;++x){float x0=float(x)/kV7FloorGrid,x1=float(x+1)/kV7FloorGrid,y0=float(y)/kV7FloorGrid,y1=float(y+1)/kV7FloorGrid;Vec3 a=point(x0,y0),b=point(x1,y0),c=point(x1,y1),d=point(x0,y1);v.insert(v.end(),{a,b,c,a,c,d});}return v;}
 
     float restitutionThresholdV7(const Body&b)const{
-        if(b.material==8)return 1.20f;
         if(b.material==3)return .15f;
         if(b.material==7)return .16f;
         if(b.material==2)return 1.35f;
@@ -81,13 +81,13 @@
         if(vn<0){float e=(std::abs(vn)<restitutionThresholdV7(b))?0.0f:b.restitution;jn=-(1.0f+e)*vn/invM;Vec3 J=n*jn;b.v+=J*invM;omega_[i]+=cross(r,J)*invI;}
         rv=b.v+cross(omega_[i],r);Vec3 tv=rv-n*dot(rv,n);float tl=len(tv);if(tl>1e-4f){Vec3 t=tv/tl;Vec3 rx=cross(r,t);float denom=invM+dot(cross(rx*invI,r),t);float jt=-dot(rv,t)/std::max(denom,.001f);float maxF=std::max(.010f,std::abs(jn))*b.friction;jt=std::clamp(jt,-maxF,maxF);Vec3 F=t*jt;b.v+=F*invM;omega_[i]+=cross(r,F)*invI;}
         float impactSpeed=std::max(0.0f,-vn);if(b.material==2&&impactSpeed>1.10f)impactFx_[i]=std::max(impactFx_[i],std::clamp((impactSpeed-1.0f)/6.0f,0.0f,1.0f));
-        if(b.gummy){float threshold=b.material==8?.52f:(b.material==3?.15f:.16f);if(impactSpeed>threshold){deformDir_[i]=n;float gain=b.material==8?.105f:(b.material==3?.245f:.215f);float cap=b.material==8?1.55f:(b.material==3?2.85f:2.65f);b.deformV+=std::min(cap,impactSpeed*gain);}}
+        if(b.gummy){float threshold=b.material==3?.15f:.16f;if(impactSpeed>threshold){deformDir_[i]=n;float gain=b.material==3?.245f:.215f;float cap=b.material==3?2.85f:2.65f;b.deformV+=std::min(cap,impactSpeed*gain);}}
         sleepTimer_[i]=0;
     }
     void collideRoomV7(Body&b,int i){
         Vec3 nx{1,0,0},px{-1,0,0},nz{0,0,1},pz{0,0,-1},ny{0,1,0},py{0,-1,0};float rx=supportRadiusV7(b,i,nx),rpx=supportRadiusV7(b,i,px),rz=supportRadiusV7(b,i,nz),rpz=supportRadiusV7(b,i,pz),ry=supportRadiusV7(b,i,ny),rpy=supportRadiusV7(b,i,py);
         applyPlaneContactV7(b,i,nx,(-kV7RoomHalf+rx)-b.p.x,rx);applyPlaneContactV7(b,i,px,b.p.x-(kV7RoomHalf-rpx),rpx);applyPlaneContactV7(b,i,nz,(-kV7RoomHalf+rz)-b.p.z,rz);applyPlaneContactV7(b,i,pz,b.p.z-(kV7RoomHalf-rpz),rpz);float floorY=floorSurfaceYV7(b.p.x,b.p.z);float floorPen=floorY-(b.p.y-ry);applyPlaneContactV7(b,i,ny,floorPen,ry);applyPlaneContactV7(b,i,py,(b.p.y+rpy)-4.55f,rpy);
-        float settle=b.material==8?.16f:(b.material==3?.030f:(b.material==7?.035f:.24f));if(floorPen>-.006f&&std::abs(b.v.y)<settle)b.v.y=0;
+        float settle=b.material==3?.030f:(b.material==7?.035f:.24f);if(floorPen>-.006f&&std::abs(b.v.y)<settle)b.v.y=0;
     }
     void collideHeroV7(Body&b,int i){
         Vec3 lo{-1.22f,-1.06f,-1.22f},hi{1.22f,1.06f,1.22f};Vec3 cp{std::clamp(b.p.x,lo.x,hi.x),std::clamp(b.p.y,lo.y,hi.y),std::clamp(b.p.z,lo.z,hi.z)};Vec3 d=b.p-cp;float dl=len(d);Vec3 n=dl>1e-5f?d/dl:norm(Vec3{b.p.x,.15f,b.p.z});float rr=supportRadiusV7(b,i,n);if(dl>=rr)return;applyPlaneContactV7(b,i,n,rr-dl,rr);
@@ -99,7 +99,7 @@
         Body&a=bodies_[ia],&b=bodies_[ib];Vec3 d=b.p-a.p;float dist=len(d);if(dist<1e-6f)return;Vec3 n=d/dist;float raLen=supportRadiusV7(a,ia,n),rbLen=supportRadiusV7(b,ib,n*(-1.0f)),rr=raLen+rbLen;if(dist>=rr)return;float ima=1/std::max(.08f,a.mass),imb=1/std::max(.08f,b.mass),sum=ima+imb,pen=rr-dist;Vec3 corr=n*(std::max(0.f,pen-.0007f)*.86f/sum);a.p-=corr*ima;b.p+=corr*imb;
         Vec3 ra=n*raLen,rb=n*(-rbLen);Vec3 va=a.v+cross(omega_[ia],ra),vb=b.v+cross(omega_[ib],rb),rel=vb-va;float vn=dot(rel,n);if(vn>=0)return;float threshold=std::max(restitutionThresholdV7(a),restitutionThresholdV7(b));float e=std::abs(vn)<threshold?0.0f:std::max(a.restitution,b.restitution),jn=-(1+e)*vn/sum;Vec3 J=n*jn;a.v-=J*ima;b.v+=J*imb;
         float iia=1/std::max(.01f,.4f*a.mass*a.r*a.r),iib=1/std::max(.01f,.4f*b.mass*b.r*b.r);rel=(b.v+cross(omega_[ib],rb))-(a.v+cross(omega_[ia],ra));Vec3 tv=rel-n*dot(rel,n);float tl=len(tv);if(tl>1e-4f){Vec3 t=tv/tl;Vec3 rax=cross(ra,t),rbx=cross(rb,t);float denom=sum+dot(cross(rax*iia,ra),t)+dot(cross(rbx*iib,rb),t);float jt=-dot(rel,t)/std::max(denom,.001f);float mu=std::sqrt(std::max(0.f,a.friction*b.friction));jt=std::clamp(jt,-jn*mu,jn*mu);Vec3 F=t*jt;a.v-=F*ima;b.v+=F*imb;omega_[ia]-=cross(ra,F)*iia;omega_[ib]+=cross(rb,F)*iib;}
-        float impact=std::abs(vn);if(a.gummy){float th=a.material==8?.52f:(a.material==3?.15f:.16f);if(impact>th){deformDir_[ia]=n;a.deformV+=impact*(a.material==8?.100f:(a.material==3?.240f:.210f));}}if(b.gummy){float th=b.material==8?.52f:(b.material==3?.15f:.16f);if(impact>th){deformDir_[ib]=n*(-1.0f);b.deformV+=impact*(b.material==8?.100f:(b.material==3?.240f:.210f));}}
+        float impact=std::abs(vn);if(a.gummy){float th=a.material==3?.15f:.16f;if(impact>th){deformDir_[ia]=n;a.deformV+=impact*(a.material==3?.240f:.210f);}}if(b.gummy){float th=b.material==3?.15f:.16f;if(impact>th){deformDir_[ib]=n*(-1.0f);b.deformV+=impact*(b.material==3?.240f:.210f);}}
         sleepTimer_[ia]=sleepTimer_[ib]=0;
     }
     void physicsStepV7(float dt){
@@ -108,39 +108,32 @@
             for(int i=0;i<n;++i){
                 Body&b=bodies_[i];impactFx_[i]=std::max(0.0f,impactFx_[i]-h*1.9f);
                 if(i==grabbed_){
-                    Vec3 desired=(grabTarget_-b.p)/h;float ds=len(desired);float lim=b.material==7?17.5f:(b.material==3?16.5f:(b.material==8?9.0f:14.0f));if(ds>lim)desired=desired*(lim/ds);b.v=desired*.54f+grabTargetVelocity_*.46f;sleepTimer_[i]=0;
+                    Vec3 desired=(grabTarget_-b.p)/h;float ds=len(desired);float lim=b.material==7?17.5f:(b.material==3?16.5f:14.0f);if(ds>lim)desired=desired*(lim/ds);b.v=desired*.54f+grabTargetVelocity_*.46f;sleepTimer_[i]=0;
                 }else b.v.y-=9.81f*h;
-                float drag=b.material==8?1.55f:(b.material==3?.022f:(b.material==7?.018f:.008f));b.v=b.v*std::exp(-drag*h);omega_[i]=omega_[i]*std::exp(-(b.material==8?3.25f:(b.material==3?.28f:(b.gummy?.24f:.10f)))*h);b.p+=b.v*h;
+                float drag=b.material==3?.022f:(b.material==7?.018f:.008f);b.v=b.v*std::exp(-drag*h);omega_[i]=omega_[i]*std::exp(-(b.material==3?.28f:(b.gummy?.24f:.10f))*h);b.p+=b.v*h;
                 collideRoomV7(b,i);collideHeroV7(b,i);collideArchitectureV7(b,i);
                 float ry=supportRadiusV7(b,i,{0,1,0});float floorY=floorSurfaceYV7(b.p.x,b.p.z);bool grounded=b.p.y-ry<=floorY+.009f;
                 if(grounded&&i!=grabbed_){
-                    float speed=len(b.v),spin=len(omega_[i]);
-                    float rolling=b.material==8?15.0f:(b.material==3?.12f:(b.material==7?.14f:.18f));float roll=std::exp(-rolling*h);b.v.x*=roll;b.v.z*=roll;
-                    if(b.material==8&&std::abs(b.v.y)<.20f)b.v.y=0;
-                    float sleepSpeed=b.material==8?.060f:.045f,sleepSpin=b.material==8?.12f:.10f;
-                    if(speed<sleepSpeed&&spin<sleepSpin){sleepTimer_[i]+=h;if(sleepTimer_[i]>(b.material==8?.44f:.38f)){b.v={};omega_[i]={};}}
-                    else sleepTimer_[i]=0;
+                    float speed=len(b.v),spin=len(omega_[i]);float rolling=b.material==3?.12f:(b.material==7?.14f:.18f);float roll=std::exp(-rolling*h);b.v.x*=roll;b.v.z*=roll;
+                    if(speed<.045f&&spin<.10f){sleepTimer_[i]+=h;if(sleepTimer_[i]>.38f){b.v={};omega_[i]={};}}else sleepTimer_[i]=0;
                 }else if(i!=grabbed_)sleepTimer_[i]=0;
                 spin_[i]+=len(omega_[i])*h;
             }
             for(int it=0;it<10;++it)for(int i=0;i<n;++i)for(int j=i+1;j<n;++j)solvePairV7(i,j);
             for(int i=0;i<n;++i)if(bodies_[i].gummy){
                 Body&b=bodies_[i];float ry=supportRadiusV7(b,i,{0,1,0});float floorY=floorSurfaceYV7(b.p.x,b.p.z);bool grounded=b.p.y-ry<=floorY+.012f;
-                float target=(b.material==8&&grounded&&i!=grabbed_)?0.34f:0.0f;
-                float spring=b.material==8?4.0f:(b.material==3?42.0f:68.0f),damping=b.material==8?9.8f:(b.material==3?5.8f:6.8f),maxDef=b.material==8?.62f:(b.material==3?.50f:.42f);
+                float target=0.0f;float spring=b.material==3?42.0f:68.0f,damping=b.material==3?5.8f:6.8f,maxDef=b.material==3?.50f:.42f;
                 b.deformV+=(spring*(target-b.deform)-damping*b.deformV)*h;b.deform+=b.deformV*h;b.deform=std::clamp(b.deform,-.040f,maxDef);
-                if(b.material==8&&grounded&&i!=grabbed_){b.deformV*=std::exp(-2.8f*h);deformDir_[i]=norm(deformDir_[i]*.972f+Vec3{0,1,0}*.028f);}
                 float newRy=supportRadiusV7(b,i,{0,1,0});if(grounded&&i!=grabbed_){float restY=floorY+newRy;if(b.p.y<restY)b.p.y=restY;if(std::abs(b.v.y)<.050f)b.v.y=0;}
-                if(b.material!=8&&sleepTimer_[i]>.38f){b.deform=target;b.deformV=0;deformDir_[i]={0,1,0};}
-                else if(b.material==8&&sleepTimer_[i]>.44f&&std::abs(b.deform-target)<.008f){b.deform=target;b.deformV=0;deformDir_[i]={0,1,0};}
-                else if(std::abs(b.deform-target)<.0008f&&std::abs(b.deformV)<.005f)deformDir_[i]={0,1,0};
+                if(sleepTimer_[i]>.38f){b.deform=0;b.deformV=0;deformDir_[i]={0,1,0};}
+                else if(std::abs(b.deform)<.0008f&&std::abs(b.deformV)<.005f)deformDir_[i]={0,1,0};
             }
         }
     }
-    void updateBodyGpuV7(){if(!bodyMapped_)return;std::lock_guard<std::mutex>lock(bodyMutex_);auto*out=reinterpret_cast<BodyGpu*>(bodyMapped_);for(int i=0;i<kBodyCount;++i){const Body&b=bodies_[i];Vec3 d=deformDir_[i];float dl=len(d);if(dl<1e-4f)d={0,1,0};else d=d/dl;out[i]={{b.p.x,b.p.y,b.p.z,b.r},{b.v.x,b.v.y,b.v.z,b.mass},{b.deform,d.x,d.y,d.z},{b.material,b.gummy?1:0,b.material==8?1:0,int(std::clamp(impactFx_[i],0.0f,1.0f)*1000.0f)}};}}
+    void updateBodyGpuV7(){if(!bodyMapped_)return;std::lock_guard<std::mutex>lock(bodyMutex_);auto*out=reinterpret_cast<BodyGpu*>(bodyMapped_);for(int i=0;i<kBodyCount;++i){const Body&b=bodies_[i];Vec3 d=deformDir_[i];float dl=len(d);if(dl<1e-4f)d={0,1,0};else d=d/dl;out[i]={{b.p.x,b.p.y,b.p.z,b.r},{b.v.x,b.v.y,b.v.z,b.mass},{b.deform,d.x,d.y,d.z},{b.material,b.gummy?1:0,0,int(std::clamp(impactFx_[i],0.0f,1.0f)*1000.0f)}};}}
 
     void screenRayV7(float nx,float ny,Vec3&ro,Vec3&rd)const{float yaw=yaw_.load(),pitch=pitch_.load(),cp=std::cos(pitch);ro=cameraDistance_.load()*Vec3{cp*std::sin(yaw),std::sin(pitch),cp*std::cos(yaw)}+Vec3{0,.38f,1.70f};Vec3 target{0,-.15f,-.15f};Vec3 f=norm(target-ro),r=norm(cross(f,{0,1,0})),u=norm(cross(r,f));float x=nx*2-1,y=1-ny*2,aspect=float(std::max(1,visibleW_.load()))/float(std::max(1,visibleH_.load()));float tanHalf=std::tan(34.0f*kPi/360.0f);rd=norm(f+r*(x*aspect*tanHalf)+u*(y*tanHalf));}
-    void grabStartImpl(float nx,float ny,bool forceLight){std::lock_guard<std::mutex>lock(bodyMutex_);Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);int bestIndex=forceLight?2:-1;float bestHit=1e9f;if(forceLight){Vec3 to=bodies_[2].p-ro;bestHit=std::max(.65f,dot(to,rd));}else{for(int i=0;i<activeBodiesV7();++i){if(i==2)continue;const Body&b=bodies_[i];float pickR=b.r*1.18f+.035f;Vec3 oc=ro-b.p;float qb=dot(oc,rd),cc=dot(oc,oc)-pickR*pickR,disc=qb*qb-cc;if(disc<0)continue;float t=-qb-std::sqrt(disc);if(t>.02f&&t<bestHit){bestHit=t;bestIndex=i;}}}grabbed_=bestIndex;if(grabbed_>=0){Body&b=bodies_[grabbed_];float centerDepth=dot(b.p-ro,rd);grabDepth_=std::max(centerDepth,b.r*2.35f+.55f);grabTarget_=ro+rd*grabDepth_;grabPrevTarget_=grabTarget_;grabTargetVelocity_={};grabLastUpdate_=Clock::now();sleepTimer_[grabbed_]=0;const char*name=grabbed_==2?"MOVABLE LIGHT":grabbed_==1?"GUMMY":grabbed_==0?"HEAVY METAL":grabbed_==4?"SLIME":"RUBBER";logV7Unlocked(std::string("grab ")+name);}}
+    void grabStartImpl(float nx,float ny,bool forceLight){std::lock_guard<std::mutex>lock(bodyMutex_);Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);int bestIndex=forceLight?2:-1;float bestHit=1e9f;if(forceLight){Vec3 to=bodies_[2].p-ro;bestHit=std::max(.65f,dot(to,rd));}else{for(int i=0;i<activeBodiesV7();++i){if(i==2)continue;const Body&b=bodies_[i];float pickR=b.r*1.18f+.035f;Vec3 oc=ro-b.p;float qb=dot(oc,rd),cc=dot(oc,oc)-pickR*pickR,disc=qb*qb-cc;if(disc<0)continue;float t=-qb-std::sqrt(disc);if(t>.02f&&t<bestHit){bestHit=t;bestIndex=i;}}}grabbed_=bestIndex;if(grabbed_>=0){Body&b=bodies_[grabbed_];float centerDepth=dot(b.p-ro,rd);grabDepth_=std::max(centerDepth,b.r*2.35f+.55f);grabTarget_=ro+rd*grabDepth_;grabPrevTarget_=grabTarget_;grabTargetVelocity_={};grabLastUpdate_=Clock::now();sleepTimer_[grabbed_]=0;const char*name=grabbed_==2?"MOVABLE LIGHT":grabbed_==1?"GUMMY":grabbed_==0?"HEAVY METAL":"RUBBER";logV7Unlocked(std::string("grab ")+name);}}
 
     std::array<Vec3,kBodyCount>deformDir_{};
     std::array<float,kBodyCount>sleepTimer_{};
