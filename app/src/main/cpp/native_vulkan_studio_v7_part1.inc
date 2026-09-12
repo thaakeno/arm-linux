@@ -1,4 +1,4 @@
-// Vessel Vulkan Studio v7.1
+// Vessel Vulkan Studio v7.2
 // Coherent offline courtyard renderer: matched raster/RT geometry, physical puddles,
 // local HW ray queries, adaptive RT budget, and physics-derived directional gummy deformation.
 
@@ -57,40 +57,32 @@ constexpr uint32_t kV7HeroGrid=32u;
 constexpr uint32_t kV7HeroVerts=6u*kV7HeroGrid*kV7HeroGrid*6u;
 constexpr uint32_t kV7FloorGrid=64u;
 constexpr uint32_t kV7FloorVerts=kV7FloorGrid*kV7FloorGrid*6u;
-constexpr uint32_t kV7WaterVerts=0u; // puddles are shaded directly on the floor: no full-screen overdraw layer
+constexpr uint32_t kV7WaterVerts=0u;
 constexpr uint32_t kV7ArchBoxes=18u;
 constexpr uint32_t kV7Leaves=96u;
 constexpr uint32_t kV7ArchVerts=kV7ArchBoxes*36u+kV7Leaves*6u+36u;
 constexpr uint32_t kV7StaticVerts=kV7HeroVerts+kV7FloorVerts+kV7WaterVerts+kV7ArchVerts;
 constexpr uint32_t kV7SphereVerts=36u*18u*6u;
-constexpr uint32_t kV7QualityBodies=4u; // three balls + the movable bulb
+constexpr uint32_t kV7QualityBodies=4u;
 constexpr uint32_t kV7QualityVerts=kV7StaticVerts+kV7QualityBodies*kV7SphereVerts;
 constexpr uint32_t kV7StressSphereVerts=16u*8u*6u;
 constexpr uint32_t kV7StaticInstances=20u;
 constexpr uint32_t kV7MaxRtBodies=30u;
 constexpr uint32_t kV7MaxInstances=kV7StaticInstances+kV7MaxRtBodies;
 
-struct PushV7 {
-    float yaw,pitch,aspect,cameraDistance;
-    float preRotation,quality,rtEnabled,time;
-    float wetness,exposure,heroMaterial,rtBudget;
-};
-struct TextureV7{
-    VkImage image=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;VkSampler sampler=VK_NULL_HANDLE;
-    uint32_t width=0,height=0,mips=1;
-};
+struct PushV7 {float yaw,pitch,aspect,cameraDistance;float preRotation,quality,rtEnabled,time;float wetness,exposure,heroMaterial,rtBudget;};
+struct TextureV7{VkImage image=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;VkSampler sampler=VK_NULL_HANDLE;uint32_t width=0,height=0,mips=1;};
 struct HeightV7{int w=0,h=0;std::vector<float> p;};
 
 class VulkanStudioV7 final:public VulkanStudioV3{
 public:
     VulkanStudioV7(ANativeWindow*w,AAssetManager*assets):VulkanStudioV3(w),assets_(assets){
         if(!assets_)throw std::runtime_error("Android AssetManager unavailable");
-        deformDir_.fill({0,1,0});
-        configureBodiesV7();cameraDistance_=7.5f;pitch_=0.14f;yaw_=-0.55f;
-        logV7("Studio v7.1 · Adreno 120 Hz courtyard rebuild");
-        logV7("safety · adaptive RT budget + stress ray cap + device-lost stop");
-        logV7("scene · procedural open sky + local architecture + collider-matched props + integrated physical puddles");
-        logV7("RT · matched displaced floor/hero BLAS + selective one-query shadows/reflections");
+        deformDir_.fill({0,1,0});configureBodiesV7();deformDir_[2]={1.0f,.62f,.31f};cameraDistance_=7.5f;pitch_=0.14f;yaw_=-0.55f;
+        logV7("Studio v7.2 · photoreal 120 Hz courtyard");
+        logV7("safety · adaptive HWRT budget + mobile tile-aware workload");
+        logV7("scene · worn PBR materials + collider-matched props + deep wet pavement");
+        logV7("RT · selective ray-query contact shadows + local reflections");
     }
     ~VulkanStudioV7(){stop();}
     void start(){bool e=false;if(!running_.compare_exchange_strong(e,true))return;thread_=std::thread([this]{loopV7();});}
@@ -102,7 +94,9 @@ public:
     void setWetness(float v){wetness_=std::clamp(v,0.0f,1.0f);logV7("wetness -> "+std::to_string(int(wetness_.load()*100)));}
     void setExposure(float v){exposure_=std::clamp(v,-1.5f,1.0f);logV7("exposure EV -> "+std::to_string(exposure_.load()));}
     void setHeroMaterial(int m){heroMaterial_=std::clamp(m,0,1);logV7(heroMaterial_.load()==0?"hero -> weathered concrete":"hero -> dark volcanic rock");}
-    void resetPhysics(){std::lock_guard<std::mutex>lock(bodyMutex_);initBodiesLocked();deformDir_.fill({0,1,0});configureBodiesLockedV7();grabbed_=-1;grabTargetVelocity_={};omega_.fill({});spin_.fill(0);logV7Unlocked("scene reset · grounded physics restored");}
+    void setGummyBounce(float v){std::lock_guard<std::mutex>lock(bodyMutex_);if(bodies_.size()>1)bodies_[1].restitution=std::clamp(v,.30f,.96f);logV7Unlocked("gummy restitution -> "+std::to_string(bodies_[1].restitution));}
+    void setLightColor(float r,float g,float b){std::lock_guard<std::mutex>lock(bodyMutex_);Vec3 c{std::clamp(r,.05f,1.f),std::clamp(g,.05f,1.f),std::clamp(b,.05f,1.f)};float m=std::max(c.x,std::max(c.y,c.z));if(m>1e-4f)c=c/m;deformDir_[2]=c;logV7Unlocked("light color -> "+std::to_string(int(c.x*255))+","+std::to_string(int(c.y*255))+","+std::to_string(int(c.z*255)));}
+    void resetPhysics(){std::lock_guard<std::mutex>lock(bodyMutex_);initBodiesLocked();deformDir_.fill({0,1,0});configureBodiesLockedV7();deformDir_[2]={1.0f,.62f,.31f};grabbed_=-1;grabTargetVelocity_={};omega_.fill({});spin_.fill(0);logV7Unlocked("scene reset · grounded physics restored");}
     void grabStart(float nx,float ny){grabStartImpl(nx,ny,false);}
     void grabLightStart(float nx,float ny){grabStartImpl(nx,ny,true);}
     void grabMove(float nx,float ny){std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_<0)return;Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);Vec3 next=ro+rd*grabDepth_;auto now=Clock::now();float dt=std::chrono::duration<float>(now-grabLastUpdate_).count();if(dt>.0005f){Vec3 instant=(next-grabPrevTarget_)/dt;float s=len(instant);if(s>11.5f)instant=instant*(11.5f/s);grabTargetVelocity_=grabTargetVelocity_*.80f+instant*.20f;}grabPrevTarget_=next;grabTarget_=clampInsideV7(next,bodies_[grabbed_].r);grabLastUpdate_=now;if(!physics_.load()){Body&b=bodies_[grabbed_];b.p=grabTarget_;b.v={};omega_[grabbed_]={};}}
