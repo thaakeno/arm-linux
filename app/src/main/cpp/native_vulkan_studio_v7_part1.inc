@@ -1,4 +1,4 @@
-// Vessel Vulkan Studio v7.6
+// Vessel Vulkan Studio v7.7
 // Adreno-first courtyard renderer: stable 120 Hz hybrid HWRT plus an explicit path-trace inspection mode.
 // Raster, physics and ray-query geometry share one authoritative body state.
 // Legacy CI vocabulary retained intentionally: adaptive RT budget · physical puddles.
@@ -79,13 +79,11 @@ class VulkanStudioV7 final:public VulkanStudioV3{
 public:
     VulkanStudioV7(ANativeWindow*w,AAssetManager*assets):VulkanStudioV3(w),assets_(assets){
         if(!assets_)throw std::runtime_error("Android AssetManager unavailable");
-        // 0.88x internal resolution is a deliberate mobile TBR optimization: ~23% fewer shaded pixels,
-        // while Android's SurfaceView compositor presents at the full UI resolution.
         ANativeWindow_setBuffersGeometry(w,std::max(1,int(visibleW_.load()*.88f)),std::max(1,int(visibleH_.load()*.88f)),0);
         deformDir_.fill({0,1,0});configureBodiesV7();deformDir_[2]={1.0f,.62f,.31f};cameraDistance_=7.5f;pitch_=0.14f;yaw_=-0.55f;
-        logV7("Studio v7.6 · fixed-step grounded physics + stable 120 Hz hybrid");
+        logV7("Studio v7.7 · stable 120 Hz hybrid + production-tuned interaction");
         logV7("safety · Adreno tile-aware 0.88x render scale + adaptive HWRT budget");
-        logV7("scene · deep wet stone deck + worn PBR balls + sleeping soft bodies");
+        logV7("scene · layered wet stone + wet rough hero + sleeping soft bodies");
         logV7("RT · synchronized moving-body TLAS + ray-query shadows/reflections");
     }
     ~VulkanStudioV7(){stop();}
@@ -93,26 +91,27 @@ public:
     void resize(int w,int h){visibleW_=std::max(1,w);visibleH_=std::max(1,h);ANativeWindow_setBuffersGeometry(window_,std::max(1,int(w*.88f)),std::max(1,int(h*.88f)),0);resize_=true;}
     void zoom(float s){VulkanStudioV3::zoom(s);cameraDistance_=std::clamp(cameraDistance_.load(),4.5f,11.0f);}
     void setRt(bool v){requestedRt_=v;if(!v&&pathTracing_.load())setPathTracing(false);logV7(v?"RT requested -> ON":"RT requested -> OFF (ray queries bypassed)");}
-    void setPathTracing(bool v){if(v&&!rtSupported_){logV7("path trace unavailable · VK_KHR_ray_query missing");return;}pathTracing_=v;if(v)requestedRt_=true;int base=heroMaterial_.load()%10;heroMaterial_=base+(v?10:0);rtSafety_=1.0f;slowFrames_=0;logV7(v?"PATH TRACE -> ON · multi-bounce inspection; 120 Hz governor suspended":"PATH TRACE -> OFF · 120 Hz hybrid restored");}
+    void setPathTracing(bool v){if(v&&!rtSupported_){logV7("path trace unavailable · VK_KHR_ray_query missing");return;}pathTracing_=v;if(v)requestedRt_=true;int base=heroMaterial_.load()%10;heroMaterial_=base+(v?10:0);rtSafety_=1.0f;slowFrames_=0;logV7(v?"PATH TRACE -> ON · stochastic inspection mode; 120 Hz governor suspended":"PATH TRACE -> OFF · 120 Hz hybrid restored");}
     void setStress(bool v){stress_=v;if(v&&requestedRt_.load())logV7("stress -> SAFE RT profile (ray budget capped; TLAS refit amortized)");else logV7(v?"stress -> ON":"stress -> OFF");}
     void setPhysics(bool v){physics_=v;physicsAccumulator_=0;logV7(v?"physics -> ON":"physics -> OFF");}
     void setQuality(int q){quality_=std::clamp(q,0,100);}
     void setWetness(float v){wetness_=std::clamp(v,0.0f,1.0f);logV7("wetness -> "+std::to_string(int(wetness_.load()*100)));}
     void setExposure(float v){exposure_=std::clamp(v,-1.5f,1.0f);logV7("exposure EV -> "+std::to_string(exposure_.load()));}
     void setHeroMaterial(int m){int mode=pathTracing_.load()?10:0;heroMaterial_=mode+std::clamp(m,0,1);logV7((heroMaterial_.load()%10)==0?"hero -> weathered concrete":"hero -> dark volcanic rock");}
-    void setGummyBounce(float v){std::lock_guard<std::mutex>lock(bodyMutex_);if(bodies_.size()>1)bodies_[1].restitution=std::clamp(v,.30f,.92f);logV7Unlocked("gummy restitution -> "+std::to_string(bodies_[1].restitution));}
+    void setGummyBounce(float v){std::lock_guard<std::mutex>lock(bodyMutex_);if(bodies_.size()>1)bodies_[1].restitution=std::clamp(v,.38f,.94f);logV7Unlocked("gummy restitution -> "+std::to_string(bodies_[1].restitution));}
     void setLightColor(float r,float g,float b){std::lock_guard<std::mutex>lock(bodyMutex_);Vec3 c{std::clamp(r,.05f,1.f),std::clamp(g,.05f,1.f),std::clamp(b,.05f,1.f)};float m=std::max(c.x,std::max(c.y,c.z));if(m>1e-4f)c=c/m;deformDir_[2]=c;logV7Unlocked("light color -> "+std::to_string(int(c.x*255))+","+std::to_string(int(c.y*255))+","+std::to_string(int(c.z*255)));}
     void resetPhysics(){std::lock_guard<std::mutex>lock(bodyMutex_);initBodiesLocked();deformDir_.fill({0,1,0});configureBodiesLockedV7();deformDir_[2]={1.0f,.62f,.31f};grabbed_=-1;grabTargetVelocity_={};omega_.fill({});spin_.fill(0);sleepTimer_.fill(0);physicsAccumulator_=0;logV7Unlocked("scene reset · grounded fixed-step physics restored");}
     void grabStart(float nx,float ny){grabStartImpl(nx,ny,false);}
     void grabLightStart(float nx,float ny){grabStartImpl(nx,ny,true);}
-    void grabMove(float nx,float ny){std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_<0)return;Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);float safeDepth=std::max(grabDepth_,bodies_[grabbed_].r*2.35f+.55f);Vec3 next=ro+rd*safeDepth;auto now=Clock::now();float dt=std::chrono::duration<float>(now-grabLastUpdate_).count();if(dt>.0005f){Vec3 instant=(next-grabPrevTarget_)/dt;float s=len(instant);if(s>10.0f)instant=instant*(10.0f/s);grabTargetVelocity_=grabTargetVelocity_*.65f+instant*.35f;}grabPrevTarget_=next;grabTarget_=clampInsideV7(next,bodies_[grabbed_].r);grabLastUpdate_=now;sleepTimer_[grabbed_]=0;if(!physics_.load()){Body&b=bodies_[grabbed_];b.p=grabTarget_;b.v={};omega_[grabbed_]={};}}
+    void grabMove(float nx,float ny){std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_<0)return;Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);float safeDepth=std::max(grabDepth_,bodies_[grabbed_].r*2.35f+.55f);Vec3 next=ro+rd*safeDepth;auto now=Clock::now();float dt=std::chrono::duration<float>(now-grabLastUpdate_).count();if(dt>.0005f){Vec3 instant=(next-grabPrevTarget_)/dt;float s=len(instant);if(s>14.0f)instant=instant*(14.0f/s);grabTargetVelocity_=grabTargetVelocity_*.48f+instant*.52f;}grabPrevTarget_=next;grabTarget_=clampInsideV7(next,bodies_[grabbed_].r);grabLastUpdate_=now;sleepTimer_[grabbed_]=0;if(!physics_.load()){Body&b=bodies_[grabbed_];b.p=grabTarget_;b.v={};omega_[grabbed_]={};}}
     void grabEnd(){
         std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_>=0&&physics_.load()){
-            Body&b=bodies_[grabbed_];float age=std::chrono::duration<float>(Clock::now()-grabLastUpdate_).count();Vec3 release=age<.075f?grabTargetVelocity_:Vec3{};
-            float scale=b.material==2?.08f:(b.material==8?.22f:(b.material==3?.52f:(b.material==7?.46f:.20f)));
-            // A lifted heavy object should fall immediately unless the user actually flicks it hard upward.
-            if(b.material==2&&release.y>0.45f)release.y=.45f;if(std::abs(release.y)<.32f)release.y=0;
-            b.v=release*scale;omega_[grabbed_]=omega_[grabbed_]*.35f;sleepTimer_[grabbed_]=0;
+            Body&b=bodies_[grabbed_];float age=std::chrono::duration<float>(Clock::now()-grabLastUpdate_).count();Vec3 release=age<.105f?grabTargetVelocity_:Vec3{};
+            float scale=b.material==2?.18f:(b.material==8?.34f:(b.material==3?.78f:(b.material==7?.64f:.28f)));
+            float rawSpeed=len(release);if(rawSpeed<.32f)release={};
+            // Dense steel can be flicked, but never inherits enough upward velocity to look weightless.
+            if(b.material==2){if(rawSpeed<1.15f)release.y=0.0f;release.y=std::clamp(release.y,-3.0f,1.45f);}else release.y=std::clamp(release.y,-5.5f,5.5f);
+            b.v=release*scale;float maxRelease=b.material==2?3.4f:(b.material==8?5.0f:7.2f);float bs=len(b.v);if(bs>maxRelease)b.v=b.v*(maxRelease/bs);omega_[grabbed_]=omega_[grabbed_]*.28f;sleepTimer_[grabbed_]=0;
         }grabbed_=-1;grabTargetVelocity_={};
     }
 
