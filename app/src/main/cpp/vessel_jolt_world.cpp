@@ -91,6 +91,8 @@ struct VesselJoltWorld::Impl {
     TempAllocatorImpl temp{16 * 1024 * 1024};
     JobSystemThreadPool jobs{cMaxPhysicsJobs, cMaxPhysicsBarriers, std::max(1u, std::min(3u, std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u))};
     std::array<BodyID,4> ids{};
+    std::array<BodyID,20> static_ids{};
+    uint static_count=0;
     std::array<float,4> radius{{.68f,.72f,.28f,.64f}};
     std::array<float,4> mass{{24.0f,1.15f,.70f,1.35f}};
     std::array<float,4> restitution{{.03f,.82f,.38f,.76f}};
@@ -106,15 +108,30 @@ struct VesselJoltWorld::Impl {
         reset();
         ready=true;
     }
-    ~Impl() {
-        BodyInterface &bi=physics.GetBodyInterface();
-        for (BodyID id: ids) if (!id.IsInvalid()) { bi.RemoveBody(id); bi.DestroyBody(id); }
-    }
+    ~Impl() { clearWorld(); }
 
+    void destroyBody(BodyID &id) {
+        if (id.IsInvalid()) return;
+        BodyInterface &bi=physics.GetBodyInterface();
+        bi.RemoveBody(id);
+        bi.DestroyBody(id);
+        id=BodyID();
+    }
+    void clearWorld() {
+        for (BodyID &id: ids) destroyBody(id);
+        for (uint i=0;i<static_count;++i) destroyBody(static_ids[i]);
+        static_count=0;
+    }
+    void rememberStatic(BodyID id) {
+        if (static_count < static_ids.size()) static_ids[static_count++]=id;
+    }
     void addStaticBox(const BoxDef &b) {
         BodyCreationSettings s(new BoxShape(Vec3(b.hx,b.hy,b.hz)), RVec3(b.x,b.y,b.z), Quat::sIdentity(), EMotionType::Static, Layers::Static);
-        BodyID id=physics.GetBodyInterface().CreateAndAddBody(s,EActivation::DontActivate);
-        (void)id;
+        rememberStatic(physics.GetBodyInterface().CreateAndAddBody(s,EActivation::DontActivate));
+    }
+    void addStaticBox(RVec3 pos, Vec3 half_extents) {
+        BodyCreationSettings s(new BoxShape(half_extents), pos, Quat::sIdentity(), EMotionType::Static, Layers::Static);
+        rememberStatic(physics.GetBodyInterface().CreateAndAddBody(s,EActivation::DontActivate));
     }
     void makeDynamic(int i, RVec3 p) {
         BodyCreationSettings s(new SphereShape(radius[i]), p, Quat::sIdentity(), EMotionType::Dynamic, Layers::Dynamic);
@@ -128,11 +145,10 @@ struct VesselJoltWorld::Impl {
         ids[i]=physics.GetBodyInterface().CreateAndAddBody(s,EActivation::Activate);
     }
     void reset() {
-        BodyInterface &bi=physics.GetBodyInterface();
-        for (BodyID &id: ids) if (!id.IsInvalid()) { bi.RemoveBody(id); bi.DestroyBody(id); id=BodyID(); }
-        // The playground is deliberately open: a large floor plus spaced platforms, no enclosing green box.
-        BodyCreationSettings floor(new BoxShape(Vec3(30.0f,.20f,30.0f)),RVec3(0,-1.21f,0),Quat::sIdentity(),EMotionType::Static,Layers::Static);
-        bi.CreateAndAddBody(floor,EActivation::DontActivate);
+        clearWorld();
+        // Large open playground. The hero cube at the origin is a true static Jolt collider.
+        addStaticBox(RVec3(0,-1.21f,0), Vec3(30.0f,.20f,30.0f));
+        addStaticBox(RVec3(0,0,0), Vec3(1.22f,1.06f,1.22f));
         for (const BoxDef &b:kArena) addStaticBox(b);
         makeDynamic(0,RVec3(-2.35f,-.30f,0.0f));
         makeDynamic(1,RVec3( .25f,-.25f,.45f));
@@ -145,7 +161,7 @@ struct VesselJoltWorld::Impl {
         if(i<0||i>=4)return;
         BodyInterface &bi=physics.GetBodyInterface();
         RVec3 p(0,2,0);Vec3 v=Vec3::sZero();
-        if(!ids[i].IsInvalid()){p=bi.GetCenterOfMassPosition(ids[i]);v=bi.GetLinearVelocity(ids[i]);bi.RemoveBody(ids[i]);bi.DestroyBody(ids[i]);}
+        if(!ids[i].IsInvalid()){p=bi.GetCenterOfMassPosition(ids[i]);v=bi.GetLinearVelocity(ids[i]);destroyBody(ids[i]);}
         makeDynamic(i,p);bi.SetLinearVelocity(ids[i],v);
     }
 };
