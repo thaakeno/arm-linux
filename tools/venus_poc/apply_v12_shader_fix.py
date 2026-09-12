@@ -32,13 +32,40 @@ text, n = re.subn(pattern, material, text, count=1, flags=re.S)
 if n != 1:
     raise SystemExit(f"materialAt replacement failed: {n}")
 
-# Make sure a previous partial regex replacement cannot leave a duplicated branch
-# between materialAt and materialNormal.
 start = text.index("Material materialAt")
 normal = text.index("vec3 materialNormal", start)
 chunk = text[start:normal]
 if chunk.count("return a;") != 1:
     raise SystemExit("materialAt still malformed")
 
+# The v10/v11 boxInfo function lives on a single physical line, so the original
+# v12 regex could stop at the first branch brace and leave the old house branches
+# after the new function. Replace the whole function by slicing up to boxNormal.
+boxinfo = r'''void boxInfo(int id,out vec3 c,out vec3 s,out int mat){
+    int b=id-2;mat=12;c=vec3(0);s=vec3(1);
+    if(b==0){c=vec3(0,.35,-6.72);s=vec3(6.70,1.36,.12);}
+    else if(b==1){c=vec3(-6.72,.15,0);s=vec3(.12,1.18,6.70);}
+    else if(b==2){c=vec3(6.72,.15,0);s=vec3(.12,1.18,6.70);}
+    else if(b==3){c=vec3(-3.75,-.66,-3.05);s=vec3(1.45,.34,1.45);}
+    else if(b==4){c=vec3(3.45,-.50,-2.65);s=vec3(1.55,.50,1.35);}
+    else if(b==5){c=vec3(.15,-.30,3.45);s=vec3(2.20,.70,1.28);}
+    else if(b==6){c=vec3(-4.65,-.88,1.60);s=vec3(1.10,.12,.70);}
+    else if(b==7){c=vec3(-4.65,-.69,2.32);s=vec3(1.10,.19,.70);}
+    else if(b==8){c=vec3(-4.65,-.46,3.04);s=vec3(1.10,.23,.70);}
+    else if(b==9){c=vec3(-4.65,-.18,3.76);s=vec3(1.10,.28,.70);}
+    else if(b==10){c=vec3(-4.65,.15,4.48);s=vec3(1.10,.33,.70);}
+    else if(b==11){c=vec3(4.75,-.55,3.70);s=vec3(.70,.45,.70);}
+    else if(b==12){c=vec3(4.75,.35,3.70);s=vec3(.52,.45,.52);}
+    else if(b==13){c=vec3(2.65,-.72,1.25);s=vec3(.70,.28,.70);}
+    else if(b==14){c=vec3(2.65,-.14,1.25);s=vec3(.52,.30,.52);}
+    else if(b==15){c=vec3(0,-.77,-4.55);s=vec3(1.55,.23,.72);}
+    else if(b==16){c=vec3(0,-.32,-4.55);s=vec3(1.10,.22,.58);}
+    else{c=vec3(0,.10,-4.55);s=vec3(.68,.20,.46);}
+}
+'''
+bs = text.index("void boxInfo(")
+be = text.index("vec3 boxNormal(", bs)
+text = text[:bs] + boxinfo + text[be:]
+
 p.write_text(text)
-print("v12 shader material chain repaired")
+print("v12 shader material + playground box chains repaired")
