@@ -1,6 +1,6 @@
-// Vessel Vulkan Studio v7
-// Coherent offline courtyard renderer: matched raster/RT geometry, physical puddle layer,
-// local HW ray queries, safe adaptive RT budget, and physics-derived gummy deformation.
+// Vessel Vulkan Studio v7.1
+// Coherent offline courtyard renderer: matched raster/RT geometry, physical puddles,
+// local HW ray queries, adaptive RT budget, and physics-derived directional gummy deformation.
 
 #include <android/asset_manager.h>
 #include <android/asset_manager_jni.h>
@@ -53,17 +53,17 @@
 
 namespace {
 constexpr float kV7RoomHalf=6.82f;
-constexpr uint32_t kV7HeroGrid=48u;
+constexpr uint32_t kV7HeroGrid=32u;
 constexpr uint32_t kV7HeroVerts=6u*kV7HeroGrid*kV7HeroGrid*6u;
-constexpr uint32_t kV7FloorGrid=96u;
+constexpr uint32_t kV7FloorGrid=64u;
 constexpr uint32_t kV7FloorVerts=kV7FloorGrid*kV7FloorGrid*6u;
-constexpr uint32_t kV7WaterVerts=kV7FloorVerts;
+constexpr uint32_t kV7WaterVerts=0u; // puddles are shaded directly on the floor: no full-screen overdraw layer
 constexpr uint32_t kV7ArchBoxes=18u;
-constexpr uint32_t kV7Leaves=192u;
+constexpr uint32_t kV7Leaves=96u;
 constexpr uint32_t kV7ArchVerts=kV7ArchBoxes*36u+kV7Leaves*6u+36u;
 constexpr uint32_t kV7StaticVerts=kV7HeroVerts+kV7FloorVerts+kV7WaterVerts+kV7ArchVerts;
-constexpr uint32_t kV7SphereVerts=48u*24u*6u;
-constexpr uint32_t kV7QualityBodies=6u;
+constexpr uint32_t kV7SphereVerts=36u*18u*6u;
+constexpr uint32_t kV7QualityBodies=4u; // three balls + the movable bulb
 constexpr uint32_t kV7QualityVerts=kV7StaticVerts+kV7QualityBodies*kV7SphereVerts;
 constexpr uint32_t kV7StressSphereVerts=16u*8u*6u;
 constexpr uint32_t kV7StaticInstances=20u;
@@ -85,11 +85,12 @@ class VulkanStudioV7 final:public VulkanStudioV3{
 public:
     VulkanStudioV7(ANativeWindow*w,AAssetManager*assets):VulkanStudioV3(w),assets_(assets){
         if(!assets_)throw std::runtime_error("Android AssetManager unavailable");
+        deformDir_.fill({0,1,0});
         configureBodiesV7();cameraDistance_=7.5f;pitch_=0.14f;yaw_=-0.55f;
-        logV7("Studio v7 · coherent courtyard rebuild");
+        logV7("Studio v7.1 · Adreno 120 Hz courtyard rebuild");
         logV7("safety · adaptive RT budget + stress ray cap + device-lost stop");
-        logV7("scene · HDR sky visible + local architecture + planters + foliage + physical puddles");
-        logV7("RT · matched displaced floor/hero BLAS + light-mask fix + local reflection/transmission");
+        logV7("scene · procedural open sky + local architecture + collider-matched props + integrated physical puddles");
+        logV7("RT · matched displaced floor/hero BLAS + selective one-query shadows/reflections");
     }
     ~VulkanStudioV7(){stop();}
     void start(){bool e=false;if(!running_.compare_exchange_strong(e,true))return;thread_=std::thread([this]{loopV7();});}
@@ -101,11 +102,11 @@ public:
     void setWetness(float v){wetness_=std::clamp(v,0.0f,1.0f);logV7("wetness -> "+std::to_string(int(wetness_.load()*100)));}
     void setExposure(float v){exposure_=std::clamp(v,-1.5f,1.0f);logV7("exposure EV -> "+std::to_string(exposure_.load()));}
     void setHeroMaterial(int m){heroMaterial_=std::clamp(m,0,1);logV7(heroMaterial_.load()==0?"hero -> weathered concrete":"hero -> dark volcanic rock");}
-    void resetPhysics(){std::lock_guard<std::mutex>lock(bodyMutex_);initBodiesLocked();configureBodiesLockedV7();grabbed_=-1;grabTargetVelocity_={};omega_.fill({});spin_.fill(0);logV7Unlocked("scene reset · courtyard bodies restored");}
+    void resetPhysics(){std::lock_guard<std::mutex>lock(bodyMutex_);initBodiesLocked();deformDir_.fill({0,1,0});configureBodiesLockedV7();grabbed_=-1;grabTargetVelocity_={};omega_.fill({});spin_.fill(0);logV7Unlocked("scene reset · grounded physics restored");}
     void grabStart(float nx,float ny){grabStartImpl(nx,ny,false);}
     void grabLightStart(float nx,float ny){grabStartImpl(nx,ny,true);}
-    void grabMove(float nx,float ny){std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_<0)return;Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);Vec3 next=ro+rd*grabDepth_;auto now=Clock::now();float dt=std::chrono::duration<float>(now-grabLastUpdate_).count();if(dt>.0005f){Vec3 instant=(next-grabPrevTarget_)/dt;float s=len(instant);if(s>9.0f)instant=instant*(9.0f/s);grabTargetVelocity_=grabTargetVelocity_*.84f+instant*.16f;}grabPrevTarget_=next;grabTarget_=clampInsideV7(next,bodies_[grabbed_].r);grabLastUpdate_=now;if(!physics_.load()){Body&b=bodies_[grabbed_];b.p=grabTarget_;b.v={};omega_[grabbed_]={};}}
-    void grabEnd(){std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_>=0&&physics_.load()){bodies_[grabbed_].v+=grabTargetVelocity_*.30f;float s=len(bodies_[grabbed_].v);if(s>9.5f)bodies_[grabbed_].v=bodies_[grabbed_].v*(9.5f/s);}grabbed_=-1;grabTargetVelocity_={};}
+    void grabMove(float nx,float ny){std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_<0)return;Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);Vec3 next=ro+rd*grabDepth_;auto now=Clock::now();float dt=std::chrono::duration<float>(now-grabLastUpdate_).count();if(dt>.0005f){Vec3 instant=(next-grabPrevTarget_)/dt;float s=len(instant);if(s>11.5f)instant=instant*(11.5f/s);grabTargetVelocity_=grabTargetVelocity_*.80f+instant*.20f;}grabPrevTarget_=next;grabTarget_=clampInsideV7(next,bodies_[grabbed_].r);grabLastUpdate_=now;if(!physics_.load()){Body&b=bodies_[grabbed_];b.p=grabTarget_;b.v={};omega_[grabbed_]={};}}
+    void grabEnd(){std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_>=0&&physics_.load()){bodies_[grabbed_].v+=grabTargetVelocity_*.42f;float s=len(bodies_[grabbed_].v);if(s>12.5f)bodies_[grabbed_].v=bodies_[grabbed_].v*(12.5f/s);}grabbed_=-1;grabTargetVelocity_={};}
 
 private:
     void logV7(const std::string&s){__android_log_print(ANDROID_LOG_INFO,kTag,"%s",s.c_str());std::lock_guard<std::mutex>lock(logMutex_);logV7Unlocked(s);}
