@@ -43,7 +43,7 @@ jobs:
           ASSETS=app/src/main/assets/vulkan_v7
           THIRD=app/src/main/cpp/third_party
           mkdir -p "$ASSETS" "$THIRD"
-          UA='Vessel-Vulkan-Studio-v10/1.0 (offline APK asset build)'
+          UA='Vessel-Vulkan-Studio-v10.1/1.0 (offline APK asset build)'
           get() { curl --fail --location --retry 4 --retry-delay 2 --user-agent "$UA" "$1" --output "$2"; test -s "$2"; }
 
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cobblestone_pavement/cobblestone_pavement_diff_2k.jpg' "$ASSETS/cobblestone_diff_2k.jpg"
@@ -61,7 +61,8 @@ jobs:
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_arm_2k.jpg' "$ASSETS/dark_rock_arm_2k.jpg"
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/dark_rock/dark_rock_disp_2k.png' "$ASSETS/dark_rock_disp_2k.png"
 
-          get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/evening_museum_courtyard_1k.hdr' "$ASSETS/evening_museum_courtyard_1k.hdr"
+          # Keep the packaged filename stable, but use a real CC0 Alpine field/mountain panorama for the windows and IBL.
+          get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/alps_field_1k.hdr' "$ASSETS/evening_museum_courtyard_1k.hdr"
           get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$THIRD/stb_image.h"
           du -h "$ASSETS"/*
 
@@ -87,27 +88,26 @@ jobs:
                   'SurfaceView', 'System.loadLibrary("vessel_vulkan")', 'VULKAN TELEMETRY',
                   'nativeSetStress', 'nativeSetQuality', 'nativeSetPhysics', 'nativeSetRt', 'nativeGrabLightStart',
                   'nativeSetLightIntensity', 'nativeSetLightHaze', 'nativeSetLightBounce',
-                  'VULKAN STUDIO  //  v10.0', 'RAIN HOUSE', '0.50x'
+                  'VULKAN STUDIO  //  v10.0', 'RAIN HOUSE'
               ],
               'app/src/main/cpp/CMakeLists.txt': [
                   'add_library(vessel_vulkan SHARED native_vulkan_studio_v7.cpp)',
                   'native_studio_v7_rt.frag', 'target_link_libraries(vessel_vulkan PRIVATE android log vulkan)'
               ],
               'app/src/main/cpp/native_vulkan_studio_v7_part1.inc': [
-                  'adaptive RT budget', 'physical puddles', 'setWetness', 'setHeroMaterial', '0.50x',
-                  'setLightIntensity', 'setLightHaze', 'setLightBounce', 'rain-window house'
+                  'adaptive RT budget', 'physical puddles', '0.42x', 'real alpine HDRI',
+                  'setLightIntensity', 'setLightHaze', 'setLightBounce', 'quality -> 0'
               ],
               'app/src/main/cpp/native_vulkan_studio_v7_part4.inc': [
-                  'cmdUpdateTlasV7', 'rtBudgetV7', 'VK_ERROR_DEVICE_LOST', 'adaptRtSafetyV7',
-                  'house shell + furniture', 'dynamicSceneV7'
+                  'cmdUpdateTlasV7', 'rtBudgetV7', 'VK_ERROR_DEVICE_LOST', 'adaptRtSafetyV7', 'dynamicSceneV7'
               ],
-              'app/src/main/cpp/native_vulkan_studio_v7_part5.inc': ['Vulkan Studio v10.0', 'RAIN HOUSE', '0.50'],
+              'app/src/main/cpp/native_vulkan_studio_v7_part5.inc': ['Vulkan Studio v10.0', 'RAIN HOUSE'],
               'app/src/main/cpp/shaders/native_studio_v7_rt.frag': [
-                  'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceScene', 'stablePathIndirect', 'heroWetMask', 'rtBudget',
-                  'TORCH0', 'TORCH1', 'FIREPLACE', 'rainyLandscape', 'windowColor'
+                  'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceScene', 'stablePathIndirect', 'heroWetMask',
+                  'TORCH0', 'TORCH1', 'FIREPLACE', 'windowColor', 'stableContactShadow', 'flatColor'
               ],
               'app/src/main/cpp/shaders/native_studio_v7.vert': [
-                  'HERO_GRID=48', 'FLOOR_GRID=96', 'LEAVES=192', 'emitSky', 'rainy window L', 'wall TV'
+                  'HERO_GRID=48', 'FLOOR_GRID=96', 'LEAVES=192', 'emitSky', 'rainy window L', 'QUALITY_SPHERES=4'
               ],
           }
           for path, needles in checks.items():
