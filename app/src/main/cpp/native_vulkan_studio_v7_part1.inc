@@ -1,5 +1,5 @@
-// Vessel Vulkan Studio v8.0
-// Adreno-first courtyard renderer: stable 120 Hz hybrid HWRT plus a clean path-lighting inspection mode.
+// Vessel Vulkan Studio v10.0
+// Final Adreno-first showcase: 120 Hz hybrid HWRT plus a reconstructed path-lighting quality mode.
 // Raster, physics and ray-query geometry share one authoritative body state.
 // Legacy CI vocabulary retained intentionally: adaptive RT budget · physical puddles.
 
@@ -82,41 +82,41 @@ public:
         ANativeWindow_setBuffersGeometry(w,std::max(1,int(visibleW_.load()*.84f)),std::max(1,int(visibleH_.load()*.84f)),0);
         deformDir_.fill({0,1,0});configureBodiesV7();
         bodies_[2].deform=1.0f;bodies_[2].r=.285f;bodies_[2].restitution=.55f;deformDir_[2]={1.0f,.62f,.31f};
-        cameraDistance_=7.5f;pitch_=0.14f;yaw_=-0.55f;
-        logV7("Studio v8.0 · stable hybrid lighting + clean soft-body interaction");
-        logV7("safety · Adreno tile-aware 0.84x hybrid / 0.60x path scale + sparse ray queries");
-        logV7("scene · wet stone + four fire sconces + tuned elastic/viscous bodies");
-        logV7("RT · stable local HWRT + synchronized moving-body TLAS");
+        cameraDistance_=7.8f;pitch_=0.10f;yaw_=-0.42f;
+        logV7("Studio v10.0 · interior showcase + stable reconstructed path lighting");
+        logV7("safety · Adreno tile-aware 0.84x hybrid / 0.50x path scale + sparse ray queries");
+        logV7("scene · rain-window house · furniture · paintings · fireplace · side-wall fire sconces");
+        logV7("RT · motion-aware TLAS refits + stable world-space ray selection");
     }
     ~VulkanStudioV7(){stop();}
     void start(){bool e=false;if(!running_.compare_exchange_strong(e,true))return;thread_=std::thread([this]{loopV7();});}
-    void applyRenderScale(){float s=pathTracing_.load()?.60f:.84f;ANativeWindow_setBuffersGeometry(window_,std::max(1,int(visibleW_.load()*s)),std::max(1,int(visibleH_.load()*s)),0);resize_=true;}
+    void applyRenderScale(){float s=pathTracing_.load()?.50f:.84f;ANativeWindow_setBuffersGeometry(window_,std::max(1,int(visibleW_.load()*s)),std::max(1,int(visibleH_.load()*s)),0);resize_=true;}
     void resize(int w,int h){visibleW_=std::max(1,w);visibleH_=std::max(1,h);applyRenderScale();}
     void zoom(float s){VulkanStudioV3::zoom(s);cameraDistance_=std::clamp(cameraDistance_.load(),4.5f,11.0f);}
     void setRt(bool v){requestedRt_=v;if(!v&&pathTracing_.load())setPathTracing(false);logV7(v?"RT requested -> ON":"RT requested -> OFF (ray queries bypassed)");}
-    void setPathTracing(bool v){if(v&&!rtSupported_){logV7("path trace unavailable · VK_KHR_ray_query missing");return;}if(pathTracing_.load()==v)return;pathTracing_=v;if(v)requestedRt_=true;int base=heroMaterial_.load()%10;heroMaterial_=base+(v?10:0);rtSafety_=1.0f;slowFrames_=0;applyRenderScale();logV7(v?"PATH QUALITY -> ON · one stable indirect ray at 0.60x with clamped reconstruction":"PATH QUALITY -> OFF · 0.84x 120 Hz hybrid restored");}
+    void setPathTracing(bool v){if(v&&!rtSupported_){logV7("path trace unavailable · VK_KHR_ray_query missing");return;}if(pathTracing_.load()==v)return;pathTracing_=v;if(v)requestedRt_=true;int base=heroMaterial_.load()%10;heroMaterial_=base+(v?10:0);rtSafety_=1.0f;slowFrames_=0;applyRenderScale();logV7(v?"PATH QUALITY -> ON · 0.50x stable one-bounce reconstruction for 120 Hz target":"PATH QUALITY -> OFF · 0.84x 120 Hz hybrid restored");}
     void setStress(bool v){stress_=v;if(v&&requestedRt_.load())logV7("stress -> SAFE RT profile (ray budget capped; TLAS refit amortized)");else logV7(v?"stress -> ON":"stress -> OFF");}
     void setPhysics(bool v){physics_=v;physicsAccumulator_=0;logV7(v?"physics -> ON":"physics -> OFF");}
     void setQuality(int q){quality_=std::clamp(q,0,100);}
-    void setWetness(float v){wetness_=std::clamp(v,0.0f,1.0f);logV7("wetness -> "+std::to_string(int(wetness_.load()*100)));}
+    void setWetness(float v){wetness_=std::clamp(v,0.0f,1.0f);logV7("rain / wetness -> "+std::to_string(int(wetness_.load()*100)));}
     void setExposure(float v){exposure_=std::clamp(v,-1.5f,1.0f);logV7("exposure EV -> "+std::to_string(exposure_.load()));}
     void setHeroMaterial(int m){int mode=pathTracing_.load()?10:0;heroMaterial_=mode+std::clamp(m,0,1);logV7((heroMaterial_.load()%10)==0?"hero -> weathered concrete":"hero -> dark volcanic rock");}
-    void setGummyBounce(float v){std::lock_guard<std::mutex>lock(bodyMutex_);if(bodies_.size()>1)bodies_[1].restitution=std::clamp(v,.38f,.94f);logV7Unlocked("gummy restitution -> "+std::to_string(bodies_[1].restitution));}
+    void setGummyBounce(float v){std::lock_guard<std::mutex>lock(bodyMutex_);if(bodies_.size()>1)bodies_[1].restitution=std::clamp(v,.48f,.96f);logV7Unlocked("gummy restitution -> "+std::to_string(bodies_[1].restitution));}
     void setLightColor(float r,float g,float b){std::lock_guard<std::mutex>lock(bodyMutex_);Vec3 c{std::clamp(r,.05f,1.f),std::clamp(g,.05f,1.f),std::clamp(b,.05f,1.f)};float m=std::max(c.x,std::max(c.y,c.z));if(m>1e-4f)c=c/m;float intensity=std::clamp(bodies_[2].deform,.25f,2.25f);deformDir_[2]=c*intensity;logV7Unlocked("light color -> "+std::to_string(int(c.x*255))+","+std::to_string(int(c.y*255))+","+std::to_string(int(c.z*255)));}
     void setLightIntensity(float v){std::lock_guard<std::mutex>lock(bodyMutex_);v=std::clamp(v,.25f,2.25f);Vec3 c=deformDir_[2];float m=std::max(c.x,std::max(c.y,c.z));if(m<1e-4f)c={1,.62f,.31f};else c=c/m;bodies_[2].deform=v;deformDir_[2]=c*v;logV7Unlocked("light intensity -> "+std::to_string(v));}
     void setLightHaze(float v){std::lock_guard<std::mutex>lock(bodyMutex_);v=std::clamp(v,0.0f,1.0f);bodies_[2].r=.255f+.075f*v;lightHaze_=v;logV7Unlocked("light haze -> "+std::to_string(v));}
     void setLightBounce(float v){std::lock_guard<std::mutex>lock(bodyMutex_);v=std::clamp(v,0.0f,.90f);bodies_[2].restitution=v;lightBounce_=v;logV7Unlocked("light bounce -> "+std::to_string(v));}
-    void resetPhysics(){std::lock_guard<std::mutex>lock(bodyMutex_);initBodiesLocked();deformDir_.fill({0,1,0});configureBodiesLockedV7();bodies_[2].deform=lightIntensity_.load();bodies_[2].r=.255f+.075f*lightHaze_.load();bodies_[2].restitution=lightBounce_.load();deformDir_[2]={1.0f,.62f,.31f};grabbed_=-1;grabTargetVelocity_={};omega_.fill({});spin_.fill(0);sleepTimer_.fill(0);physicsAccumulator_=0;logV7Unlocked("scene reset · grounded fixed-step physics restored");}
+    void resetPhysics(){std::lock_guard<std::mutex>lock(bodyMutex_);initBodiesLocked();deformDir_.fill({0,1,0});configureBodiesLockedV7();bodies_[2].deform=lightIntensity_.load();bodies_[2].r=.255f+.075f*lightHaze_.load();bodies_[2].restitution=lightBounce_.load();deformDir_[2]={1.0f,.62f,.31f};grabbed_=-1;grabTargetVelocity_={};omega_.fill({});spin_.fill(0);sleepTimer_.fill(0);physicsAccumulator_=0;logV7Unlocked("scene reset · fixed-step physics + bounded soft bodies restored");}
     void grabStart(float nx,float ny){grabStartImpl(nx,ny,false);}
     void grabLightStart(float nx,float ny){grabStartImpl(nx,ny,true);}
-    void grabMove(float nx,float ny){std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_<0)return;Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);Body&b=bodies_[grabbed_];float safeDepth=std::max(grabDepth_,b.r*2.35f+.55f);Vec3 next=ro+rd*safeDepth;auto now=Clock::now();float dt=std::chrono::duration<float>(now-grabLastUpdate_).count();if(dt>.0005f){Vec3 instant=(next-grabPrevTarget_)/dt;float s=len(instant);if(s>14.0f)instant=instant*(14.0f/s);grabTargetVelocity_=grabTargetVelocity_*.48f+instant*.52f;}grabPrevTarget_=next;float bound=b.material==8?b.r*1.40f:(b.gummy?b.r*1.20f:b.r);grabTarget_=clampInsideV7(next,bound);if(b.material==8){b.deform*=.90f;b.deformV*=.55f;deformDir_[grabbed_]={0,1,0};}grabLastUpdate_=now;sleepTimer_[grabbed_]=0;if(!physics_.load()){b.p=grabTarget_;b.v={};omega_[grabbed_]={};}}
+    void grabMove(float nx,float ny){std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_<0)return;Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);Body&b=bodies_[grabbed_];float safeDepth=std::max(grabDepth_,b.r*2.35f+.55f);Vec3 next=ro+rd*safeDepth;auto now=Clock::now();float dt=std::chrono::duration<float>(now-grabLastUpdate_).count();if(dt>.0005f){Vec3 instant=(next-grabPrevTarget_)/dt;float s=len(instant);float limit=b.material==7?19.0f:(b.material==3?18.0f:(b.material==8?10.0f:14.0f));if(s>limit)instant=instant*(limit/s);grabTargetVelocity_=grabTargetVelocity_*.34f+instant*.66f;}grabPrevTarget_=next;float bound=b.material==8?b.r*1.44f:(b.gummy?b.r*1.24f:b.r);grabTarget_=clampInsideV7(next,bound);if(b.material==8){b.deform*=.82f;b.deformV*=.38f;deformDir_[grabbed_]=norm(deformDir_[grabbed_]*.55f+Vec3{0,1,0}*.45f);}grabLastUpdate_=now;sleepTimer_[grabbed_]=0;if(!physics_.load()){b.p=grabTarget_;b.v={};omega_[grabbed_]={};}}
     void grabEnd(){
         std::lock_guard<std::mutex>lock(bodyMutex_);if(grabbed_>=0&&physics_.load()){
-            Body&b=bodies_[grabbed_];float age=std::chrono::duration<float>(Clock::now()-grabLastUpdate_).count();Vec3 release=age<.105f?grabTargetVelocity_:Vec3{};
-            float scale=b.material==2?.18f:(b.material==8?.28f:(b.material==3?.78f:(b.material==7?.64f:(b.material==4?.46f:.28f))));
-            float rawSpeed=len(release);if(rawSpeed<.32f)release={};
-            if(b.material==2){if(rawSpeed<1.15f)release.y=0.0f;release.y=std::clamp(release.y,-3.0f,1.45f);}else release.y=std::clamp(release.y,-5.5f,5.5f);
-            b.v=release*scale;float maxRelease=b.material==2?3.4f:(b.material==8?4.2f:7.2f);float bs=len(b.v);if(bs>maxRelease)b.v=b.v*(maxRelease/bs);omega_[grabbed_]=omega_[grabbed_]*.28f;sleepTimer_[grabbed_]=0;
+            Body&b=bodies_[grabbed_];float age=std::chrono::duration<float>(Clock::now()-grabLastUpdate_).count();Vec3 release=age<.125f?grabTargetVelocity_:Vec3{};
+            float scale=b.material==2?.20f:(b.material==8?.42f:(b.material==3?.90f:(b.material==7?.96f:(b.material==4?.56f:.34f))));
+            float rawSpeed=len(release);if(rawSpeed<.24f)release={};
+            if(b.material==2){if(rawSpeed<1.15f)release.y=0.0f;release.y=std::clamp(release.y,-3.4f,1.55f);}else if(b.material==8)release.y=std::clamp(release.y,-5.0f,4.0f);else release.y=std::clamp(release.y,-9.5f,8.0f);
+            b.v=release*scale;float maxRelease=b.material==2?3.6f:(b.material==8?5.0f:(b.material==7?10.5f:9.4f));float bs=len(b.v);if(bs>maxRelease)b.v=b.v*(maxRelease/bs);omega_[grabbed_]=omega_[grabbed_]*.22f;sleepTimer_[grabbed_]=0;
         }grabbed_=-1;grabTargetVelocity_={};
     }
 
