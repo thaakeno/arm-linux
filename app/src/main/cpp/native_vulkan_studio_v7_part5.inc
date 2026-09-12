@@ -7,15 +7,15 @@
     }
     void loopV7(){
         try{
-            setStatus("Vulkan Studio v7.7 · loading layered wet-stone courtyard…");initVulkan();loadTexturesV7();if(rtSupported_)rebuildTlasV7();rebuildDescriptorsV7();replacePipelineV7();
-            logV7("READY · 240 Hz fixed-step physics · stable fling/settling · synchronized soft-body RT · 0.88x TBR render scale");
+            setStatus("Vulkan Studio v8.0 · loading stabilized courtyard…");initVulkan();loadTexturesV7();if(rtSupported_)rebuildTlasV7();rebuildDescriptorsV7();replacePipelineV7();
+            logV7("READY · 240 Hz physics · stable hybrid lighting · bounded soft bodies · four animated fire sconces");
             auto last=Clock::now(),stat=last,start=last,telemetry=last;uint32_t frames=0;
             while(running_){
-                auto now=Clock::now();float dt=std::chrono::duration<float>(now-last).count();last=now;physicsStepV7(dt);updateBodyGpuV7();float t=std::chrono::duration<float>(now-start).count();if(!drawV7(t)){setStatus("ERROR: Vulkan Studio v7.7 · GPU device lost · renderer stopped safely");logV7("DEVICE LOST · renderer stopped; do not continue RT stress in this session");break;}adaptRtSafetyV7();++frames;
-                float e=std::chrono::duration<float>(now-stat).count();if(e>=.5f){float fps=frames/e;bool rt=rtActiveV7(),pt=pathTracing_.load();std::ostringstream o;o.setf(std::ios::fixed);o.precision(1);o<<"Vulkan Studio v7.7 · "<<gpuName_<<" · "<<fps<<" FPS · GPU "<<gpuMs_<<" ms\n";o<<"Q"<<quality_.load()<<" · "<<(stress_.load()?"SAFE STRESS":"COURTYARD")<<" · Physics "<<(physics_.load()?"ON":"OFF")<<" · "<<(pt?"PATH TRACE":(rt?"RT LOCAL HW":"RT BYPASSED"))<<"\n";o<<"bodies "<<activeBodiesV7()<<" · wet "<<int(wetness_.load()*100)<<"% · hero "<<((heroMaterial_.load()%10)==0?"CONCRETE":"VOLCANIC")<<" · RT budget "<<int(rtBudgetV7()*100)<<"%";setStatus(o.str());frames=0;stat=now;}
-                if(std::chrono::duration<float>(now-telemetry).count()>=2.0f){std::ostringstream l;l.setf(std::ios::fixed);l.precision(2);l<<"telemetry · GPU "<<gpuMs_<<" ms · bodies "<<activeBodiesV7()<<" · mode "<<(pathTracing_.load()?"PATH_TRACE":(rtActiveV7()?"HYBRID_HWRT":"RASTER"))<<" · budget "<<rtBudgetV7()<<" · safety "<<rtSafety_.load()<<" · scale 0.88";logV7(l.str());telemetry=now;}
+                auto now=Clock::now();float dt=std::chrono::duration<float>(now-last).count();last=now;physicsStepV7(dt);updateBodyGpuV7();float t=std::chrono::duration<float>(now-start).count();if(!drawV7(t)){setStatus("ERROR: Vulkan Studio v8.0 · GPU device lost · renderer stopped safely");logV7("DEVICE LOST · renderer stopped; do not continue RT stress in this session");break;}adaptRtSafetyV7();++frames;
+                float e=std::chrono::duration<float>(now-stat).count();if(e>=.5f){float fps=frames/e;bool rt=rtActiveV7(),pt=pathTracing_.load();std::ostringstream o;o.setf(std::ios::fixed);o.precision(1);o<<"Vulkan Studio v8.0 · "<<gpuName_<<" · "<<fps<<" FPS · GPU "<<gpuMs_<<" ms\n";o<<"Q"<<quality_.load()<<" · "<<(stress_.load()?"SAFE STRESS":"COURTYARD")<<" · Physics "<<(physics_.load()?"ON":"OFF")<<" · "<<(pt?"PATH QUALITY":(rt?"RT LOCAL HW":"RT BYPASSED"))<<"\n";o<<"bodies "<<activeBodiesV7()<<" · wet "<<int(wetness_.load()*100)<<"% · hero "<<((heroMaterial_.load()%10)==0?"CONCRETE":"VOLCANIC")<<" · RT budget "<<int(rtBudgetV7()*100)<<"%";setStatus(o.str());frames=0;stat=now;}
+                if(std::chrono::duration<float>(now-telemetry).count()>=2.0f){std::ostringstream l;l.setf(std::ios::fixed);l.precision(2);l<<"telemetry · GPU "<<gpuMs_<<" ms · bodies "<<activeBodiesV7()<<" · mode "<<(pathTracing_.load()?"PATH_QUALITY":(rtActiveV7()?"HYBRID_HWRT":"RASTER"))<<" · budget "<<rtBudgetV7()<<" · safety "<<rtSafety_.load()<<" · scale "<<(pathTracing_.load()?0.60:0.84);logV7(l.str());telemetry=now;}
             }
-        }catch(const std::exception&e){setStatus(std::string("ERROR: Vulkan Studio v7.7: ")+e.what());logV7(std::string("ERROR: ")+e.what());}
+        }catch(const std::exception&e){setStatus(std::string("ERROR: Vulkan Studio v8.0: ")+e.what());logV7(std::string("ERROR: ")+e.what());}
         cleanupV7();cleanup();
     }
 
@@ -28,6 +28,7 @@
     std::array<Vec3,kBodyCount>omega_{};std::array<float,kBodyCount>spin_{};
     Vec3 grabPrevTarget_{},grabTargetVelocity_{};Clock::time_point grabLastUpdate_=Clock::now();
     std::atomic<float>wetness_{.78f},exposure_{-.18f},rtSafety_{1.0f};std::atomic<int>heroMaterial_{1};
+    std::atomic<float>lightIntensity_{1.0f},lightHaze_{.35f},lightBounce_{.55f};
     std::atomic<bool>deviceLost_{false};uint32_t frameSerial_=0;int slowFrames_=0;
 };
 
@@ -49,6 +50,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetHeroMaterial(JNIEnv*,jobject,jlong h,jint v){if(auto*r=ptrV7(h))r->setHeroMaterial(v);}
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetGummyBounce(JNIEnv*,jobject,jlong h,jfloat v){if(auto*r=ptrV7(h))r->setGummyBounce(v);}
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightColor(JNIEnv*,jobject,jlong h,jfloat r,jfloat g,jfloat b){if(auto*x=ptrV7(h))x->setLightColor(r,g,b);}
+extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightIntensity(JNIEnv*,jobject,jlong h,jfloat v){if(auto*x=ptrV7(h)){x->lightIntensity_=v;x->setLightIntensity(v);}}
+extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightHaze(JNIEnv*,jobject,jlong h,jfloat v){if(auto*x=ptrV7(h)){x->lightHaze_=v;x->setLightHaze(v);}}
+extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightBounce(JNIEnv*,jobject,jlong h,jfloat v){if(auto*x=ptrV7(h)){x->lightBounce_=v;x->setLightBounce(v);}}
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeResetPhysics(JNIEnv*,jobject,jlong h){if(auto*r=ptrV7(h))r->resetPhysics();}
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeGrabStart(JNIEnv*,jobject,jlong h,jfloat x,jfloat y){if(auto*r=ptrV7(h))r->grabStart(x,y);}
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeGrabLightStart(JNIEnv*,jobject,jlong h,jfloat x,jfloat y){if(auto*r=ptrV7(h))r->grabLightStart(x,y);}
