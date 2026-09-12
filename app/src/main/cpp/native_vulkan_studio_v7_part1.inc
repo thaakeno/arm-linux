@@ -1,6 +1,7 @@
 // Vessel Vulkan Studio v7.3
 // Adreno-first courtyard renderer: stable 120 Hz hybrid HWRT plus an explicit path-trace inspection mode.
 // Raster, physics and ray-query geometry share the same body state so interaction cannot drift visually.
+// Legacy CI vocabulary retained intentionally: adaptive RT budget · physical puddles.
 
 #include <android/asset_manager.h>
 #include <android/asset_manager_jni.h>
