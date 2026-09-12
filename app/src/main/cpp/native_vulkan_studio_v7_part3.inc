@@ -9,7 +9,7 @@
         darkHeight_=createTexture8("vulkan_v7/dark_rock_disp_2k.png",VK_FORMAT_R8G8B8A8_UNORM);
         darkHeightCpu_=loadHeight("vulkan_v7/dark_rock_disp_2k.png");
         environment_=createTextureHdr("vulkan_v7/evening_museum_courtyard_1k.hdr");
-        logV7("assets · PBR stone/concrete/rock loaded; HDR retained only as low-frequency ambient source");
+        logV7("assets · PBR stone/concrete/rock loaded; procedural worn body materials enabled");
     }
 
     int activeBodiesV7()const{
@@ -25,11 +25,12 @@
             b.mass=std::max(.18f,4.18879f*r*r*r*density);deformDir_[i]={0,1,0};
         };
         setup(0,{-2.15f,kFloorY+.68f,-.28f},.68f,2,.07f,.48f,19.5f,false); // heavy worn steel
-        setup(1,{ .55f,kFloorY+.72f,.30f},.72f,3,.76f,.62f,1.08f,true);      // opaque red soft rubber
-        setup(2,{-.45f,2.55f,-2.05f},.28f,4,.08f,.36f,.70f,false);           // movable emissive sphere
+        setup(1,{ .55f,kFloorY+.72f,.30f},.72f,3,.76f,.62f,1.08f,true);      // opaque red gummy rubber
+        setup(2,{-.45f,2.55f,-2.05f},.28f,4,.08f,.36f,.70f,false);           // physical emissive orb
         setup(3,{ 2.15f,kFloorY+.64f,-.10f},.64f,7,.38f,.72f,1.22f,false);   // normal used rubber ball
-        for(int i=4;i<kBodyCount;++i){
-            int n=i-4,gx=n%6,gz=n/6;float r=.22f+.020f*float((n*5)%4);
+        setup(4,{ 3.05f,kFloorY+.60f,1.55f},.60f,8,.12f,.88f,1.05f,true);    // green viscoelastic slime
+        for(int i=5;i<kBodyCount;++i){
+            int n=i-5,gx=n%6,gz=n/6;float r=.22f+.020f*float((n*5)%4);
             int mat=(n%4==0)?2:7;float density=mat==2?8.5f:1.25f;
             setup(i,{(float(gx)-2.5f)*1.05f,kFloorY+r+.10f*float(n%3),(float(gz)-1.5f)*1.02f},r,mat,.20f,.46f,density,false);
         }
@@ -44,8 +45,10 @@
 
     float supportRadiusV7(const Body&b,int i,Vec3 n)const{
         if(!b.gummy)return b.r;
-        float c=std::clamp(b.deform,-.06f,.34f);Vec3 d=deformDir_[i];float dl=len(d);if(dl<1e-5f)d={0,1,0};else d=d/dl;
-        float along=std::clamp(1.0f-c,.62f,1.08f),perp=1.0f/std::sqrt(along);float nd=std::clamp(dot(n,d),-1.0f,1.0f);float nd2=nd*nd;
+        float maxC=b.material==8?.42f:.31f;
+        float c=std::clamp(b.deform,-.05f,maxC);Vec3 d=deformDir_[i];float dl=len(d);if(dl<1e-5f)d={0,1,0};else d=d/dl;
+        float minAlong=b.material==8?.54f:.65f;
+        float along=std::clamp(1.0f-c,minAlong,1.06f),perp=1.0f/std::sqrt(along);float nd=std::clamp(dot(n,d),-1.0f,1.0f);float nd2=nd*nd;
         return b.r*std::sqrt(along*along*nd2+perp*perp*(1.0f-nd2));
     }
 
@@ -64,7 +67,7 @@
         if(pen<=0)return;if(contactR<=0)contactR=supportRadiusV7(b,i,n);b.p+=n*pen;float invM=1.0f/std::max(.08f,b.mass),invI=1.0f/std::max(.01f,.4f*b.mass*b.r*b.r);Vec3 r=n*(-contactR),rv=b.v+cross(omega_[i],r);float vn=dot(rv,n),jn=0;
         if(vn<0){jn=-(1.0f+b.restitution)*vn/invM;Vec3 J=n*jn;b.v+=J*invM;omega_[i]+=cross(r,J)*invI;}
         rv=b.v+cross(omega_[i],r);Vec3 tv=rv-n*dot(rv,n);float tl=len(tv);if(tl>1e-4f){Vec3 t=tv/tl;Vec3 rx=cross(r,t);float denom=invM+dot(cross(rx*invI,r),t);float jt=-dot(rv,t)/std::max(denom,.001f);jt=std::clamp(jt,-std::abs(jn)*b.friction,std::abs(jn)*b.friction);Vec3 F=t*jt;b.v+=F*invM;omega_[i]+=cross(r,F)*invI;}
-        if(b.gummy&&std::abs(jn)>.015f){deformDir_[i]=n;b.deformV+=std::min(2.1f,std::abs(jn)*invM*.15f);}
+        if(b.gummy&&std::abs(jn)>.012f){deformDir_[i]=n;float gain=b.material==8?.20f:.15f;b.deformV+=std::min(b.material==8?2.8f:2.1f,std::abs(jn)*invM*gain);}
     }
     void collideRoomV7(Body&b,int i){
         Vec3 nx{1,0,0},px{-1,0,0},nz{0,0,1},pz{0,0,-1},ny{0,1,0},py{0,-1,0};float rx=supportRadiusV7(b,i,nx),rpx=supportRadiusV7(b,i,px),rz=supportRadiusV7(b,i,nz),rpz=supportRadiusV7(b,i,pz),ry=supportRadiusV7(b,i,ny),rpy=supportRadiusV7(b,i,py);
@@ -77,22 +80,22 @@
         for(int k=3;k<18;++k){if(k>=8&&k<=11)continue;Vec3 c,s;bool light;archInfoV7(k,c,s,light);Vec3 lo=c-s,hi=c+s;Vec3 cp{std::clamp(b.p.x,lo.x,hi.x),std::clamp(b.p.y,lo.y,hi.y),std::clamp(b.p.z,lo.z,hi.z)};Vec3 d=b.p-cp;float dl=len(d);if(dl>1e-5f){Vec3 n=d/dl;float rr=supportRadiusV7(b,i,n);if(dl<rr)applyPlaneContactV7(b,i,n,rr-dl,rr);continue;}bool inside=b.p.x>lo.x&&b.p.x<hi.x&&b.p.y>lo.y&&b.p.y<hi.y&&b.p.z>lo.z&&b.p.z<hi.z;if(!inside)continue;float dx=std::min(b.p.x-lo.x,hi.x-b.p.x),dy=std::min(b.p.y-lo.y,hi.y-b.p.y),dz=std::min(b.p.z-lo.z,hi.z-b.p.z);Vec3 n{};float m=dx;n={(b.p.x-c.x)>=0?1.f:-1.f,0,0};if(dy<m){m=dy;n={0,(b.p.y-c.y)>=0?1.f:-1.f,0};}if(dz<m){m=dz;n={0,0,(b.p.z-c.z)>=0?1.f:-1.f};}float rr=supportRadiusV7(b,i,n);applyPlaneContactV7(b,i,n,rr+m,rr);}
     }
     void solvePairV7(int ia,int ib){
-        Body&a=bodies_[ia],&b=bodies_[ib];Vec3 d=b.p-a.p;float dist=len(d);if(dist<1e-6f)return;Vec3 n=d/dist;float raLen=supportRadiusV7(a,ia,n),rbLen=supportRadiusV7(b,ib,n*(-1.0f)),rr=raLen+rbLen;if(dist>=rr)return;float ima=1/std::max(.08f,a.mass),imb=1/std::max(.08f,b.mass),sum=ima+imb,pen=rr-dist;Vec3 corr=n*(std::max(0.f,pen-.0005f)*.82f/sum);a.p-=corr*ima;b.p+=corr*imb;
+        Body&a=bodies_[ia],&b=bodies_[ib];Vec3 d=b.p-a.p;float dist=len(d);if(dist<1e-6f)return;Vec3 n=d/dist;float raLen=supportRadiusV7(a,ia,n),rbLen=supportRadiusV7(b,ib,n*(-1.0f)),rr=raLen+rbLen;if(dist>=rr)return;float ima=1/std::max(.08f,a.mass),imb=1/std::max(.08f,b.mass),sum=ima+imb,pen=rr-dist;Vec3 corr=n*(std::max(0.f,pen-.0005f)*.88f/sum);a.p-=corr*ima;b.p+=corr*imb;
         Vec3 ra=n*raLen,rb=n*(-rbLen);Vec3 va=a.v+cross(omega_[ia],ra),vb=b.v+cross(omega_[ib],rb),rel=vb-va;float vn=dot(rel,n);if(vn>=0)return;float e=std::min(a.restitution,b.restitution),jn=-(1+e)*vn/sum;Vec3 J=n*jn;a.v-=J*ima;b.v+=J*imb;
         float iia=1/std::max(.01f,.4f*a.mass*a.r*a.r),iib=1/std::max(.01f,.4f*b.mass*b.r*b.r);rel=(b.v+cross(omega_[ib],rb))-(a.v+cross(omega_[ia],ra));Vec3 tv=rel-n*dot(rel,n);float tl=len(tv);if(tl>1e-4f){Vec3 t=tv/tl;Vec3 rax=cross(ra,t),rbx=cross(rb,t);float denom=sum+dot(cross(rax*iia,ra),t)+dot(cross(rbx*iib,rb),t);float jt=-dot(rel,t)/std::max(denom,.001f);float mu=std::sqrt(std::max(0.f,a.friction*b.friction));jt=std::clamp(jt,-jn*mu,jn*mu);Vec3 F=t*jt;a.v-=F*ima;b.v+=F*imb;omega_[ia]-=cross(ra,F)*iia;omega_[ib]+=cross(rb,F)*iib;}
-        if(a.gummy){deformDir_[ia]=n;a.deformV+=std::abs(jn)*ima*.14f;}if(b.gummy){deformDir_[ib]=n*(-1.0f);b.deformV+=std::abs(jn)*imb*.14f;}
+        if(a.gummy){deformDir_[ia]=n;a.deformV+=std::abs(jn)*ima*(a.material==8?.18f:.14f);}if(b.gummy){deformDir_[ib]=n*(-1.0f);b.deformV+=std::abs(jn)*imb*(b.material==8?.18f:.14f);}
     }
     void physicsStepV7(float dt){
-        std::lock_guard<std::mutex>lock(bodyMutex_);if(!physics_.load())return;int n=activeBodiesV7();float simDt=std::clamp(dt,0.0f,.050f);int sub=std::clamp(int(std::ceil(simDt/.0038f)),4,14);float h=simDt/float(sub);
+        std::lock_guard<std::mutex>lock(bodyMutex_);if(!physics_.load())return;int n=activeBodiesV7();float simDt=std::clamp(dt,0.0f,.050f);int sub=std::clamp(int(std::ceil(simDt/.0036f)),4,14);float h=simDt/float(sub);
         for(int s=0;s<sub;++s){
-            for(int i=0;i<n;++i){Body&b=bodies_[i];b.v.y-=9.81f*h;if(i==grabbed_){Vec3 err=grabTarget_-b.p;Vec3 acc=err*72.0f+(grabTargetVelocity_-b.v)*17.5f;float al=len(acc);if(al>98)acc=acc*(98/al);b.v+=acc*h;}b.v=b.v*std::exp(-.018f*h);omega_[i]=omega_[i]*std::exp(-.12f*h);b.p+=b.v*h;collideRoomV7(b,i);collideHeroV7(b,i);collideArchitectureV7(b,i);spin_[i]+=len(omega_[i])*h;}
-            for(int it=0;it<5;++it)for(int i=0;i<n;++i)for(int j=i+1;j<n;++j)solvePairV7(i,j);
-            for(int i=0;i<n;++i)if(bodies_[i].gummy){Body&b=bodies_[i];constexpr float spring=47.0f,damping=6.9f;b.deformV+=(-spring*b.deform-damping*b.deformV)*h;b.deform+=b.deformV*h;b.deform=std::clamp(b.deform,-.05f,.31f);if(std::abs(b.deform)<.0015f&&std::abs(b.deformV)<.012f)deformDir_[i]={0,1,0};}
+            for(int i=0;i<n;++i){Body&b=bodies_[i];b.v.y-=9.81f*h;if(i==grabbed_){Vec3 err=grabTarget_-b.p;float kp=b.material==8?48.0f:72.0f, kd=b.material==8?13.0f:17.5f;Vec3 acc=err*kp+(grabTargetVelocity_-b.v)*kd;float al=len(acc);if(al>92)acc=acc*(92/al);b.v+=acc*h;}float drag=b.material==8?.12f:.018f;b.v=b.v*std::exp(-drag*h);omega_[i]=omega_[i]*std::exp(-(b.material==8?.55f:.12f)*h);b.p+=b.v*h;collideRoomV7(b,i);collideHeroV7(b,i);collideArchitectureV7(b,i);if(b.material==8){float ry=supportRadiusV7(b,i,{0,1,0});if(b.p.y-ry<kFloorY+.018f&&std::abs(b.v.y)<1.8f){float stick=std::exp(-2.6f*h);b.v.x*=stick;b.v.z*=stick;}}spin_[i]+=len(omega_[i])*h;}
+            for(int it=0;it<6;++it)for(int i=0;i<n;++i)for(int j=i+1;j<n;++j)solvePairV7(i,j);
+            for(int i=0;i<n;++i)if(bodies_[i].gummy){Body&b=bodies_[i];float spring=b.material==8?18.0f:47.0f,damping=b.material==8?7.8f:6.9f,maxDef=b.material==8?.42f:.31f;b.deformV+=(-spring*b.deform-damping*b.deformV)*h;b.deform+=b.deformV*h;b.deform=std::clamp(b.deform,-.05f,maxDef);if(std::abs(b.deform)<.0015f&&std::abs(b.deformV)<.012f)deformDir_[i]={0,1,0};}
         }
     }
-    void updateBodyGpuV7(){if(!bodyMapped_)return;std::lock_guard<std::mutex>lock(bodyMutex_);auto*out=reinterpret_cast<BodyGpu*>(bodyMapped_);for(int i=0;i<kBodyCount;++i){const Body&b=bodies_[i];Vec3 d=deformDir_[i];float dl=len(d);if(dl<1e-4f)d={0,1,0};else d=d/dl;out[i]={{b.p.x,b.p.y,b.p.z,b.r},{b.v.x,b.v.y,b.v.z,b.mass},{b.deform,d.x,d.y,d.z},{b.material,b.gummy?1:0,0,0}};}}
+    void updateBodyGpuV7(){if(!bodyMapped_)return;std::lock_guard<std::mutex>lock(bodyMutex_);auto*out=reinterpret_cast<BodyGpu*>(bodyMapped_);for(int i=0;i<kBodyCount;++i){const Body&b=bodies_[i];Vec3 d=deformDir_[i];float dl=len(d);if(dl<1e-4f)d={0,1,0};else d=d/dl;out[i]={{b.p.x,b.p.y,b.p.z,b.r},{b.v.x,b.v.y,b.v.z,b.mass},{b.deform,d.x,d.y,d.z},{b.material,b.gummy?1:0,b.material==8?1:0,0}};}}
 
     void screenRayV7(float nx,float ny,Vec3&ro,Vec3&rd)const{float yaw=yaw_.load(),pitch=pitch_.load(),cp=std::cos(pitch);ro=cameraDistance_.load()*Vec3{cp*std::sin(yaw),std::sin(pitch),cp*std::cos(yaw)}+Vec3{0,.38f,1.70f};Vec3 target{0,-.15f,-.15f};Vec3 f=norm(target-ro),r=norm(cross(f,{0,1,0})),u=norm(cross(r,f));float x=nx*2-1,y=1-ny*2,aspect=float(std::max(1,visibleW_.load()))/float(std::max(1,visibleH_.load()));float tanHalf=std::tan(34.0f*kPi/360.0f);rd=norm(f+r*(x*aspect*tanHalf)+u*(y*tanHalf));}
-    void grabStartImpl(float nx,float ny,bool forceLight){std::lock_guard<std::mutex>lock(bodyMutex_);Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);int bestIndex=forceLight?2:-1;float best=1e9f;if(forceLight){Vec3 to=bodies_[2].p-ro;best=std::max(.45f,dot(to,rd));}else{for(int i=0;i<activeBodiesV7();++i){if(i==2)continue;const Body&b=bodies_[i];float pickR=b.r*1.22f+.045f;Vec3 oc=ro-b.p;float qb=dot(oc,rd),cc=dot(oc,oc)-pickR*pickR,disc=qb*qb-cc;if(disc<0)continue;float t=-qb-std::sqrt(disc);if(t>.02f&&t<best){best=t;bestIndex=i;}}}grabbed_=bestIndex;grabDepth_=best;if(grabbed_>=0){grabTarget_=ro+rd*best;grabPrevTarget_=grabTarget_;grabTargetVelocity_={};grabLastUpdate_=Clock::now();logV7Unlocked(std::string("grab ")+(grabbed_==2?"MOVABLE LIGHT":grabbed_==1?"GUMMY":grabbed_==0?"HEAVY METAL":"NORMAL BALL"));}}
+    void grabStartImpl(float nx,float ny,bool forceLight){std::lock_guard<std::mutex>lock(bodyMutex_);Vec3 ro,rd;screenRayV7(nx,ny,ro,rd);int bestIndex=forceLight?2:-1;float best=1e9f;if(forceLight){Vec3 to=bodies_[2].p-ro;best=std::max(.65f,dot(to,rd));}else{for(int i=0;i<activeBodiesV7();++i){if(i==2)continue;const Body&b=bodies_[i];float pickR=b.r*1.18f+.035f;Vec3 oc=ro-b.p;float qb=dot(oc,rd),cc=dot(oc,oc)-pickR*pickR,disc=qb*qb-cc;if(disc<0)continue;float t=-qb-std::sqrt(disc);if(t>.02f&&t<best){best=t;bestIndex=i;}}}grabbed_=bestIndex;if(grabbed_>=0){best=std::max(best,bodies_[grabbed_].r*1.70f+.32f);}grabDepth_=best;if(grabbed_>=0){grabTarget_=ro+rd*best;grabPrevTarget_=grabTarget_;grabTargetVelocity_={};grabLastUpdate_=Clock::now();const char*name=grabbed_==2?"MOVABLE LIGHT":grabbed_==1?"GUMMY":grabbed_==0?"HEAVY METAL":grabbed_==4?"SLIME":"NORMAL BALL";logV7Unlocked(std::string("grab ")+name);}}
 
     std::array<Vec3,kBodyCount>deformDir_{};
