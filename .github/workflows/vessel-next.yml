@@ -95,7 +95,7 @@ jobs:
                   'adaptive RT budget', 'physical puddles', 'setWetness', 'setHeroMaterial'
               ],
               'app/src/main/cpp/native_vulkan_studio_v7_part4.inc': [
-                  'cmdUpdateTlasV7', 'SAFE RT', 'rtBudgetV7', 'VK_ERROR_DEVICE_LOST'
+                  'cmdUpdateTlasV7', 'rtBudgetV7', 'VK_ERROR_DEVICE_LOST', 'adaptRtSafetyV7'
               ],
               'app/src/main/cpp/shaders/native_studio_v7_rt.frag': [
                   'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceScene', 'localTransmissionThroughGummy', 'rtBudget'
