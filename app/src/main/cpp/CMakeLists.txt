@@ -46,22 +46,23 @@ function(vessel_shader SOURCE STAGE SYMBOL)
     set(VESSEL_SHADER_OUTPUTS ${VESSEL_SHADER_OUTPUTS} "${HEADER}" PARENT_SCOPE)
 endfunction()
 
-# v3 is retained only as the battle-tested Vulkan device/swapchain bootstrap used internally by v6.
+# v3 is retained only as the battle-tested Vulkan device/swapchain/bootstrap layer.
 vessel_shader(shaders/native_studio_v3.vert vert native_studio_v3_vert)
 vessel_shader(shaders/native_studio_v3.frag frag native_studio_v3_frag)
 vessel_shader(shaders/native_studio_v3_rt.frag frag native_studio_v3_rt_frag)
 
-# v6 is the actual benchmark scene: textured PBR courtyard + HDR IBL + hybrid ray queries.
-vessel_shader(shaders/native_studio_v6.vert vert native_studio_v6_vert)
-vessel_shader(shaders/native_studio_v6.frag frag native_studio_v6_frag)
-vessel_shader(shaders/native_studio_v6_rt.frag frag native_studio_v6_rt_frag)
+# v7 is the actual benchmark scene and rendering path.
+vessel_shader(shaders/native_studio_v7.vert vert native_studio_v7_vert)
+vessel_shader(shaders/native_studio_v7.frag frag native_studio_v7_frag)
+vessel_shader(shaders/native_studio_v7_rt.frag frag native_studio_v7_rt_frag)
 add_custom_target(vessel_vulkan_shaders DEPENDS ${VESSEL_SHADER_OUTPUTS})
 
 # Historical validation markers:
 # add_library(vessel_vulkan SHARED native_vulkan_studio_v3.cpp)
 # add_library(vessel_vulkan SHARED native_vulkan_studio_v4.cpp)
 # add_library(vessel_vulkan SHARED native_vulkan_studio_v5.cpp)
-add_library(vessel_vulkan SHARED native_vulkan_studio_v6.cpp)
+# add_library(vessel_vulkan SHARED native_vulkan_studio_v6.cpp)
+add_library(vessel_vulkan SHARED native_vulkan_studio_v7.cpp)
 add_dependencies(vessel_vulkan vessel_vulkan_shaders)
 target_compile_features(vessel_vulkan PRIVATE cxx_std_20)
 target_compile_definitions(vessel_vulkan PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
