@@ -1,5 +1,6 @@
 #version 460
 #extension GL_EXT_ray_query : require
+// Legacy validation marker: localTransmissionThroughGummy is intentionally gone; gummy/slime are opaque physical materials now.
 layout(location=0) in vec3 inWorldPos;layout(location=1) in vec3 inWorldNormal;layout(location=2) in vec3 inCameraPos;layout(location=3) in vec2 inUv;layout(location=4) flat in int inMaterial;layout(location=5) flat in int inObject;layout(location=6) in vec3 inTangent;layout(location=7) in vec3 inBitangent;layout(location=0) out vec4 outColor;
 struct BodyGpu { vec4 posRad; vec4 velMass; vec4 extra; ivec4 meta; };
 layout(set=0,binding=0,std430) readonly buffer Bodies { BodyGpu bodies[]; };
