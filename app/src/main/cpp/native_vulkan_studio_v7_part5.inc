@@ -50,9 +50,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetHeroMaterial(JNIEnv*,jobject,jlong h,jint v){if(auto*r=ptrV7(h))r->setHeroMaterial(v);}
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetGummyBounce(JNIEnv*,jobject,jlong h,jfloat v){if(auto*r=ptrV7(h))r->setGummyBounce(v);}
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightColor(JNIEnv*,jobject,jlong h,jfloat r,jfloat g,jfloat b){if(auto*x=ptrV7(h))x->setLightColor(r,g,b);}
-extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightIntensity(JNIEnv*,jobject,jlong h,jfloat v){if(auto*x=ptrV7(h)){x->lightIntensity_=v;x->setLightIntensity(v);}}
-extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightHaze(JNIEnv*,jobject,jlong h,jfloat v){if(auto*x=ptrV7(h)){x->lightHaze_=v;x->setLightHaze(v);}}
-extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightBounce(JNIEnv*,jobject,jlong h,jfloat v){if(auto*x=ptrV7(h)){x->lightBounce_=v;x->setLightBounce(v);}}
+extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightIntensity(JNIEnv*,jobject,jlong h,jfloat v){if(auto*x=ptrV7(h))x->setLightIntensity(v);}
+extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightHaze(JNIEnv*,jobject,jlong h,jfloat v){if(auto*x=ptrV7(h))x->setLightHaze(v);}
+extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeSetLightBounce(JNIEnv*,jobject,jlong h,jfloat v){if(auto*x=ptrV7(h))x->setLightBounce(v);}
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeResetPhysics(JNIEnv*,jobject,jlong h){if(auto*r=ptrV7(h))r->resetPhysics();}
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeGrabStart(JNIEnv*,jobject,jlong h,jfloat x,jfloat y){if(auto*r=ptrV7(h))r->grabStart(x,y);}
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_NativeCubeActivity_nativeGrabLightStart(JNIEnv*,jobject,jlong h,jfloat x,jfloat y){if(auto*r=ptrV7(h))r->grabLightStart(x,y);}
