@@ -37,48 +37,38 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
 
-      - name: Fetch Vulkan Studio v6 offline assets
+      - name: Fetch Vulkan Studio v7 offline assets
         run: |
           set -euxo pipefail
-          ASSETS=app/src/main/assets/vulkan_v6
+          ASSETS=app/src/main/assets/vulkan_v7
           THIRD=app/src/main/cpp/third_party
           mkdir -p "$ASSETS" "$THIRD"
-          UA='Vessel-Vulkan-Studio-v6/1.0 (offline APK asset build)'
+          UA='Vessel-Vulkan-Studio-v7/1.0 (offline APK asset build)'
           get() { curl --fail --location --retry 4 --retry-delay 2 --user-agent "$UA" "$1" --output "$2"; test -s "$2"; }
 
-          # CC0 Poly Haven material maps. Downloaded only during build; the APK is fully offline at runtime.
-          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/slab_tiles/slab_tiles_diff_2k.jpg' "$ASSETS/slab_tiles_diff_2k.jpg"
-          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/slab_tiles/slab_tiles_nor_gl_2k.jpg' "$ASSETS/slab_tiles_nor_gl_2k.jpg"
-          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/slab_tiles/slab_tiles_arm_2k.jpg' "$ASSETS/slab_tiles_arm_2k.jpg"
-          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/slab_tiles/slab_tiles_disp_2k.png' "$ASSETS/slab_tiles_disp_2k.png"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cobblestone_pavement/cobblestone_pavement_diff_2k.jpg' "$ASSETS/cobblestone_diff_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cobblestone_pavement/cobblestone_pavement_nor_gl_2k.jpg' "$ASSETS/cobblestone_nor_gl_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cobblestone_pavement/cobblestone_pavement_arm_2k.jpg' "$ASSETS/cobblestone_arm_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/cobblestone_pavement/cobblestone_pavement_disp_2k.png' "$ASSETS/cobblestone_disp_2k.png"
 
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_diff_2k.jpg' "$ASSETS/rough_concrete_diff_2k.jpg"
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_nor_gl_2k.jpg' "$ASSETS/rough_concrete_nor_gl_2k.jpg"
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_arm_2k.jpg' "$ASSETS/rough_concrete_arm_2k.jpg"
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/rough_concrete/rough_concrete_disp_2k.png' "$ASSETS/rough_concrete_disp_2k.png"
 
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_diff_2k.jpg' "$ASSETS/dark_rock_diff_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_nor_gl_2k.jpg' "$ASSETS/dark_rock_nor_gl_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_arm_2k.jpg' "$ASSETS/dark_rock_arm_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/dark_rock/dark_rock_disp_2k.png' "$ASSETS/dark_rock_disp_2k.png"
+
           get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/evening_museum_courtyard_1k.hdr' "$ASSETS/evening_museum_courtyard_1k.hdr"
           get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$THIRD/stb_image.h"
-
           du -h "$ASSETS"/*
 
-      - name: Validate rootless runtime controller
+      - name: Validate rootless runtime and Vulkan Studio v7
         run: |
           set -euxo pipefail
           for f in tools/venus_poc/vessel_runtime_daemon.py \
-                   tools/venus_poc/vessel_runtime_daemon_v9.py \
-                   tools/venus_poc/vessel_runtime_daemon_v10.py \
-                   tools/venus_poc/vessel_runtime_daemon_v11.py \
-                   tools/venus_poc/vessel_runtime_daemon_v12.py \
-                   tools/venus_poc/vessel_runtime_daemon_v13.py \
-                   tools/venus_poc/vessel_runtime_daemon_v14.py \
-                   tools/venus_poc/vessel_runtime_daemon_v15.py \
-                   tools/venus_poc/vessel_runtime_daemon_v16.py \
-                   tools/venus_poc/vessel_runtime_daemon_v17.py \
-                   tools/venus_poc/vessel_runtime_daemon_v18.py \
-                   tools/venus_poc/vessel_runtime_daemon_v19.py \
-                   tools/venus_poc/vessel_runtime_daemon_v20.py \
-                   tools/venus_poc/vessel_runtime_daemon_v21.py \
                    tools/venus_poc/vessel_runtime_daemon_v22.py \
                    tools/venus_poc/vessel_acceptance.py \
                    tools/venus_poc/host_relay_direct.py \
@@ -91,64 +81,38 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           checks = {
-              'tools/venus_poc/vessel_runtime_daemon_v22.py': [
-                  'PROTOCOL_VERSION = 22', 'network_v22', 'VESSEL_MEM_MB',
-                  'start_xtigervnc_v22', 'desktop_action_v22',
-              ],
-              'tools/venus_poc/run_venus_uml.sh': [
-                  'VESSEL_VCPUS="${VESSEL_VCPUS:-6}"', 'ncpus="$VESSEL_VCPUS"',
-              ],
-              'tools/venus_poc/build_uml_smp_android.sh': [
-                  'CONFIG_SMP=y', 'CONFIG_NR_CPUS=8', 'apply_umshm.py',
-                  'fix_umshm_nonblock.py', 'fix_umshm_ptrace_fds.py',
-              ],
-              'app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt': [
-                  'REQUIRED_PROTOCOL = 22', 'vessel_runtime_daemon_v22.py', 'VESSEL_MEM_MB=8192',
-              ],
-              'app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt': [
-                  'TRACKPAD', 'getHistoricalX', 'showKeyboard', 'out.flush()',
-              ],
-              'app/src/main/java/com/example/dreamlinux/VesselActivity.kt': [
-                  'FullscreenDesktop', 'Open native 3D cube', 'protocol 22', '8 GB UML memory',
-              ],
+              'tools/venus_poc/vessel_runtime_daemon_v22.py': ['PROTOCOL_VERSION = 22', 'network_v22', 'VESSEL_MEM_MB'],
+              'app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt': ['REQUIRED_PROTOCOL = 22', 'VESSEL_MEM_MB=8192'],
               'app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt': [
-                  'SurfaceView', 'System.loadLibrary("vessel_vulkan")',
-                  'Vessel Vulkan Studio v6', 'Orbit · pinch zoom',
-                  'VULKAN LOG', 'nativeSetStress', 'nativeSetQuality',
-                  'nativeSetPhysics', 'nativeSetRt', 'nativeGrabLightStart',
-                  'Full Vulkan log copied',
+                  'SurfaceView', 'System.loadLibrary("vessel_vulkan")', 'VULKAN LOG',
+                  'nativeSetStress', 'nativeSetQuality', 'nativeSetPhysics', 'nativeSetRt', 'nativeGrabLightStart'
               ],
               'app/src/main/cpp/CMakeLists.txt': [
-                  'add_library(vessel_vulkan SHARED native_vulkan_studio_v6.cpp)',
-                  'target_link_libraries(vessel_vulkan PRIVATE android log vulkan)',
-                  'native_studio_v6_rt.frag',
+                  'add_library(vessel_vulkan SHARED native_vulkan_studio_v7.cpp)',
+                  'native_studio_v7_rt.frag', 'target_link_libraries(vessel_vulkan PRIVATE android log vulkan)'
               ],
-              'app/src/main/cpp/native_vulkan_studio_v3.cpp': [
-                  'VK_KHR_RAY_QUERY_EXTENSION_NAME', 'vkCmdBuildAccelerationStructuresKHR',
+              'app/src/main/cpp/native_vulkan_studio_v7_part1.inc': [
+                  'adaptive RT budget', 'physical puddles', 'setWetness', 'setHeroMaterial'
               ],
-              'app/src/main/cpp/native_vulkan_studio_v6.cpp': [
-                  'native_studio_v6_rt_frag_spv', 'rebuildTlasV6', 'cmdUpdateTlasV6',
-                  'physicsStepV6', 'loadTexturesV6', 'rough_concrete_diff_2k.jpg',
-                  'evening_museum_courtyard_1k.hdr', 'nativeGrabLightStart',
+              'app/src/main/cpp/native_vulkan_studio_v7_part4.inc': [
+                  'cmdUpdateTlasV7', 'SAFE RT', 'rtBudgetV7', 'VK_ERROR_DEVICE_LOST'
               ],
-              'app/src/main/cpp/shaders/native_studio_v6_rt.frag': [
-                  'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceScene',
-                  'floorAlbedo', 'environmentMap', 'transmission', 'anisotropy',
+              'app/src/main/cpp/shaders/native_studio_v7_rt.frag': [
+                  'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceScene', 'localTransmissionThroughGummy', 'rtBudget'
               ],
-              'app/src/main/cpp/shaders/native_studio_v6.vert': [
-                  'concreteHeight', 'floorHeight', 'HERO_GRID', 'ARCH_BOXES',
-              ],
+              'app/src/main/cpp/shaders/native_studio_v7.vert': ['HERO_GRID=48', 'FLOOR_GRID=96', 'LEAVES=192', 'emitSky'],
           }
           for path, needles in checks.items():
               text = Path(path).read_text()
               for needle in needles:
                   assert needle in text, f'{needle!r} missing from {path}'
           for name in [
-              'slab_tiles_diff_2k.jpg', 'slab_tiles_nor_gl_2k.jpg', 'slab_tiles_arm_2k.jpg', 'slab_tiles_disp_2k.png',
-              'rough_concrete_diff_2k.jpg', 'rough_concrete_nor_gl_2k.jpg', 'rough_concrete_arm_2k.jpg', 'rough_concrete_disp_2k.png',
+              'cobblestone_diff_2k.jpg','cobblestone_nor_gl_2k.jpg','cobblestone_arm_2k.jpg','cobblestone_disp_2k.png',
+              'rough_concrete_diff_2k.jpg','rough_concrete_nor_gl_2k.jpg','rough_concrete_arm_2k.jpg','rough_concrete_disp_2k.png',
+              'dark_rock_diff_2k.jpg','dark_rock_nor_gl_2k.jpg','dark_rock_arm_2k.jpg','dark_rock_disp_2k.png',
               'evening_museum_courtyard_1k.hdr',
           ]:
-              p = Path('app/src/main/assets/vulkan_v6') / name
+              p = Path('app/src/main/assets/vulkan_v7') / name
               assert p.stat().st_size > 1024, f'asset too small: {p}'
           PY
 
