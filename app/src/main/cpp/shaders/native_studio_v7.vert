@@ -65,10 +65,10 @@ void archInfo(int block,out vec3 c,out vec3 s,out int mat){
     else if(block==5){c=vec3(0,-.50,-5.85);s=vec3(2.55,.50,.50);mat=12;}
     else if(block==6){c=vec3(-5.42,1.28,-5.72);s=vec3(.34,2.18,.34);}
     else if(block==7){c=vec3(5.42,1.28,-5.72);s=vec3(.34,2.18,.34);}
-    else if(block==8){c=vec3(-5.30,1.42,-5.30);s=vec3(.045,1.18,.045);mat=4;}
-    else if(block==9){c=vec3(5.30,1.42,-5.30);s=vec3(.045,1.18,.045);mat=4;}
-    else if(block==10){c=vec3(-2.55,.05,-6.76);s=vec3(.042,.62,.042);mat=4;}
-    else if(block==11){c=vec3(2.55,.05,-6.76);s=vec3(.042,.62,.042);mat=4;}
+    else if(block==8){c=vec3(-5.30,1.42,-5.30);s=vec3(.075,.52,.075);mat=15;}
+    else if(block==9){c=vec3(5.30,1.42,-5.30);s=vec3(.075,.52,.075);mat=15;}
+    else if(block==10){c=vec3(-2.55,.34,-6.70);s=vec3(.075,.52,.075);mat=15;}
+    else if(block==11){c=vec3(2.55,.34,-6.70);s=vec3(.075,.52,.075);mat=15;}
     else if(block==12){c=vec3(-3.75,-.52,4.95);s=vec3(1.25,.12,.44);mat=14;}
     else if(block==13){c=vec3(-4.60,-.76,4.95);s=vec3(.10,.36,.36);mat=12;}
     else if(block==14){c=vec3(-2.90,-.76,4.95);s=vec3(.10,.36,.36);mat=12;}
@@ -86,7 +86,7 @@ void emitLeaf(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,ou
 }
 void emitSky(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){int face=local/6,corner=local-face*6;vec2 q=quadCorner(corner);P=boxPos(face,q)*45.0;N=-boxN(face);uv=q*.5+.5;M=13;O=900;basisFromNormal(N,T,B);}
 void emitArchitecture(int local,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
-    int boxes=ARCH_BOXES*BOX_VERTS;if(local<boxes){int block=local/BOX_VERTS,l=local-block*BOX_VERTS;vec3 c,s;int mat;archInfo(block,c,s,mat);emitBox(l,c,s,mat,2+block,P,N,uv,M,O,T,B);return;}
+    int boxes=ARCH_BOXES*BOX_VERTS;if(local<boxes){int block=local/BOX_VERTS,l=local-block*BOX_VERTS;vec3 c,s;int mat;archInfo(block,c,s,mat);emitBox(l,c,s,mat,2+block,P,N,uv,M,O,T,B);if(block>=8&&block<=11){float fy=clamp((P.y-(c.y-s.y))/max(2.0*s.y,.001),0.0,1.0);float taper=mix(1.0,.20,smoothstep(.18,1.0,fy));P.xz=c.xz+(P.xz-c.xz)*taper;float sway=sin(pc.time*3.1+float(block)*1.71+fy*3.0)*.030*fy;P.x+=sway;P.z+=cos(pc.time*2.6+float(block)*.91+fy*2.0)*.018*fy;N=normalize(N+vec3(sway*.8,0,.02*sin(pc.time*2.2+float(block))));basisFromNormal(N,T,B);}return;}
     int leafLocal=local-boxes;if(leafLocal<LEAF_VERTS){emitLeaf(leafLocal,P,N,uv,M,O,T,B);return;}emitSky(leafLocal-LEAF_VERTS,P,N,uv,M,O,T,B);
 }
 
@@ -94,32 +94,16 @@ vec3 spherePoint(float u,float v){float th=u*2.0*PI,ph=v*PI,s=sin(ph);return vec
 void poleSafeSphereVertex(int local,int su,int sv,out vec3 n,out vec2 uv){
     int cell=local/6,corner=local-cell*6,x=cell%su,y=cell/su; float u0=float(x)/float(su),u1=float(x+1)/float(su),v0=float(y)/float(sv),v1=float(y+1)/float(sv);
     vec3 p0,p1,p2; vec2 t0,t1,t2;
-    if(y==0){
-        if(corner>=3){n=vec3(0,1,0);uv=vec2((u0+u1)*.5,0);return;}
-        p0=vec3(0,1,0);p1=spherePoint(u1,v1);p2=spherePoint(u0,v1);t0=vec2((u0+u1)*.5,0);t1=vec2(u1,v1);t2=vec2(u0,v1);
-        n=corner==0?p0:(corner==1?p1:p2);uv=corner==0?t0:(corner==1?t1:t2);
-    }else if(y==sv-1){
-        if(corner>=3){n=vec3(0,-1,0);uv=vec2((u0+u1)*.5,1);return;}
-        p0=spherePoint(u0,v0);p1=spherePoint(u1,v0);p2=vec3(0,-1,0);t0=vec2(u0,v0);t1=vec2(u1,v0);t2=vec2((u0+u1)*.5,1);
-        n=corner==0?p0:(corner==1?p1:p2);uv=corner==0?t0:(corner==1?t1:t2);
-    }else{
-        vec2 tc=triCorner(corner);float u=(float(x)+tc.x)/float(su),v=(float(y)+tc.y)/float(sv);n=spherePoint(u,v);uv=vec2(u,v);
-    }
+    if(y==0){if(corner>=3){n=vec3(0,1,0);uv=vec2((u0+u1)*.5,0);return;}p0=vec3(0,1,0);p1=spherePoint(u1,v1);p2=spherePoint(u0,v1);t0=vec2((u0+u1)*.5,0);t1=vec2(u1,v1);t2=vec2(u0,v1);n=corner==0?p0:(corner==1?p1:p2);uv=corner==0?t0:(corner==1?t1:t2);}
+    else if(y==sv-1){if(corner>=3){n=vec3(0,-1,0);uv=vec2((u0+u1)*.5,1);return;}p0=spherePoint(u0,v0);p1=spherePoint(u1,v0);p2=vec3(0,-1,0);t0=vec2(u0,v0);t1=vec2(u1,v0);t2=vec2((u0+u1)*.5,1);n=corner==0?p0:(corner==1?p1:p2);uv=corner==0?t0:(corner==1?t1:t2);}
+    else{vec2 tc=triCorner(corner);float u=(float(x)+tc.x)/float(su),v=(float(y)+tc.y)/float(sv);n=spherePoint(u,v);uv=vec2(u,v);}
 }
 void sphereVertex(int local,int su,int sv,int bodyIndex,out vec3 P,out vec3 N,out vec2 uv,out int M,out int O,out vec3 T,out vec3 B){
     vec3 n;poleSafeSphereVertex(local,su,sv,n,uv);BodyGpu body=bodies[bodyIndex];vec3 lp=n*body.posRad.w;
     if(body.meta.y==1){
         bool slime=body.meta.z==1;float c=clamp(body.extra.x,-.030,slime?.58:(body.meta.x==3?.48:.34));vec3 d=body.extra.yzw;float dl=length(d);d=dl>.0001?d/dl:vec3(0,1,0);
-        float minAlong=slime?.40:(body.meta.x==3?.54:.66),alongScale=clamp(1.0-c,minAlong,1.030),perpScale=inversesqrt(alongScale),nd=dot(n,d),a=dot(lp,d);vec3 along=d*a,perp=lp-along;
-        lp=along*alongScale+perp*perpScale;
-        vec3 vel=body.velMass.xyz;float speed=length(vel);
-        if(slime){
-            float lower=1.0-smoothstep(-.72,.28,n.y),belly=1.0-smoothstep(-.15,.72,abs(n.y));float spread=1.0+c*(.32+.55*lower);lp.xz*=spread;
-            float hs=length(vel.xz),flowAmt=clamp(hs/3.2,0.0,1.0);vec2 flow=hs>.01?vel.xz/hs:vec2(0);lp.xz+=flow*(body.posRad.w*.12*flowAmt*(.30+.70*belly));
-            float wobble=(sin(n.x*5.3+pc.time*4.1)+sin(n.z*6.1-pc.time*3.2))*.5;lp+=n*(body.posRad.w*.022*wobble*flowAmt*(.35+.65*belly));
-        }else if(speed>.10){
-            vec3 vd=vel/speed;float stretch=clamp(speed/8.0,0.0,1.0)*(body.meta.x==3?.075:.040),proj=dot(lp,vd);vec3 axial=vd*proj,radial=lp-axial;lp=axial*(1.0+stretch)+radial*(1.0-.5*stretch);
-        }
+        float minAlong=slime?.40:(body.meta.x==3?.54:.66),alongScale=clamp(1.0-c,minAlong,1.030),perpScale=inversesqrt(alongScale),nd=dot(n,d),a=dot(lp,d);vec3 along=d*a,perp=lp-along;lp=along*alongScale+perp*perpScale;
+        if(slime){float lower=1.0-smoothstep(-.70,.18,n.y);float dent=.030*c*(.5+.5*sin(n.x*5.1+n.z*3.7));lp.xz*=1.0-dent;float flatY=-body.posRad.w*alongScale*.82;lp.y=max(lp.y,flatY);lp.y-=body.posRad.w*c*.025*lower;}
         n=normalize(d*nd/max(alongScale,.001)+(n-d*nd)/max(perpScale,.001));
     }
     P=body.posRad.xyz+lp;N=normalize(n);M=body.meta.x;O=bodyIndex+STATIC_INSTANCES;basisFromNormal(N,T,B);
