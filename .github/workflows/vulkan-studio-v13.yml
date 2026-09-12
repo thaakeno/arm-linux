@@ -51,11 +51,12 @@ jobs:
       - name: Apply v13 source stack
         run: |
           set -euxo pipefail
-          python3 -m py_compile tools/venus_poc/apply_v11_showcase.py tools/venus_poc/apply_v12_showcase.py tools/venus_poc/apply_v12_shader_fix.py tools/venus_poc/apply_v13_jolt_playground.py
+          python3 -m py_compile tools/venus_poc/apply_v11_showcase.py tools/venus_poc/apply_v12_showcase.py tools/venus_poc/apply_v12_shader_fix.py tools/venus_poc/apply_v13_jolt_playground.py tools/venus_poc/apply_v13_postfix.py
           python3 tools/venus_poc/apply_v11_showcase.py
           python3 tools/venus_poc/apply_v12_showcase.py
           python3 tools/venus_poc/apply_v12_shader_fix.py
           python3 tools/venus_poc/apply_v13_jolt_playground.py
+          python3 tools/venus_poc/apply_v13_postfix.py
       - name: Validate v13 Jolt integration
         run: |
           set -euxo pipefail
@@ -69,7 +70,6 @@ jobs:
           grep -F 'Studio v13.0' app/src/main/cpp/native_vulkan_studio_v7_part1.inc
           grep -F 'Vulkan Studio v13.0' app/src/main/cpp/shaders/native_studio_v7_rt.frag
           grep -F 'pc.firstPerson' app/src/main/cpp/shaders/native_studio_v7.vert
-          nl -ba app/src/main/cpp/shaders/native_studio_v7_rt.frag | sed -n '84,112p'
           GLSLC="$ANDROID_HOME/ndk/29.0.14206865/shader-tools/linux-x86_64/glslc"
           "$GLSLC" --target-env=vulkan1.2 -fshader-stage=frag app/src/main/cpp/shaders/native_studio_v7_rt.frag -o /tmp/v13-rt.spv
           "$GLSLC" --target-env=vulkan1.2 -fshader-stage=vert app/src/main/cpp/shaders/native_studio_v7.vert -o /tmp/v13.vert.spv
