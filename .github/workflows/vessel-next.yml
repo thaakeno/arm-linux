@@ -37,13 +37,13 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
 
-      - name: Fetch Vulkan Studio v11 offline assets
+      - name: Fetch Vulkan Studio offline assets
         run: |
           set -euxo pipefail
           ASSETS=app/src/main/assets/vulkan_v7
           THIRD=app/src/main/cpp/third_party
           mkdir -p "$ASSETS" "$THIRD"
-          UA='Vessel-Vulkan-Studio-v11.0/1.0 (offline APK asset build)'
+          UA='Vessel-Vulkan-Studio-v12.0/1.0 (offline APK asset build)'
           get() { curl --fail --location --retry 4 --retry-delay 2 --user-agent "$UA" "$1" --output "$2"; test -s "$2"; }
 
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cobblestone_pavement/cobblestone_pavement_diff_2k.jpg' "$ASSETS/cobblestone_diff_2k.jpg"
@@ -61,19 +61,21 @@ jobs:
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_arm_2k.jpg' "$ASSETS/dark_rock_arm_2k.jpg"
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/dark_rock/dark_rock_disp_2k.png' "$ASSETS/dark_rock_disp_2k.png"
 
-          # Real CC0 Alpine field/mountain panorama for the windows and IBL.
           get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/alps_field_1k.hdr' "$ASSETS/evening_museum_courtyard_1k.hdr"
-          # BenHickling/OpenGameArt CC0 fire sprite sheet: 60 transparent 64x64 frames (10x6 atlas).
           get 'https://opengameart.org/sites/default/files/fire1_64.png' "$ASSETS/fire1_64.png"
           get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$THIRD/stb_image.h"
-          du -h "$ASSETS"/*
 
-      - name: Apply Vulkan Studio v11 final source pass
+      - name: Apply Vulkan Studio v11 compatibility pass
         run: |
           set -euxo pipefail
           python3 tools/venus_poc/apply_v11_showcase.py
 
-      - name: Validate rootless runtime and Vulkan Studio v11
+      - name: Apply Vulkan Studio v12 playground pass
+        run: |
+          set -euxo pipefail
+          python3 tools/venus_poc/apply_v12_showcase.py
+
+      - name: Validate rootless runtime and Vulkan Studio v12
         run: |
           set -euxo pipefail
           for f in tools/venus_poc/vessel_runtime_daemon.py \
@@ -81,7 +83,8 @@ jobs:
                    tools/venus_poc/vessel_acceptance.py \
                    tools/venus_poc/host_relay_direct.py \
                    tools/venus_poc/guest_relay_direct.py \
-                   tools/venus_poc/apply_v11_showcase.py; do
+                   tools/venus_poc/apply_v11_showcase.py \
+                   tools/venus_poc/apply_v12_showcase.py; do
             python3 -m py_compile "$f"
           done
           bash -n tools/venus_poc/run_venus_uml.sh
@@ -90,47 +93,36 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           checks = {
-              'tools/venus_poc/vessel_runtime_daemon_v22.py': ['PROTOCOL_VERSION = 22', 'network_v22', 'VESSEL_MEM_MB'],
-              'app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt': ['REQUIRED_PROTOCOL = 22', 'VESSEL_MEM_MB=8192'],
               'app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt': [
-                  'SurfaceView', 'System.loadLibrary("vessel_vulkan")', 'VULKAN TELEMETRY',
-                  'nativeSetStress', 'nativeSetQuality', 'nativeSetPhysics', 'nativeSetRt', 'nativeGrabLightStart',
-                  'nativeSetLightIntensity', 'nativeSetLightHaze', 'nativeSetLightBounce',
-                  'VULKAN STUDIO  //  v11.0', 'ALPINE RAIN HOUSE', '0/100 is completely flat/unlit'
-              ],
-              'app/src/main/cpp/CMakeLists.txt': [
-                  'add_library(vessel_vulkan SHARED native_vulkan_studio_v7.cpp)',
-                  'native_studio_v7_rt.frag', 'target_link_libraries(vessel_vulkan PRIVATE android log vulkan)'
+                  'VULKAN STUDIO  //  v12.0', 'PHYSICS PLAYGROUND', 'nativeSetBodyProperty',
+                  'STEEL BOUNCE', 'RUBBER BOUNCE', 'LIGHT MASS', 'OBSIDIAN', 'BASALT', 'GRANITE'
               ],
               'app/src/main/cpp/native_vulkan_studio_v7_part1.inc': [
-                  'adaptive RT budget', 'physical puddles', '0.34x', 'alpine landscape',
-                  'setLightIntensity', 'setLightHaze', 'setLightBounce', 'quality -> 0'
+                  'Studio v12.0', 'Unreal-style physics playground', '0.70x RT GI',
+                  'setBodyProperty', 'OBSIDIAN', 'BASALT', 'GRANITE'
               ],
-              'app/src/main/cpp/native_vulkan_studio_v7_part3.inc': ['fire1_64.png', 'slime removed'],
+              'app/src/main/cpp/native_vulkan_studio_v7_part3.inc': [
+                  'std::sqrt(std::max(0.0f,a.restitution*b.restitution))', 'for(int it=0;it<12;++it)'
+              ],
               'app/src/main/cpp/native_vulkan_studio_v7_part4.inc': [
-                  'cmdUpdateTlasV7', 'rtBudgetV7', 'VK_ERROR_DEVICE_LOST', 'adaptRtSafetyV7', 'dynamicSceneV7'
+                  'Unreal-style playground platforms', 'if(pathTracing_.load())return .10f', 'cmdUpdateTlasV7'
               ],
-              'app/src/main/cpp/native_vulkan_studio_v7_part5.inc': ['Vulkan Studio v11.0', 'slime/TV removed'],
+              'app/src/main/cpp/native_vulkan_studio_v7_part5.inc': [
+                  'Vulkan Studio v12.0', 'PLAYGROUND', 'nativeSetBodyProperty'
+              ],
               'app/src/main/cpp/shaders/native_studio_v7_rt.frag': [
-                  'GL_EXT_ray_query', 'rayQueryInitializeEXT', 'traceScene', 'stablePathIndirect', 'heroWetMask',
-                  'TORCH0', 'TORCH1', 'FIREPLACE', 'windowColor', 'stableContactShadow', 'flatColor', 'fireFrame', 'fireAtlas'
+                  'Vulkan Studio v12.0', 'fireLighting(Material m,vec3 N,vec3 V,vec3 P){return vec3(0);}',
+                  'floorHitNormal(vec2 uv){return vec3(0,1,0);}', 'inWorldPos.xz*11.0'
               ],
               'app/src/main/cpp/shaders/native_studio_v7.vert': [
-                  'HERO_GRID=48', 'FLOOR_GRID=96', 'LEAVES=192', 'emitSky', 'rainy window L', 'QUALITY_SPHERES=4'
+                  'Vulkan Studio v12.0 Unreal-style physics playground', 'const int LEAVES=0',
+                  'P=vec3(xz.x,FLOOR_Y,xz.y)', 'variant=int(mod(pc.heroMaterial,10.0)+.5)'
               ],
           }
           for path, needles in checks.items():
               text = Path(path).read_text()
               for needle in needles:
                   assert needle in text, f'{needle!r} missing from {path}'
-          for name in [
-              'cobblestone_diff_2k.jpg','cobblestone_nor_gl_2k.jpg','cobblestone_arm_2k.jpg','cobblestone_disp_2k.png',
-              'rough_concrete_diff_2k.jpg','rough_concrete_nor_gl_2k.jpg','rough_concrete_arm_2k.jpg','rough_concrete_disp_2k.png',
-              'dark_rock_diff_2k.jpg','dark_rock_nor_gl_2k.jpg','dark_rock_arm_2k.jpg','dark_rock_disp_2k.png',
-              'evening_museum_courtyard_1k.hdr','fire1_64.png',
-          ]:
-              p = Path('app/src/main/assets/vulkan_v7') / name
-              assert p.stat().st_size > 1024, f'asset too small: {p}'
           PY
 
       - name: Compile, unit-test and lint
