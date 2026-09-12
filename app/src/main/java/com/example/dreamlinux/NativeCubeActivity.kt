@@ -56,7 +56,7 @@ class NativeCubeActivity : Activity() {
     private var quality = 100
     private var wetness = .86f
     private var exposureEv = -.18f
-    private var gummyBounce = .72f
+    private var gummyBounce = .80f
     private var heroMaterial = 1
     private var stressMode = false
     private var physicsEnabled = true
@@ -117,7 +117,7 @@ class NativeCubeActivity : Activity() {
             textSize = 8.7f
             setLineSpacing(0f, 1.0f)
             setPadding(dp(11), dp(7), dp(11), dp(7))
-            text = "Vulkan Studio v7.4\nInitializing Adreno renderer…"
+            text = "Vulkan Studio v7.7\nInitializing Adreno renderer…"
             background = panel(0xD6080D0C.toInt(), 0xFF277C6B.toInt())
             setOnClickListener { statsExpanded = !statsExpanded }
         }
@@ -232,8 +232,8 @@ class NativeCubeActivity : Activity() {
         fun slider(value: Int, onChange: (Int) -> Unit) = SeekBar(this).apply { max = 100; progress = value; minHeight = dp(42); setPadding(0, 0, 0, 0); setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener { override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) = onChange(p); override fun onStartTrackingTouch(s: SeekBar?) = Unit; override fun onStopTrackingTouch(s: SeekBar?) = Unit }) }
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(10), dp(12), dp(12)); background = panel(0xF2070C0A.toInt(), 0xFF286C5D.toInt())
-            addView(TextView(this@NativeCubeActivity).apply { text = "VULKAN STUDIO  //  v7.4"; textSize = 12.5f; setTextColor(Color.WHITE); typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD) })
-            addView(TextView(this@NativeCubeActivity).apply { text = "ADRENO 840 · 120 HZ HYBRID · HWRT · PATH TRACE"; textSize = 6.9f; letterSpacing = .08f; setTextColor(0xFF839A93.toInt()) })
+            addView(TextView(this@NativeCubeActivity).apply { text = "VULKAN STUDIO  //  v7.7"; textSize = 12.5f; setTextColor(Color.WHITE); typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD) })
+            addView(TextView(this@NativeCubeActivity).apply { text = "ADRENO 840 · 120 HZ HYBRID · HWRT · PATH INSPECT"; textSize = 6.9f; letterSpacing = .08f; setTextColor(0xFF839A93.toInt()) })
 
             addView(section("RENDER"))
             qualityLabel = label("QUALITY  $quality / 100"); addView(qualityLabel)
@@ -254,7 +254,7 @@ class NativeCubeActivity : Activity() {
                 if (rendererHandle != 0L) nativeSetPathTracing(rendererHandle, pathTracing)
             }
             addView(row(rtButton, pathButton))
-            addView(TextView(this@NativeCubeActivity).apply { text = "Hybrid targets 120 Hz. Path Trace is the full multi-bounce inspection mode and intentionally runs uncapped for image quality."; textSize = 7.2f; setTextColor(0xFF9FB2AC.toInt()); setPadding(dp(1), dp(4), dp(1), dp(3)) })
+            addView(TextView(this@NativeCubeActivity).apply { text = "Hybrid targets 120 Hz. Path Trace uses one stochastic GI bounce at 0.70x with stable IBL blending for mobile inspection quality."; textSize = 7.2f; setTextColor(0xFF9FB2AC.toInt()); setPadding(dp(1), dp(4), dp(1), dp(3)) })
 
             addView(section("PHYSICS"))
             physicsButton = makeButton("● PHYSICS ON", true) { b -> physicsEnabled = !physicsEnabled; setButtonState(b, physicsEnabled, false, if (physicsEnabled) "● PHYSICS ON" else "○ PHYSICS OFF"); if (rendererHandle != 0L) nativeSetPhysics(rendererHandle, physicsEnabled) }
@@ -265,8 +265,8 @@ class NativeCubeActivity : Activity() {
 
             addView(section("SOFT BODY"))
             bounceLabel = label(String.format(Locale.US, "GUMMY REBOUND  %.2f", gummyBounce)); addView(bounceLabel)
-            addView(slider(((gummyBounce - .30f) / .64f * 100).toInt()) { p -> gummyBounce = .30f + p / 100f * .64f; bounceLabel.text = String.format(Locale.US, "GUMMY REBOUND  %.2f", gummyBounce); if (rendererHandle != 0L) nativeSetGummyBounce(rendererHandle, gummyBounce) }, LinearLayout.LayoutParams(-1, dp(42)))
-            addView(TextView(this@NativeCubeActivity).apply { text = "Slime: high adhesion, low rebound, slow viscoelastic recovery. Gummy: fast elastic recovery and directional squash."; textSize = 7.2f; setTextColor(0xFF9FB2AC.toInt()); setPadding(dp(1), 0, dp(1), dp(4)) })
+            addView(slider(((gummyBounce - .38f) / .56f * 100).toInt().coerceIn(0,100)) { p -> gummyBounce = .38f + p / 100f * .56f; bounceLabel.text = String.format(Locale.US, "GUMMY REBOUND  %.2f", gummyBounce); if (rendererHandle != 0L) nativeSetGummyBounce(rendererHandle, gummyBounce) }, LinearLayout.LayoutParams(-1, dp(42)))
+            addView(TextView(this@NativeCubeActivity).apply { text = "Slime: high adhesion, zero resting rebound, damped viscoelastic recovery. Gummy: high elastic rebound with directional squash."; textSize = 7.2f; setTextColor(0xFF9FB2AC.toInt()); setPadding(dp(1), 0, dp(1), dp(4)) })
 
             addView(section("LIGHT ORB"))
             addView(row(makeButton("◐ WARM", true) { setLight(1f, .62f, .31f) }, makeButton("○ WHITE") { setLight(1f, .96f, .88f) }, makeButton("◇ ICE") { setLight(.38f, .68f, 1f) }, makeButton("✦ NEON") { setLight(.75f, .25f, 1f) }))
@@ -292,7 +292,7 @@ class NativeCubeActivity : Activity() {
     private fun setLight(r: Float, g: Float, b: Float) { lightR = r; lightG = g; lightB = b; if (rendererHandle != 0L) nativeSetLightColor(rendererHandle, r, g, b); appendLog(String.format(Locale.US, "light -> %.2f %.2f %.2f", r, g, b)) }
     private fun applyScenePreset(ev: Float, wet: Float, r: Float, g: Float, b: Float) { exposureEv = ev; wetness = wet; if (::exposureLabel.isInitialized) exposureLabel.text = String.format(Locale.US, "EXPOSURE  %+.2f EV", exposureEv); if (::wetnessLabel.isInitialized) wetnessLabel.text = "WET STONE  ${(wetness * 100).toInt()}%"; setLight(r, g, b); if (rendererHandle != 0L) { nativeSetExposure(rendererHandle, exposureEv); nativeSetWetness(rendererHandle, wetness) } }
     private fun setQualityPreset(v: Int) { quality = v.coerceIn(0, 100); qualityLabel.text = "QUALITY  $quality / 100"; if (::qualitySeek.isInitialized && qualitySeek.progress != quality) qualitySeek.progress = quality; if (rendererHandle != 0L) nativeSetQuality(rendererHandle, quality); appendLog("preset -> Q$quality") }
-    private fun updateInteractionHint(light: Boolean = false) { if (!::interactionHint.isInitialized) return; interactionHint.text = when { light || lightFocusMode -> "Drag anywhere to reposition the emissive light orb."; interactMode -> "Grab a body, drag naturally, release to throw."; else -> "Orbit the camera and pinch to inspect material detail." } }
+    private fun updateInteractionHint(light: Boolean = false) { if (!::interactionHint.isInitialized) return; interactionHint.text = when { light || lightFocusMode -> "Drag anywhere to reposition the emissive light orb."; interactMode -> "Grab a body, drag naturally, release quickly to fling; release still to drop under gravity."; else -> "Orbit the camera and pinch to inspect material detail." } }
 
     private fun buildLogCard(): LinearLayout {
         val scroll = ScrollView(this).apply { isFillViewport = true; addView(logs, FrameLayout.LayoutParams(-1, -2)) }
