@@ -94,7 +94,7 @@ class NativeCubeActivity : Activity() {
                 stats.background = panel(
                     if (isError) 0xE02C1111.toInt() else 0xD6080D0C.toInt(),
                     if (isError) 0xFFFF6C63.toInt() else 0xFF277C6B.toInt(),
-                    5
+                    7
                 )
                 val gesture = when {
                     lightFocusMode -> "LIGHT · drag / throw orb"
@@ -144,11 +144,11 @@ class NativeCubeActivity : Activity() {
         stats = TextView(this).apply {
             setTextColor(Color.WHITE)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
-            textSize = 8.4f
+            textSize = 8.2f
             setLineSpacing(0f, 1.0f)
             setPadding(dp(10), dp(6), dp(10), dp(6))
-            text = "Vulkan Studio v8.0\nInitializing Adreno renderer…"
-            background = panel(0xD6080D0C.toInt(), 0xFF277C6B.toInt(), 5)
+            text = "Vulkan Studio v10.0\nLoading rainy house showcase…"
+            background = panel(0xD6080D0C.toInt(), 0xFF277C6B.toInt(), 7)
             setOnClickListener { statsExpanded = !statsExpanded }
         }
         logs = TextView(this).apply {
@@ -248,23 +248,23 @@ class NativeCubeActivity : Activity() {
             topMargin = dp(7)
         })
         val dock = buildQuickBar()
-        root.addView(dock, FrameLayout.LayoutParams(-2, dp(48), Gravity.BOTTOM or Gravity.START).apply {
+        root.addView(dock, FrameLayout.LayoutParams(-2, dp(46), Gravity.BOTTOM or Gravity.START).apply {
             leftMargin = dp(7)
             bottomMargin = dp(7)
         })
-        val panelWidth = minOf(dp(306), (resources.displayMetrics.widthPixels * .34f).toInt())
-        val panelHeight = resources.displayMetrics.heightPixels - dp(72)
+        val panelWidth = minOf(dp(282), (resources.displayMetrics.widthPixels * .31f).toInt())
+        val panelHeight = resources.displayMetrics.heightPixels - dp(70)
         root.addView(controlsCard, FrameLayout.LayoutParams(panelWidth, panelHeight, Gravity.BOTTOM or Gravity.START).apply {
             leftMargin = dp(7)
-            bottomMargin = dp(59)
+            bottomMargin = dp(57)
         })
         root.addView(logCard, FrameLayout.LayoutParams(
-            minOf(dp(390), (resources.displayMetrics.widthPixels * .44f).toInt()),
-            dp(180),
+            minOf(dp(365), (resources.displayMetrics.widthPixels * .40f).toInt()),
+            dp(176),
             Gravity.BOTTOM or Gravity.START
         ).apply {
             leftMargin = dp(7)
-            bottomMargin = dp(59)
+            bottomMargin = dp(57)
         })
         setContentView(root)
         handler.post(statsPoll)
@@ -291,29 +291,33 @@ class NativeCubeActivity : Activity() {
 
     private fun buildQuickBar() = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
-        background = panel(0xE4070C0A.toInt(), 0xFF245F53.toInt(), 7)
+        background = panel(0xE6070C0A.toInt(), 0xFF2D7565.toInt(), 8)
         setPadding(dp(2), dp(2), dp(2), dp(2))
         addView(iconButton("SET", "Renderer controls") {
             if (::logCard.isInitialized) logCard.visibility = View.GONE
             togglePanel(controlsCard)
-        }, LinearLayout.LayoutParams(dp(70), dp(44)))
+        }, LinearLayout.LayoutParams(dp(66), dp(42)))
         addView(iconButton("LOG", "Vulkan log") {
             if (::controlsCard.isInitialized) controlsCard.visibility = View.GONE
             togglePanel(logCard)
-        }, LinearLayout.LayoutParams(dp(70), dp(44)))
-        addView(iconButton("RESET", "Reset physical scene") { resetScene() }, LinearLayout.LayoutParams(dp(60), dp(44)))
+        }, LinearLayout.LayoutParams(dp(66), dp(42)))
+        addView(iconButton("RESET", "Reset physical scene") { resetScene() }, LinearLayout.LayoutParams(dp(58), dp(42)))
     }
 
     private fun iconButton(label: String, description: String, click: () -> Unit) = TextView(this).apply {
         text = label
         contentDescription = description
         gravity = Gravity.CENTER
-        textSize = 8.4f
+        textSize = 8.2f
         typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
         setTextColor(0xFFF2FBF8.toInt())
-        setPadding(dp(6), dp(4), dp(6), dp(4))
-        background = panel(0xC6101714.toInt(), 0xFF263A34.toInt(), 5)
-        setOnClickListener { click() }
+        setPadding(dp(5), dp(3), dp(5), dp(3))
+        background = panel(0xC6101714.toInt(), 0xFF2C403A.toInt(), 6)
+        setOnClickListener {
+            alpha = .68f
+            animate().alpha(1f).setDuration(90).start()
+            click()
+        }
     }
 
     private fun togglePanel(view: View) {
@@ -331,17 +335,17 @@ class NativeCubeActivity : Activity() {
 
     private fun makeButton(label: String, active: Boolean = false, click: (Button) -> Unit) = Button(this).apply {
         text = label
-        textSize = 8.1f
+        textSize = 7.8f
         isAllCaps = false
-        setTextColor(Color.WHITE)
-        minHeight = dp(42)
-        minWidth = dp(44)
-        setPadding(dp(5), dp(2), dp(5), dp(2))
+        minHeight = dp(38)
+        minWidth = dp(42)
+        setPadding(dp(4), dp(1), dp(4), dp(1))
         stateListAnimator = null
         setButtonState(this, active)
         setOnClickListener {
-            alpha = .72f
-            animate().alpha(1f).setDuration(85).start()
+            scaleX = .97f
+            scaleY = .97f
+            animate().scaleX(1f).scaleY(1f).setDuration(95).start()
             click(this)
         }
     }
@@ -349,18 +353,20 @@ class NativeCubeActivity : Activity() {
     private fun setButtonState(button: Button, active: Boolean, warning: Boolean = false, label: String? = null) {
         if (label != null) button.text = label
         button.isSelected = active
+        button.setTextColor(if (active) 0xFFFFFFFF.toInt() else 0xFFC5D3CF.toInt())
+        button.alpha = if (active) 1f else .86f
         button.background = panel(
             when {
-                warning -> 0xE079431A.toInt()
-                active -> 0xE214695C.toInt()
-                else -> 0xE20A100E.toInt()
+                warning -> 0xED81471B.toInt()
+                active -> 0xF018806E.toInt()
+                else -> 0xEA09100E.toInt()
             },
             when {
-                warning -> 0xFFDB8E49.toInt()
-                active -> 0xFF43D2B3.toInt()
-                else -> 0xFF31443E.toInt()
+                warning -> 0xFFFFAA5A.toInt()
+                active -> 0xFF64E9CB.toInt()
+                else -> 0xFF2D413B.toInt()
             },
-            6
+            7
         )
     }
 
@@ -371,24 +377,24 @@ class NativeCubeActivity : Activity() {
     private fun buildControls(): ScrollView {
         fun section(t: String) = TextView(this).apply {
             text = t
-            textSize = 6.9f
+            textSize = 6.7f
             letterSpacing = .14f
-            setTextColor(0xFF6BC4AC.toInt())
-            setPadding(0, dp(8), 0, dp(2))
+            setTextColor(0xFF70CFB5.toInt())
+            setPadding(0, dp(7), 0, dp(2))
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
         }
         fun row(vararg views: View) = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             views.forEachIndexed { i, v ->
-                addView(v, LinearLayout.LayoutParams(0, dp(42), 1f).apply {
-                    if (i < views.lastIndex) marginEnd = dp(4)
+                addView(v, LinearLayout.LayoutParams(0, dp(38), 1f).apply {
+                    if (i < views.lastIndex) marginEnd = dp(3)
                 })
             }
         }
         fun slider(value: Int, onChange: (Int) -> Unit) = SeekBar(this).apply {
             max = 100
             progress = value
-            minHeight = dp(34)
+            minHeight = dp(30)
             setPadding(0, 0, 0, 0)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) = onChange(p)
@@ -399,20 +405,20 @@ class NativeCubeActivity : Activity() {
 
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(11), dp(9), dp(11), dp(11))
-            background = panel(0xF2070C0A.toInt(), 0xFF286C5D.toInt(), 8)
+            setPadding(dp(10), dp(8), dp(10), dp(10))
+            background = panel(0xF4070C0A.toInt(), 0xFF327A69.toInt(), 9)
 
             addView(TextView(this@NativeCubeActivity).apply {
-                text = "VULKAN STUDIO  //  v8.0"
-                textSize = 11.8f
+                text = "VULKAN STUDIO  //  v10.0"
+                textSize = 11.5f
                 setTextColor(Color.WHITE)
                 typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             })
             addView(TextView(this@NativeCubeActivity).apply {
-                text = "ADRENO 840 · 120 HZ · STABLE HWRT · PATH QUALITY"
-                textSize = 6.5f
+                text = "RAIN HOUSE · 120 HZ · HWRT · PATH QUALITY"
+                textSize = 6.4f
                 letterSpacing = .06f
-                setTextColor(0xFF839A93.toInt())
+                setTextColor(0xFF8DA39C.toInt())
             })
 
             addView(section("RENDER"))
@@ -423,7 +429,7 @@ class NativeCubeActivity : Activity() {
                 qualityLabel.text = "QUALITY  $quality / 100"
                 if (rendererHandle != 0L) nativeSetQuality(rendererHandle, quality)
             }
-            addView(qualitySeek, LinearLayout.LayoutParams(-1, dp(34)))
+            addView(qualitySeek, LinearLayout.LayoutParams(-1, dp(30)))
             val qEff = makeButton("EFFICIENT") { setQualityPreset(55); selectGroup(qualityButtons, it) }
             val q120 = makeButton("120 HZ") { setQualityPreset(78); selectGroup(qualityButtons, it) }
             val qMax = makeButton("MAX", true) { setQualityPreset(100); selectGroup(qualityButtons, it) }
@@ -452,7 +458,7 @@ class NativeCubeActivity : Activity() {
                 if (rendererHandle != 0L) nativeSetPathTracing(rendererHandle, pathTracing)
             }
             addView(row(rtButton, pathButton))
-            addView(note("Hybrid uses stable sparse ray queries. Path Quality uses one clamped indirect ray at 0.60x with stable IBL to suppress the previous salt-and-pepper noise."))
+            addView(note("Hybrid targets 120 Hz. Path Quality runs a stable reconstructed indirect bounce at 0.50x to keep ray cost bounded without the old salt-and-pepper flicker."))
 
             addView(section("PHYSICS"))
             physicsButton = makeButton("PHYSICS ON", true) { b ->
@@ -468,22 +474,22 @@ class NativeCubeActivity : Activity() {
                 updateInteractionHint()
             }
             addView(row(physicsButton, interactButton))
-            stressButton = makeButton("COURTYARD") { b ->
+            stressButton = makeButton("HOUSE") { b ->
                 stressMode = !stressMode
-                setButtonState(b, stressMode, stressMode, if (stressMode) "STRESS LAB" else "COURTYARD")
+                setButtonState(b, stressMode, stressMode, if (stressMode) "STRESS LAB" else "HOUSE")
                 if (rendererHandle != 0L) nativeSetStress(rendererHandle, stressMode)
             }
-            addView(stressButton, LinearLayout.LayoutParams(-1, dp(42)))
+            addView(stressButton, LinearLayout.LayoutParams(-1, dp(38)))
 
             addView(section("SOFT BODY"))
             bounceLabel = label(String.format(Locale.US, "GUMMY REBOUND  %.2f", gummyBounce))
             addView(bounceLabel)
-            addView(slider(((gummyBounce - .38f) / .56f * 100).toInt().coerceIn(0, 100)) { p ->
-                gummyBounce = .38f + p / 100f * .56f
+            addView(slider(((gummyBounce - .48f) / .48f * 100).toInt().coerceIn(0, 100)) { p ->
+                gummyBounce = .48f + p / 100f * .48f
                 bounceLabel.text = String.format(Locale.US, "GUMMY REBOUND  %.2f", gummyBounce)
                 if (rendererHandle != 0L) nativeSetGummyBounce(rendererHandle, gummyBounce)
-            }, LinearLayout.LayoutParams(-1, dp(34)))
-            addView(note("Rubber/gummy use collision-matched deformation. Slime relaxes while dragged and stays inside its physics envelope instead of visually clipping."))
+            }, LinearLayout.LayoutParams(-1, dp(30)))
+            addView(note("Rubber and gummy keep collision-matched multi-axis squash with faster release velocity. Slime stays viscous, grounded and slow to relax."))
 
             addView(section("LIGHT ORB"))
             val warm = makeButton("WARM", true) { setLight(1f, .62f, .31f); selectGroup(lightButtons, it) }
@@ -499,7 +505,7 @@ class NativeCubeActivity : Activity() {
                 lightIntensity = .25f + p / 100f * 2f
                 lightIntensityLabel.text = String.format(Locale.US, "INTENSITY  %.2fx", lightIntensity)
                 if (rendererHandle != 0L) nativeSetLightIntensity(rendererHandle, lightIntensity)
-            }, LinearLayout.LayoutParams(-1, dp(34)))
+            }, LinearLayout.LayoutParams(-1, dp(30)))
 
             lightHazeLabel = label("HAZE  ${(lightHaze * 100).toInt()}%")
             addView(lightHazeLabel)
@@ -507,7 +513,7 @@ class NativeCubeActivity : Activity() {
                 lightHaze = p / 100f
                 lightHazeLabel.text = "HAZE  $p%"
                 if (rendererHandle != 0L) nativeSetLightHaze(rendererHandle, lightHaze)
-            }, LinearLayout.LayoutParams(-1, dp(34)))
+            }, LinearLayout.LayoutParams(-1, dp(30)))
 
             lightBounceLabel = label(String.format(Locale.US, "ORB BOUNCE  %.2f", lightBounce))
             addView(lightBounceLabel)
@@ -515,7 +521,7 @@ class NativeCubeActivity : Activity() {
                 lightBounce = p / 100f * .90f
                 lightBounceLabel.text = String.format(Locale.US, "ORB BOUNCE  %.2f", lightBounce)
                 if (rendererHandle != 0L) nativeSetLightBounce(rendererHandle, lightBounce)
-            }, LinearLayout.LayoutParams(-1, dp(34)))
+            }, LinearLayout.LayoutParams(-1, dp(30)))
 
             moveLightButton = makeButton("MOVE / THROW LIGHT") { b ->
                 lightFocusMode = !lightFocusMode
@@ -524,14 +530,14 @@ class NativeCubeActivity : Activity() {
                 setButtonState(interactButton, interactMode, false, if (interactMode) "INTERACT" else "ORBIT")
                 updateInteractionHint(lightFocusMode)
             }
-            addView(moveLightButton, LinearLayout.LayoutParams(-1, dp(42)))
+            addView(moveLightButton, LinearLayout.LayoutParams(-1, dp(38)))
 
-            addView(section("ENVIRONMENT"))
-            val day = makeButton("DAY") { applyScenePreset(-.10f, .82f, 1f, .90f, .78f); selectGroup(sceneButtons, it) }
-            val golden = makeButton("GOLDEN", true) { applyScenePreset(-.38f, .92f, 1f, .52f, .22f); selectGroup(sceneButtons, it) }
-            val night = makeButton("NIGHT") { applyScenePreset(-.92f, .97f, 1f, .44f, .16f); selectGroup(sceneButtons, it) }
-            sceneButtons.addAll(listOf(day, golden, night))
-            addView(row(day, golden, night))
+            addView(section("HOUSE / WEATHER"))
+            val day = makeButton("DAY") { applyScenePreset(-.10f, .64f, 1f, .90f, .78f); selectGroup(sceneButtons, it) }
+            val rain = makeButton("RAIN", true) { applyScenePreset(-.34f, .88f, 1f, .56f, .28f); selectGroup(sceneButtons, it) }
+            val night = makeButton("NIGHT") { applyScenePreset(-.88f, .96f, 1f, .42f, .15f); selectGroup(sceneButtons, it) }
+            sceneButtons.addAll(listOf(day, rain, night))
+            addView(row(day, rain, night))
 
             heroButton = makeButton("VOLCANIC", true) { b ->
                 heroMaterial = 1 - heroMaterial
@@ -539,15 +545,15 @@ class NativeCubeActivity : Activity() {
                 setButtonState(b, volcanic, false, if (volcanic) "VOLCANIC" else "CONCRETE")
                 if (rendererHandle != 0L) nativeSetHeroMaterial(rendererHandle, heroMaterial)
             }
-            addView(heroButton, LinearLayout.LayoutParams(-1, dp(42)))
+            addView(heroButton, LinearLayout.LayoutParams(-1, dp(38)))
 
-            wetnessLabel = label("WET STONE  ${(wetness * 100).toInt()}%")
+            wetnessLabel = label("RAIN / WETNESS  ${(wetness * 100).toInt()}%")
             addView(wetnessLabel)
             addView(slider((wetness * 100).toInt()) {
                 wetness = it / 100f
-                wetnessLabel.text = "WET STONE  $it%"
+                wetnessLabel.text = "RAIN / WETNESS  $it%"
                 if (rendererHandle != 0L) nativeSetWetness(rendererHandle, wetness)
-            }, LinearLayout.LayoutParams(-1, dp(34)))
+            }, LinearLayout.LayoutParams(-1, dp(30)))
 
             exposureLabel = label(String.format(Locale.US, "EXPOSURE  %+.2f EV", exposureEv))
             addView(exposureLabel)
@@ -555,33 +561,33 @@ class NativeCubeActivity : Activity() {
                 exposureEv = -1.5f + p / 100f * 2.5f
                 exposureLabel.text = String.format(Locale.US, "EXPOSURE  %+.2f EV", exposureEv)
                 if (rendererHandle != 0L) nativeSetExposure(rendererHandle, exposureEv)
-            }, LinearLayout.LayoutParams(-1, dp(34)))
+            }, LinearLayout.LayoutParams(-1, dp(30)))
 
             addView(section("CONTROL"))
             interactionHint = label("").apply { maxLines = 2 }
             addView(interactionHint)
             updateInteractionHint()
-            addView(makeButton("RESET PHYSICS") { resetScene() }, LinearLayout.LayoutParams(-1, dp(42)))
+            addView(makeButton("RESET PHYSICS") { resetScene() }, LinearLayout.LayoutParams(-1, dp(38)))
         }
 
         return ScrollView(this).apply {
             isFillViewport = true
-            background = panel(0xF2070C0A.toInt(), 0xFF286C5D.toInt(), 8)
+            background = panel(0xF4070C0A.toInt(), 0xFF327A69.toInt(), 9)
             addView(body)
         }
     }
 
     private fun label(textValue: String) = TextView(this).apply {
         text = textValue
-        textSize = 7.8f
+        textSize = 7.5f
         setTextColor(0xFFC7D8D2.toInt())
         setPadding(dp(1), dp(1), dp(1), dp(1))
     }
 
     private fun note(textValue: String) = TextView(this).apply {
         text = textValue
-        textSize = 6.8f
-        setTextColor(0xFF9FB2AC.toInt())
+        textSize = 6.5f
+        setTextColor(0xFFA6B8B2.toInt())
         setPadding(dp(1), dp(3), dp(1), dp(2))
     }
 
@@ -597,7 +603,7 @@ class NativeCubeActivity : Activity() {
         exposureEv = ev
         wetness = wet
         if (::exposureLabel.isInitialized) exposureLabel.text = String.format(Locale.US, "EXPOSURE  %+.2f EV", exposureEv)
-        if (::wetnessLabel.isInitialized) wetnessLabel.text = "WET STONE  ${(wetness * 100).toInt()}%"
+        if (::wetnessLabel.isInitialized) wetnessLabel.text = "RAIN / WETNESS  ${(wetness * 100).toInt()}%"
         setLight(r, g, b)
         if (rendererHandle != 0L) {
             nativeSetExposure(rendererHandle, exposureEv)
@@ -628,9 +634,9 @@ class NativeCubeActivity : Activity() {
     private fun updateInteractionHint(light: Boolean = false) {
         if (!::interactionHint.isInitialized) return
         interactionHint.text = when {
-            light || lightFocusMode -> "Drag the light orb, then release to throw it. Bounce, intensity and haze are configurable above."
-            interactMode -> "Grab a body, drag naturally, release quickly to fling; soft bodies stay inside their collision envelope."
-            else -> "Orbit the camera and pinch to inspect wet materials, fire lighting and shadows."
+            light || lightFocusMode -> "Drag and throw the light orb. Intensity, haze, color and bounce stay live."
+            interactMode -> "Grab a body and flick it. Rubber/gummy preserve fast release velocity; slime stays viscous."
+            else -> "Orbit / pinch to inspect rainy glass, wet stone, fire, paintings and materials."
         }
     }
 
@@ -648,12 +654,12 @@ class NativeCubeActivity : Activity() {
                 letterSpacing = .1f
                 setTextColor(0xFF70C8B0.toInt())
             }, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(iconButton("COPY", "Copy log") { copyLog() }, LinearLayout.LayoutParams(dp(66), dp(40)))
-            addView(iconButton("×", "Close") { togglePanel(logCard) }, LinearLayout.LayoutParams(dp(40), dp(40)))
+            addView(iconButton("COPY", "Copy log") { copyLog() }, LinearLayout.LayoutParams(dp(62), dp(38)))
+            addView(iconButton("×", "Close") { togglePanel(logCard) }, LinearLayout.LayoutParams(dp(38), dp(38)))
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = panel(0xF2070C0A.toInt(), 0xFF286C5D.toInt(), 8)
+            background = panel(0xF4070C0A.toInt(), 0xFF327A69.toInt(), 9)
             addView(header)
             addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
@@ -722,7 +728,7 @@ class NativeCubeActivity : Activity() {
     private fun showFatal(message: String) {
         runOnUiThread {
             stats.text = "Native Vulkan error\n$message"
-            stats.background = panel(0xE6321216.toInt(), 0xFFFF776F.toInt(), 5)
+            stats.background = panel(0xE6321216.toInt(), 0xFFFF776F.toInt(), 7)
         }
     }
 
