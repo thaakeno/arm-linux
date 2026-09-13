@@ -27,7 +27,7 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
 
-      - name: Fetch CC0 PBR/audio and compile real scene assets
+      - name: Fetch CC0 PBR/audio and compile authored scene assets
         run: |
           set -euxo pipefail
           A=app/src/main/assets/bounce
@@ -54,18 +54,18 @@ jobs:
           get "$BASE/badge-deny.ogg" "$R/bq_death.ogg"
           get "$BASE/plant-complete.ogg" "$R/bq_win.ogg"
 
-      - name: Apply launch/lifecycle fixes
-        run: python3 tools/fix_bounce_launch.py
-
-      - name: Verify clean asset-driven game tree
+      - name: Verify clean authored game tree
         run: |
           set -eux
           test -f app/src/main/cpp/engine/renderer/BounceRenderer.cpp
           test -f app/src/main/cpp/engine/physics/BallPhysics.cpp
           test -f app/src/main/cpp/engine/game/Level.h
           test -f tools/build_bounce_scene.py
-          grep -q 'handler.post(tick)' app/src/main/java/com/example/dreamlinux/BounceQuestActivity.kt
+          test ! -f tools/fix_bounce_launch.py
+          grep -q 'requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE' app/src/main/java/com/example/dreamlinux/BounceQuestActivity.kt
           grep -q 'if(thread_.joinable())thread_.join()' app/src/main/cpp/engine/renderer/BounceRenderer.cpp
+          grep -q "wooden_crate_01" tools/build_bounce_scene.py
+          grep -q "for row,z in enumerate" tools/build_bounce_scene.py
           ! grep -R "native_vulkan_studio_v7" app/src/main/cpp/CMakeLists.txt
           ! grep -R "platformInfo(" app/src/main/cpp/engine/renderer/shaders
           ! grep -R "boxGeom(" app/src/main/cpp/engine/renderer/shaders
@@ -76,7 +76,7 @@ jobs:
       - name: Upload Vessel + Bounce Quest APK
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-bounce-quest-launch-fixed-debug
+          name: vessel-bounce-quest-authored-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
