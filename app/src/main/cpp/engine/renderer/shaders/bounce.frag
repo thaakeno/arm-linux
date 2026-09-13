@@ -6,9 +6,9 @@ layout(location=3) flat in int vMat;
 layout(location=4) in vec3 vView;
 layout(location=5) flat in int vObject;
 layout(location=0) out vec4 outColor;
-layout(set=0,binding=0) uniform sampler2D texConcrete;
-layout(set=0,binding=1) uniform sampler2D texNormal;
-layout(set=0,binding=2) uniform sampler2D texArm;
+layout(set=0,binding=0) uniform sampler2D texAlbedoAtlas;
+layout(set=0,binding=1) uniform sampler2D texNormalAtlas;
+layout(set=0,binding=2) uniform sampler2D texArmAtlas;
 layout(set=0,binding=3) uniform sampler2D texEnvironment;
 layout(push_constant) uniform Push {vec4 ball;vec4 motion;vec4 misc;} pc;
 const float PI=3.141592653589793;
@@ -20,53 +20,50 @@ float G1(float nv,float k){return nv/max(nv*(1.0-k)+k,1e-4);}
 vec3 film(vec3 x){x=max(x,vec3(0));return clamp((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14),0.0,1.0);}
 vec2 envUv(vec3 d){d=normalize(d);return vec2(atan(d.z,d.x)/(2.0*PI)+.5,acos(clamp(d.y,-1.0,1.0))/PI);}
 vec3 env(vec3 d){return pow(texture(texEnvironment,envUv(d)).rgb,vec3(2.2));}
-
-void applyConcrete(inout vec3 N,vec2 uv,out vec3 al,out float rough){
-    vec2 t=fract(uv*.42);
-    al=pow(texture(texConcrete,t).rgb,vec3(2.2));
-    vec3 nn=texture(texNormal,t).xyz*2.0-1.0;
+vec2 atlasUv(vec2 uv,float tile,float scale){vec2 f=fract(uv*scale);return vec2(f.x,(f.y+tile)/3.0);}
+void samplePbr(inout vec3 N,vec2 uv,float tile,float scale,out vec3 al,out float rough,out float metal){
+    vec2 t=atlasUv(uv,tile,scale);
+    al=pow(texture(texAlbedoAtlas,t).rgb,vec3(2.2));
+    vec3 nn=texture(texNormalAtlas,t).xyz*2.0-1.0;
     vec3 T=normalize(abs(N.y)>.72?vec3(1,0,0):vec3(0,1,0)),B=normalize(cross(N,T));T=normalize(cross(B,N));
-    N=normalize(T*nn.x*.78+B*nn.y*.78+N*max(.34,nn.z));
-    rough=clamp(texture(texArm,t).g*.70+.18,.25,.88);
+    N=normalize(T*nn.x*.80+B*nn.y*.80+N*max(.32,nn.z));
+    vec3 arm=texture(texArmAtlas,t).rgb;
+    rough=clamp(arm.g,.08,.95);metal=clamp(arm.b,0.0,1.0);
 }
-
 void main(){
     vec3 N=normalize(vNormal),V=normalize(vView);
     if(vMat==13){outColor=vec4(pow(film(env(normalize(-V))*1.12),vec3(1.0/2.2)),1.0);return;}
 
     vec3 base=vec3(.5),emission=vec3(0);float rough=.48,metal=0.0,coat=0.0;
-    vec3 texAl;float texR;
+    vec3 texAl;float texR,texM;
 
+    // Tile 0: concrete, tile 1: real wood planks, tile 2: real painted metal.
     if(vMat==0||vMat==1||vMat==2||vMat==11){
-        applyConcrete(N,vUv,texAl,texR);rough=texR;
-        if(vMat==0){base=texAl*vec3(.88,.91,.94);}
-        else if(vMat==1){base=texAl*vec3(.72,.085,.055);rough*=.82;coat=.11;}
-        else if(vMat==2){base=texAl*vec3(.28,.31,.34);rough*=.72;metal=.10;}
-        else {base=texAl*vec3(.58,.60,.58);rough=min(.88,texR+.10);}
+        samplePbr(N,vUv,0.0,.42,texAl,texR,texM);rough=texR;metal=texM*.12;
+        if(vMat==0)base=texAl*vec3(.92,.95,.98);
+        else if(vMat==1){base=texAl*vec3(.78,.10,.065);rough*=.82;coat=.12;}
+        else if(vMat==2){base=texAl*vec3(.32,.35,.38);rough*=.72;metal=.12;}
+        else {base=texAl*vec3(.62,.64,.62);rough=min(.92,texR+.08);}
     }
-    else if(vMat==3){float stripe=step(.5,fract((vUv.x+vUv.y)*5.0));base=mix(vec3(.028,.033,.038),vec3(.93,.48,.025),stripe);rough=.30;metal=.66;}
-    else if(vMat==4){base=vec3(.045,.052,.060);rough=.21;metal=.58;coat=.12;}
+    else if(vMat==3||vMat==4||vMat==6||vMat==8||vMat==16||vMat==17){
+        samplePbr(N,vUv,2.0,.55,texAl,texR,texM);rough=texR*.82;metal=max(.38,texM);
+        if(vMat==3){float stripe=step(.5,fract((vUv.x+vUv.y)*5.0));base=mix(texAl*vec3(.09,.10,.11),vec3(.95,.47,.02),stripe);rough=.31;}
+        else if(vMat==4){base=texAl*vec3(.20,.22,.24);rough=.24;coat=.12;}
+        else if(vMat==6){base=texAl*vec3(.88,.035,.022);rough=.17;coat=.16;}
+        else if(vMat==8){base=texAl*vec3(.55,.018,.010);rough=.11;coat=.58;emission=vec3(8.0,.28,.018)*(1.0+.13*sin(pc.motion.y*5.0));}
+        else if(vMat==16){base=texAl*vec3(.67,.035,.022);rough=.48;metal=.08;}
+        else {base=texAl*vec3(.035,.17,.52);rough=.46;metal=.08;}
+    }
+    else if(vMat==15||vMat==18){
+        samplePbr(N,vUv,1.0,.62,texAl,texR,texM);base=texAl;rough=texR;metal=texM;
+        if(vMat==18){base*=vec3(.88,.78,.65);rough=min(.85,rough+.08);}
+    }
     else if(vMat==5){float g=.76+.24*hash21(floor(vUv*21.0));base=vec3(.29,.28,.25)*g;rough=.79;}
-    else if(vMat==6){base=vec3(.82,.016,.010);rough=.17;metal=.48;coat=.18;}
     else if(vMat==7){base=vec3(1.0,.54,.012);rough=.07;metal=.05;coat=.86;emission=vec3(8.5,4.2,.18)*(1.0+.10*sin(pc.motion.y*4.0));}
-    else if(vMat==8){base=vec3(.47,.012,.006);rough=.10;metal=.30;coat=.58;emission=vec3(8.0,.28,.018)*(1.0+.13*sin(pc.motion.y*5.0));}
     else if(vMat==9){base=vec3(.028,.12,.75);rough=.05;coat=.95;emission=vec3(.08,2.2,11.0)*(1.0+.17*sin(pc.motion.y*3.7));}
-    else if(vMat==10){
-        float pores=.91+.09*hash21(floor(vUv*620.0));
-        base=vec3(.58,.0045,.0030)*pores;rough=.145;metal=.0;coat=.98;
-    }
+    else if(vMat==10){float pores=.91+.09*hash21(floor(vUv*620.0));base=vec3(.58,.0045,.0030)*pores;rough=.145;metal=0.0;coat=.98;}
     else if(vMat==12){float grain=.68+.32*hash21(floor(vUv*43.0));base=vec3(.19,.17,.14)*grain;rough=.84;}
     else if(vMat==14){float leaf=.72+.28*hash21(floor(vUv*63.0));base=vec3(.018,.24,.040)*leaf;rough=.56;coat=.06;}
-    else if(vMat==15){
-        float grain=.72+.18*sin(vUv.y*52.0+sin(vUv.x*7.0)*2.0)+.10*hash21(floor(vUv*37.0));
-        base=vec3(.22,.095,.036)*grain;rough=.56;metal=.04;
-    }
-    else if(vMat==16){base=vec3(.63,.025,.018);rough=.48;coat=.04;}
-    else if(vMat==17){base=vec3(.025,.15,.46);rough=.46;coat=.06;}
-    else if(vMat==18){
-        float seams=step(.055,abs(fract(vUv.y*7.0)-.5));float grain=.72+.20*sin(vUv.x*42.0)+.08*hash21(floor(vUv*40.0));
-        base=mix(vec3(.055,.025,.011),vec3(.30,.13,.052)*grain,seams);rough=.60;
-    }
     else if(vMat==19){base=vec3(1.0,.47,.015);rough=.31;coat=.10;}
 
     vec3 L=normalize(vec3(-.48,.78,.39)),H=normalize(L+V);
@@ -78,14 +75,11 @@ void main(){
     vec3 color=(diff+spec)*vec3(1.0,.93,.82)*5.9*nl;
     color+=env(N)*base*(1.0-metal)*.24+env(R)*fresnel(nv,f0)*mix(.72,.16,rough)+emission;
 
-    // Contact darkening around the hero ball grounds it without a fake circular shadow decal.
     if((vMat==0||vMat==1||vMat==2)&&N.y>.25){
         float radial=length(vWorld.xz-pc.ball.xz),vertical=max(0.0,pc.ball.y-pc.ball.w-vWorld.y);
         float contact=(1.0-smoothstep(pc.ball.w*.18,pc.ball.w*1.70+vertical*.75,radial))*exp(-vertical*3.3);
         color*=1.0-.50*contact;
     }
-
-    // v13-inspired gummy response: deep red body, strong clear coat, rim transmission/backscatter.
     if(vMat==10){
         float rim=pow(1.0-nv,2.0),back=max(dot(-N,L),0.0);
         vec3 through=env(-R)*vec3(.46,.004,.002);
