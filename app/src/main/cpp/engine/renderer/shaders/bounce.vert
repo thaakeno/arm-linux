@@ -13,20 +13,33 @@ layout(location=4) out vec3 vView;
 layout(location=5) flat out int vObject;
 layout(push_constant) uniform Push { vec4 ball; vec4 motion; vec4 misc; } pc;
 
-mat4 viewProj(vec3 eye,vec3 target,float aspect){
-    vec3 f=normalize(target-eye),r=normalize(cross(f,vec3(0,1,0))),u=cross(r,f);
-    mat4 v=mat4(vec4(r.x,u.x,-f.x,0),vec4(r.y,u.y,-f.y,0),vec4(r.z,u.z,-f.z,0),vec4(-dot(r,eye),-dot(u,eye),dot(f,eye),1));
-    float zN=.055,zF=130.0,t=1.0/tan(radians(61.0)*.5);
-    mat4 p=mat4(vec4(t/aspect,0,0,0),vec4(0,t,0,0),vec4(0,0,zF/(zN-zF),-1),vec4(0,0,(zN*zF)/(zN-zF),0));
-    return p*v;
+mat4 lookAtRH(vec3 eye, vec3 target){
+    vec3 f=normalize(target-eye);
+    vec3 r=normalize(cross(f,vec3(0.0,1.0,0.0)));
+    vec3 u=cross(r,f);
+    return mat4(
+        vec4(r.x,u.x,-f.x,0.0),
+        vec4(r.y,u.y,-f.y,0.0),
+        vec4(r.z,u.z,-f.z,0.0),
+        vec4(-dot(r,eye),-dot(u,eye),dot(f,eye),1.0)
+    );
+}
+
+mat4 perspectiveVk(float fovy,float aspect,float zn,float zf){
+    float f=1.0/tan(fovy*0.5);
+    // Vulkan's framebuffer Y axis is opposite OpenGL's clip-space convention.
+    return mat4(
+        vec4(f/max(aspect,.2),0,0,0),
+        vec4(0,-f,0,0),
+        vec4(0,0,zf/(zn-zf),-1),
+        vec4(0,0,(zn*zf)/(zn-zf),0)
+    );
 }
 
 void main(){
     int obj=int(inObject+.5), mat=int(inMat+.5);
     vec3 P=inPos, N=normalize(inNormal);
 
-    // The only runtime-deformed mesh is the hero ball. Its actual sphere geometry is
-    // stored in scene.bqmesh; runtime applies the physically driven squash/stretch.
     if(obj==1){
         float s=clamp(pc.motion.x,-.18,.38);
         vec3 rr=vec3(pc.ball.w*inversesqrt(max(.45,1.0-s)),pc.ball.w*(1.0-s),pc.ball.w*inversesqrt(max(.45,1.0-s)));
@@ -34,21 +47,27 @@ void main(){
         N=normalize(inNormal/max(rr,vec3(.001)));
     }
 
-    // Collected orb vertices remain in the immutable asset buffer; hide them by state.
     if(obj>=100 && obj<110){
         int bit=obj-100, mask=int(pc.motion.w+.5);
-        if((mask&(1<<bit))!=0){ gl_Position=vec4(2,2,2,1); return; }
-        float pulse=.04*sin(pc.motion.y*3.1+float(bit)); P+=N*pulse;
+        if((mask&(1<<bit))!=0){gl_Position=vec4(2,2,2,1);return;}
+        float pulse=.045*sin(pc.motion.y*3.15+float(bit));
+        P+=N*pulse;
     }
 
-    // The environment mesh follows the player so it can never expose a blue clear-color void.
-    if(obj==900) P += vec3(pc.ball.x,0.0,pc.ball.z);
+    // Keep the environment shell centered on the player while leaving the course static.
+    if(obj==900) P+=vec3(pc.ball.x,0.0,pc.ball.z);
 
-    // Proper third-person game framing. The hero ball stays prominent while the next
-    // obstacle group and portal line remain readable instead of showing the whole map.
-    vec3 eye=pc.ball.xyz+vec3(-3.25,2.30,5.35);
-    vec3 target=pc.ball.xyz+vec3(.25,.32,-3.25);
-    mat4 vp=viewProj(eye,target,max(pc.motion.z,.25));
+    // Target composition: large hero ball in the lower-left/center, obstacle lane and portal ahead.
+    vec3 eye=pc.ball.xyz+vec3(4.55,2.85,6.75);
+    vec3 target=pc.ball.xyz+vec3(.10,.58,-4.20);
+    float aspect=max(pc.motion.z,.25);
+    mat4 vp=perspectiveVk(radians(55.0),aspect,.055,145.0)*lookAtRH(eye,target);
     gl_Position=vp*vec4(P,1.0);
-    vWorld=P;vNormal=N;vUv=inUv;vMat=mat;vView=eye-P;vObject=obj;
+
+    vWorld=P;
+    vNormal=N;
+    vUv=inUv;
+    vMat=mat;
+    vView=eye-P;
+    vObject=obj;
 }
