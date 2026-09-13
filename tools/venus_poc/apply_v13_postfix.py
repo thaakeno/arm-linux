@@ -48,8 +48,6 @@ if start >= 0:
 p.write_text(text)
 
 p1 = "app/src/main/cpp/native_vulkan_studio_v7_part1.inc"
-# The first v13 pass used a nested-brace regex and could leave half the old setter.
-# Replace the entire method span up to setLightHaze.
 light_setter = '''    void setLightIntensity(float v){
         std::lock_guard<std::mutex>lock(bodyMutex_);v=std::clamp(v,.10f,3.50f);lightIntensity_=v;
         Vec3 c=deformDir_[2];float m=std::max(c.x,std::max(c.y,c.z));if(m<1e-4f)c={1,.62f,.31f};else c=c/m;
@@ -66,4 +64,13 @@ if old in text: text = text.replace(old, new)
 text = text.replace('bodies_[2].r=.255f+.075f*lightHaze_.load();', 'bodies_[2].r=.285f;')
 p.write_text(text)
 
-print("v13 post-fix applied: RT box chain + Jolt authority + light setter + stable orb radius")
+# Android clang treats the uint -> int worker count list initialization as a
+# narrowing error. Make the Jolt worker count explicit and keep it capped at 3.
+p = ROOT / "app/src/main/cpp/vessel_jolt_world.cpp"
+text = p.read_text()
+old = 'JobSystemThreadPool jobs{cMaxPhysicsJobs, cMaxPhysicsBarriers, std::max(1u, std::min(3u, std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u))};'
+new = 'JobSystemThreadPool jobs{cMaxPhysicsJobs, cMaxPhysicsBarriers, static_cast<int>(std::max(1u, std::min(3u, std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u)))};'
+if old not in text: raise SystemExit("Jolt worker marker missing")
+p.write_text(text.replace(old,new))
+
+print("v13 post-fix applied: RT boxes + Jolt authority + light setter + Android Jolt workers")
