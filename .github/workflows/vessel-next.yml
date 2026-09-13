@@ -43,7 +43,7 @@ jobs:
           ASSETS=app/src/main/assets/vulkan_v7
           THIRD=app/src/main/cpp/third_party
           mkdir -p "$ASSETS" "$THIRD"
-          UA='Vessel-Vulkan-Studio-v12.0/1.0 (offline APK asset build)'
+          UA='Vessel-Vulkan-Studio-v13.0/1.0 (offline APK asset build)'
           get() { curl --fail --location --retry 4 --retry-delay 2 --user-agent "$UA" "$1" --output "$2"; test -s "$2"; }
 
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/cobblestone_pavement/cobblestone_pavement_diff_2k.jpg' "$ASSETS/cobblestone_diff_2k.jpg"
@@ -62,20 +62,24 @@ jobs:
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/dark_rock/dark_rock_disp_2k.png' "$ASSETS/dark_rock_disp_2k.png"
 
           get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/alps_field_1k.hdr' "$ASSETS/evening_museum_courtyard_1k.hdr"
-          get 'https://opengameart.org/sites/default/files/fire1_64.png' "$ASSETS/fire1_64.png"
           get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$THIRD/stb_image.h"
 
-      - name: Apply Vulkan Studio v11 compatibility pass
+      - name: Apply Vulkan Studio v13 source stack
         run: |
           set -euxo pipefail
+          python3 -m py_compile \
+            tools/venus_poc/apply_v11_showcase.py \
+            tools/venus_poc/apply_v12_showcase.py \
+            tools/venus_poc/apply_v12_shader_fix.py \
+            tools/venus_poc/apply_v13_jolt_playground.py \
+            tools/venus_poc/apply_v13_postfix.py
           python3 tools/venus_poc/apply_v11_showcase.py
-
-      - name: Apply Vulkan Studio v12 playground pass
-        run: |
-          set -euxo pipefail
           python3 tools/venus_poc/apply_v12_showcase.py
+          python3 tools/venus_poc/apply_v12_shader_fix.py
+          python3 tools/venus_poc/apply_v13_jolt_playground.py
+          python3 tools/venus_poc/apply_v13_postfix.py
 
-      - name: Validate rootless runtime and Vulkan Studio v12
+      - name: Validate rootless runtime and Vulkan Studio v13
         run: |
           set -euxo pipefail
           for f in tools/venus_poc/vessel_runtime_daemon.py \
@@ -84,46 +88,28 @@ jobs:
                    tools/venus_poc/host_relay_direct.py \
                    tools/venus_poc/guest_relay_direct.py \
                    tools/venus_poc/apply_v11_showcase.py \
-                   tools/venus_poc/apply_v12_showcase.py; do
+                   tools/venus_poc/apply_v12_showcase.py \
+                   tools/venus_poc/apply_v12_shader_fix.py \
+                   tools/venus_poc/apply_v13_jolt_playground.py \
+                   tools/venus_poc/apply_v13_postfix.py; do
             python3 -m py_compile "$f"
           done
           bash -n tools/venus_poc/run_venus_uml.sh
           bash -n tools/venus_poc/build_guest_mesa_venus_26_2.sh
           bash -n tools/venus_poc/build_uml_smp_android.sh
-          python3 - <<'PY'
-          from pathlib import Path
-          checks = {
-              'app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt': [
-                  'VULKAN STUDIO  //  v12.0', 'PHYSICS PLAYGROUND', 'nativeSetBodyProperty',
-                  'STEEL BOUNCE', 'RUBBER BOUNCE', 'LIGHT MASS', 'OBSIDIAN', 'BASALT', 'GRANITE'
-              ],
-              'app/src/main/cpp/native_vulkan_studio_v7_part1.inc': [
-                  'Studio v12.0', 'Unreal-style physics playground', '0.70x RT GI',
-                  'setBodyProperty', 'OBSIDIAN', 'BASALT', 'GRANITE'
-              ],
-              'app/src/main/cpp/native_vulkan_studio_v7_part3.inc': [
-                  'std::sqrt(std::max(0.0f,a.restitution*b.restitution))', 'for(int it=0;it<12;++it)'
-              ],
-              'app/src/main/cpp/native_vulkan_studio_v7_part4.inc': [
-                  'Unreal-style playground platforms', 'if(pathTracing_.load())return .10f', 'cmdUpdateTlasV7'
-              ],
-              'app/src/main/cpp/native_vulkan_studio_v7_part5.inc': [
-                  'Vulkan Studio v12.0', 'PLAYGROUND', 'nativeSetBodyProperty'
-              ],
-              'app/src/main/cpp/shaders/native_studio_v7_rt.frag': [
-                  'Vulkan Studio v12.0', 'fireLighting(Material m,vec3 N,vec3 V,vec3 P){return vec3(0);}',
-                  'floorHitNormal(vec2 uv){return vec3(0,1,0);}', 'inWorldPos.xz*11.0'
-              ],
-              'app/src/main/cpp/shaders/native_studio_v7.vert': [
-                  'Vulkan Studio v12.0 Unreal-style physics playground', 'const int LEAVES=0',
-                  'P=vec3(xz.x,FLOOR_Y,xz.y)', 'variant=int(mod(pc.heroMaterial,10.0)+.5)'
-              ],
-          }
-          for path, needles in checks.items():
-              text = Path(path).read_text()
-              for needle in needles:
-                  assert needle in text, f'{needle!r} missing from {path}'
-          PY
+          grep -F 'VULKAN STUDIO  //  v13.0' app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
+          grep -F 'nativeSetFirstPerson' app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
+          grep -F 'nativeFirstPersonMove' app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
+          grep -F 'GIT_TAG v5.5.0' app/src/main/cpp/CMakeLists.txt
+          grep -F 'vessel_jolt_world.cpp' app/src/main/cpp/CMakeLists.txt
+          grep -F 'EMotionQuality::LinearCast' app/src/main/cpp/vessel_jolt_world.cpp
+          grep -F 'jolt_->step' app/src/main/cpp/native_vulkan_studio_v7_part3.inc
+          grep -F 'Studio v13.0' app/src/main/cpp/native_vulkan_studio_v7_part1.inc
+          grep -F 'Vulkan Studio v13.0' app/src/main/cpp/shaders/native_studio_v7_rt.frag
+          grep -F 'pc.firstPerson' app/src/main/cpp/shaders/native_studio_v7.vert
+          GLSLC="$ANDROID_HOME/ndk/29.0.14206865/shader-tools/linux-x86_64/glslc"
+          "$GLSLC" --target-env=vulkan1.2 -fshader-stage=frag app/src/main/cpp/shaders/native_studio_v7_rt.frag -o /tmp/v13-rt.spv
+          "$GLSLC" --target-env=vulkan1.2 -fshader-stage=vert app/src/main/cpp/shaders/native_studio_v7.vert -o /tmp/v13.vert.spv
 
       - name: Compile, unit-test and lint
         run: |
@@ -133,7 +119,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-final-debug
+          name: vessel-final-v13-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
