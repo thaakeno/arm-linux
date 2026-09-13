@@ -10,7 +10,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /** Persistent low-latency Android -> Termux -> guest evdev input channel. */
 object VesselInputClient {
-    private const val PORT = 47632
+    // 47632 is reserved for the long-lived UML guest command agent.
+    private const val PORT = 47634
     private val running = AtomicBoolean(true)
     private val queue = LinkedBlockingDeque<String>(384)
 
