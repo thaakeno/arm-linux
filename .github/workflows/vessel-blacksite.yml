@@ -1,0 +1,95 @@
+name: Vessel Blacksite
+
+on:
+  push:
+    branches: [ app/vessel-containment ]
+  workflow_dispatch:
+
+concurrency:
+  group: vessel-blacksite-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: temurin
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and NDK
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
+
+      - name: Fetch CC0 photogrammetry and material audio
+        run: |
+          set -euxo pipefail
+          A=app/src/main/assets/vulkan_v7
+          R=app/src/main/res/raw
+          T=app/src/main/cpp/third_party
+          mkdir -p "$A" "$R" "$T"
+          UA='Vessel-Blacksite/1.0'
+          get(){ curl --fail --location --retry 5 --retry-delay 2 --user-agent "$UA" "$1" --output "$2"; test -s "$2"; }
+
+          # Poly Haven CC0 PBR sets. The existing Vulkan material pipeline consumes
+          # these exact filenames, but this build swaps the old showcase materials
+          # for clean facility concrete, rough concrete, and dark industrial stone.
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_diff_2k.jpg' "$A/cobblestone_diff_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_nor_gl_2k.jpg' "$A/cobblestone_nor_gl_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_arm_2k.jpg' "$A/cobblestone_arm_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/concrete_floor/concrete_floor_disp_2k.png' "$A/cobblestone_disp_2k.png"
+
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_diff_2k.jpg' "$A/rough_concrete_diff_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_nor_gl_2k.jpg' "$A/rough_concrete_nor_gl_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_arm_2k.jpg' "$A/rough_concrete_arm_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/rough_concrete/rough_concrete_disp_2k.png' "$A/rough_concrete_disp_2k.png"
+
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_diff_2k.jpg' "$A/dark_rock_diff_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_nor_gl_2k.jpg' "$A/dark_rock_nor_gl_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_arm_2k.jpg' "$A/dark_rock_arm_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/dark_rock/dark_rock_disp_2k.png' "$A/dark_rock_disp_2k.png"
+          get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/dikhololo_night_1k.hdr' "$A/evening_museum_courtyard_1k.hdr" || get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/alps_field_1k.hdr' "$A/evening_museum_courtyard_1k.hdr"
+
+          # Kenney CC0 material/action audio curated by the Tailgate project.
+          BASE='https://raw.githubusercontent.com/Sonofg0tham/tailgate/main/public/assets/audio'
+          get "$BASE/footstep-concrete-1.ogg" "$R/footstep_concrete_1.ogg"
+          get "$BASE/footstep-concrete-2.ogg" "$R/footstep_concrete_2.ogg"
+          get "$BASE/door-latch.ogg" "$R/door_latch.ogg"
+          get "$BASE/breaker-trip.ogg" "$R/breaker_trip.ogg"
+          get "$BASE/metal-impact-1.ogg" "$R/impact_metal.ogg"
+          get "$BASE/metal-impact-3.ogg" "$R/impact_glass.ogg"
+          get "$BASE/shutter.ogg" "$R/impact_soft.ogg"
+          get "$BASE/badge-deny.ogg" "$R/alarm.ogg"
+          get "$BASE/plant-complete.ogg" "$R/power.ogg"
+
+          get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$T/stb_image.h"
+
+      - name: Apply Blacksite game layer
+        run: |
+          set -euxo pipefail
+          python3 -m py_compile tools/venus_poc/apply_containment_game.py
+          python3 tools/venus_poc/apply_containment_game.py
+          grep -F 'BLACKSITE' app/src/main/cpp/native_vulkan_studio_v7_part1.inc
+          grep -F 'nativeMove' app/src/main/cpp/native_vulkan_studio_v7_part5.inc
+          grep -F 'pc.camX' app/src/main/cpp/shaders/native_studio_v7.vert
+          grep -F 'LAB0' app/src/main/cpp/shaders/native_studio_v7_rt.frag
+          grep -F 'private external fun nativeMove' app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
+
+      - name: Build and validate APK
+        run: bash ./gradlew assembleDebug testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
+
+      - name: Upload Blacksite APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: vessel-blacksite-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
