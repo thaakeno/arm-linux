@@ -28,7 +28,8 @@ jobs:
             tools/venus_poc/vessel_runtime_daemon_v31.py \
             tools/venus_poc/guest_command_agent.py \
             tools/venus_poc/guest_relay_wayland.py \
-            tools/venus_poc/host_relay_wayland.py
+            tools/venus_poc/host_relay_wayland.py \
+            tools/venus_poc/host_input_bridge.py
           bash -n tools/venus_poc/run_venus_wayland.sh
       - name: Compile GPU output bridge and verify Debian 12 runtime
         run: |
@@ -79,7 +80,7 @@ jobs:
           set -euxo pipefail
           test ! -e app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
           ! find app/src/main -type f | grep -E 'BounceQuest|native_vulkan_studio|native_cube\.(vert|frag)'
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v31.py tools/venus_poc/guest_command_agent.py tools/venus_poc/guest_relay_wayland.py tools/venus_poc/host_relay_wayland.py
+          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v31.py tools/venus_poc/guest_command_agent.py tools/venus_poc/guest_relay_wayland.py tools/venus_poc/host_relay_wayland.py tools/venus_poc/host_input_bridge.py
           bash -n tools/venus_poc/run_venus_wayland.sh
           grep -F 'REQUIRED_PROTOCOL = 31' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'vessel_runtime_daemon_v31.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
@@ -91,6 +92,9 @@ jobs:
           ! grep -F -- '--xwayland' tools/venus_poc/vessel_runtime_daemon_v31.py
           grep -F 'softwareFallback": False' tools/venus_poc/vessel_runtime_daemon_v31.py
           grep -F 'damage-driven' tools/venus_poc/vessel_runtime_daemon_v31.py tools/venus_poc/kwin_vessel_output/vesseloutput.cpp
+          grep -F 'org.kde.kwin.Effects.loadEffect' tools/venus_poc/guest_command_agent.py
+          grep -F 'host_input_bridge.py' tools/venus_poc/run_venus_wayland.sh
+          grep -F 'VesselInputClient.absolute' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           grep -F 'VesselWaylandPresenter.attach' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           grep -F 'vessel_wayland_presenter' app/src/main/cpp/CMakeLists.txt
           ! grep -F 'implementation(project(":lorie"))' app/build.gradle.kts
