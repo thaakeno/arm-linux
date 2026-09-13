@@ -33,14 +33,40 @@ jobs:
           A=app/src/main/assets/bounce
           R=app/src/main/res/raw
           T=app/src/main/cpp/third_party
-          mkdir -p "$A" "$R" "$T"
+          M="$A/material-src"
+          mkdir -p "$A" "$R" "$T" "$M"
           get(){ curl --fail --location --retry 5 --retry-delay 2 "$1" -o "$2"; test -s "$2"; }
 
-          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_diff_2k.jpg' "$A/concrete_diff.jpg"
-          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_nor_gl_2k.jpg' "$A/concrete_normal.jpg"
-          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_arm_2k.jpg' "$A/concrete_arm.jpg"
-          get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$T/stb_image.h"
+          # Three genuinely different CC0 PBR surfaces are packed into one atlas so the
+          # mobile renderer keeps only three material samplers: concrete, wood and metal.
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_floor/concrete_floor_diff_1k.jpg' "$M/concrete_diff.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_floor/concrete_floor_nor_gl_1k.jpg' "$M/concrete_normal.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_floor/concrete_floor_arm_1k.jpg' "$M/concrete_arm.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/wood_planks/wood_planks_diff_1k.jpg' "$M/wood_diff.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/wood_planks/wood_planks_nor_gl_1k.jpg' "$M/wood_normal.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/wood_planks/wood_planks_arm_1k.jpg' "$M/wood_arm.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/painted_metal_shutter/painted_metal_shutter_diff_1k.jpg' "$M/metal_diff.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/painted_metal_shutter/painted_metal_shutter_nor_gl_1k.jpg' "$M/metal_normal.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/painted_metal_shutter/painted_metal_shutter_arm_1k.jpg' "$M/metal_arm.jpg"
+          python3 -m pip install --quiet pillow
+          python3 - <<'PY'
+          from PIL import Image
+          from pathlib import Path
+          A=Path('app/src/main/assets/bounce');M=A/'material-src'
+          for out,names in {
+              'concrete_diff.jpg':['concrete_diff.jpg','wood_diff.jpg','metal_diff.jpg'],
+              'concrete_normal.jpg':['concrete_normal.jpg','wood_normal.jpg','metal_normal.jpg'],
+              'concrete_arm.jpg':['concrete_arm.jpg','wood_arm.jpg','metal_arm.jpg'],
+          }.items():
+              atlas=Image.new('RGB',(1024,3072))
+              for i,name in enumerate(names):
+                  im=Image.open(M/name).convert('RGB').resize((1024,1024),Image.Resampling.LANCZOS)
+                  atlas.paste(im,(0,i*1024))
+              atlas.save(A/out,quality=93,optimize=True)
+          PY
+          rm -rf "$M"
 
+          get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$T/stb_image.h"
           python3 tools/build_bounce_scene.py
           test -s "$A/scene.bqmesh"
           test -s "$A/alps.jpg"
