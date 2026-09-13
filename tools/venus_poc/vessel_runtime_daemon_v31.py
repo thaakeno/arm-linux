@@ -312,14 +312,58 @@ chmod 700 /tmp/vessel-runtime
 {env}
 mkdir -p /root/.config
 kwriteconfig5 --file /root/.config/kwinrc --group Plugins --key vesseloutputEnabled true
-kwin_wayland --virtual --width {width} --height {height} --scale 1 --socket wayland-0 &
+rm -f /tmp/vessel-kwin.log /tmp/vessel-effect-session.log /tmp/vessel-effect-loaded /tmp/vessel-kwin.pid
+kwin_wayland --virtual --width {width} --height {height} --scale 1 --socket wayland-0 >/tmp/vessel-kwin.log 2>&1 &
 KWIN_PID=$!
-for i in $(seq 1 160); do
+echo "$KWIN_PID" >/tmp/vessel-kwin.pid
+for i in $(seq 1 200); do
   [ -S /tmp/vessel-runtime/wayland-0 ] && break
-  kill -0 "$KWIN_PID" 2>/dev/null || exit 41
+  kill -0 "$KWIN_PID" 2>/dev/null || {{ wait "$KWIN_PID" || true; exit 41; }}
   sleep .1
 done
 [ -S /tmp/vessel-runtime/wayland-0 ] || exit 42
+
+# Do the first effect load from inside the exact dbus-run-session that owns
+# KWin. This avoids guessing a session bus address from /proc and fixes the
+# repeated ServiceUnknown loop seen on physical devices.
+KWIN_DBUS_READY=0
+for i in $(seq 1 200); do
+  kill -0 "$KWIN_PID" 2>/dev/null || {{ wait "$KWIN_PID" || true; exit 43; }}
+  if dbus-send --session --print-reply --reply-timeout=500 \
+      --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+      org.freedesktop.DBus.NameHasOwner string:org.kde.KWin 2>/dev/null \
+      | grep -q 'boolean true'; then
+    KWIN_DBUS_READY=1
+    break
+  fi
+  sleep .1
+done
+if [ "$KWIN_DBUS_READY" != 1 ]; then
+  echo 'KWin Wayland socket exists but org.kde.KWin never appeared on its session bus' >>/tmp/vessel-effect-session.log
+  exit 44
+fi
+
+EFFECT_READY=0
+for i in $(seq 1 120); do
+  kill -0 "$KWIN_PID" 2>/dev/null || {{ wait "$KWIN_PID" || true; exit 43; }}
+  dbus-send --session --print-reply --reply-timeout=700 \
+    --dest=org.kde.KWin /Effects org.kde.kwin.Effects.loadEffect string:vesseloutput \
+    >>/tmp/vessel-effect-session.log 2>&1 || true
+  if dbus-send --session --print-reply --reply-timeout=700 \
+      --dest=org.kde.KWin /Effects org.kde.kwin.Effects.isEffectLoaded string:vesseloutput \
+      2>>/tmp/vessel-effect-session.log | grep -q 'boolean true'; then
+    EFFECT_READY=1
+    touch /tmp/vessel-effect-loaded
+    echo 'vesseloutput ACTIVE on KWin session bus' >>/tmp/vessel-effect-session.log
+    break
+  fi
+  sleep .1
+done
+if [ "$EFFECT_READY" != 1 ]; then
+  echo 'KWin DBus is alive but vesseloutput could not be loaded' >>/tmp/vessel-effect-session.log
+  exit 45
+fi
+
 export WAYLAND_DISPLAY=wayland-0
 kded5 >/tmp/vessel-kded.log 2>&1 &
 plasmashell >/tmp/vessel-plasmashell.log 2>&1 &
@@ -328,7 +372,9 @@ wait "$KWIN_PID"
         encoded = base64.b64encode(wrapper.encode()).decode()
         launch = (
             "rm -rf /tmp/vessel-runtime; mkdir -p /tmp/vessel-runtime; chmod 700 /tmp/vessel-runtime; "
-            "rm -f /tmp/vessel-wayland.log /tmp/vessel-kded.log /tmp/vessel-plasmashell.log /tmp/vessel-wayland.pid; "
+            "rm -f /tmp/vessel-wayland.log /tmp/vessel-kwin.log /tmp/vessel-effect-session.log "
+            "/tmp/vessel-effect-loaded /tmp/vessel-kded.log /tmp/vessel-plasmashell.log "
+            "/tmp/vessel-wayland.pid /tmp/vessel-kwin.pid; "
             f"printf '%s' {shlex.quote(encoded)} | base64 -d > /root/vessel-wayland-session.sh; "
             "chmod +x /root/vessel-wayland-session.sh; "
             "pkill -x plasmashell 2>/dev/null || true; pkill -x kwin_wayland 2>/dev/null || true; "
@@ -338,7 +384,7 @@ wait "$KWIN_PID"
         )
         self.guest(launch, 30)
 
-        self.set_progress("wayland_present", 92, "Waiting for first Adreno-backed shared frame")
+        self.set_progress("wayland_present", 92, "Connecting KWin GPU output to Android display")
         deadline = time.monotonic() + 90
         startup_grace = time.monotonic() + 8.0
         relay_log = base.RUNTIME / "vessel-relay.log"
@@ -347,8 +393,8 @@ wait "$KWIN_PID"
             out = self.guest(
                 "pgrep -x kwin_wayland >/dev/null && pgrep -x plasmashell >/dev/null && "
                 "test -S /tmp/vessel-runtime/wayland-0 && test -S /tmp/vessel-frame-export.sock && "
-                "echo WAYLAND_SESSION_READY || true; "
-                "grep -m1 -E 'OpenGL renderer string:|Driver:' /tmp/vessel-wayland.log 2>/dev/null || true",
+                "test -f /tmp/vessel-effect-loaded && echo WAYLAND_SESSION_READY || true; "
+                "grep -m1 -E 'OpenGL renderer string:|Driver:' /tmp/vessel-kwin.log /tmp/vessel-wayland.log 2>/dev/null || true",
                 12,
             )
             low = out.lower()
@@ -376,24 +422,31 @@ wait "$KWIN_PID"
                 return self.state()
 
             health = self.guest(
-                "if pgrep -x kwin_wayland >/dev/null; then echo KWIN_ALIVE; "
+                "if [ -s /tmp/vessel-kwin.pid ]; then "
+                "KP=$(cat /tmp/vessel-kwin.pid); "
+                "if [ -r /proc/$KP/status ]; then ST=$(awk '/^State:/{print $2}' /proc/$KP/status); "
+                "if [ \"$ST\" = Z ]; then echo KWIN_DEAD; else echo KWIN_ALIVE; fi; "
+                "else echo KWIN_DEAD; fi; "
                 "elif [ -s /tmp/vessel-wayland.pid ] && kill -0 $(cat /tmp/vessel-wayland.pid) 2>/dev/null; "
                 "then echo SESSION_STARTING; else echo SESSION_DEAD; fi",
                 8,
             )
-            if time.monotonic() >= startup_grace and "SESSION_DEAD" in health:
+            if time.monotonic() >= startup_grace and ("SESSION_DEAD" in health or "KWIN_DEAD" in health):
                 break
             time.sleep(.30)
 
         guest_tail = self.guest(
             "echo '=== session ==='; "
-            "if [ -s /tmp/vessel-wayland.pid ]; then echo pid=$(cat /tmp/vessel-wayland.pid); ps -o pid,ppid,stat,comm,args -p $(cat /tmp/vessel-wayland.pid) 2>/dev/null || true; fi; "
-            "echo '=== kwin/session log ==='; tail -260 /tmp/vessel-wayland.log 2>/dev/null || true; "
-            "echo '=== effect loader ==='; tail -160 /tmp/vessel-effect-loader.log 2>/dev/null || true; "
+            "if [ -s /tmp/vessel-wayland.pid ]; then echo session_pid=$(cat /tmp/vessel-wayland.pid); fi; "
+            "if [ -s /tmp/vessel-kwin.pid ]; then echo kwin_pid=$(cat /tmp/vessel-kwin.pid); "
+            "cat /proc/$(cat /tmp/vessel-kwin.pid)/status 2>/dev/null | grep -E '^(Name|State|Pid|PPid):' || true; fi; "
+            "echo '=== kwin ==='; tail -260 /tmp/vessel-kwin.log 2>/dev/null || true; "
+            "echo '=== session log ==='; tail -160 /tmp/vessel-wayland.log 2>/dev/null || true; "
+            "echo '=== in-session effect load ==='; tail -160 /tmp/vessel-effect-session.log 2>/dev/null || true; "
+            "echo '=== supervisor effect loader ==='; tail -80 /tmp/vessel-effect-loader.log 2>/dev/null || true; "
             "echo '=== kded ==='; tail -100 /tmp/vessel-kded.log 2>/dev/null || true; "
             "echo '=== plasmashell ==='; tail -120 /tmp/vessel-plasmashell.log 2>/dev/null || true; "
             "echo '=== relay ==='; tail -160 /tmp/vessel-guest-wayland.log 2>/dev/null || true; "
-            "echo '=== processes ==='; ps -ef | grep -E 'kwin_wayland|plasmashell|dbus-run-session|dbus-daemon' | grep -v grep || true; "
             "echo '=== sockets ==='; ls -l /tmp/.venus_test /tmp/vessel-runtime/wayland-0 /tmp/vessel-frame-export.sock 2>&1 || true",
             15,
         )
@@ -404,7 +457,7 @@ wait "$KWIN_PID"
             pass
         raise RuntimeError(
             "Zink/Venus Wayland presentation did not become ready:\n" +
-            guest_tail[-15000:] + "\n=== host relay ===\n" + host_tail
+            guest_tail[-18000:] + "\n=== host relay ===\n" + host_tail
         )
 
     def desktop_action(self, name: str) -> dict[str, Any]:
