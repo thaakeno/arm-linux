@@ -42,7 +42,7 @@ void BallPhysics::collideAabb(const Aabb& box, PhysicsEvents& ev){
 }
 
 PhysicsEvents BallPhysics::step(float dt,float moveX,float moveZ,bool jump,bool dash){
-    PhysicsEvents ev{};dt=std::clamp(dt,0.0f,.033f);dashCooldown_=std::max(0.0f,dashCooldown_-dt);
+    PhysicsEvents ev{};dt=std::clamp(dt,0.0f,.033f);worldTime_+=dt;dashCooldown_=std::max(0.0f,dashCooldown_-dt);
     float ml=std::sqrt(moveX*moveX+moveZ*moveZ);if(ml>1.0f){moveX/=ml;moveZ/=ml;}
     const bool wasGrounded=state_.grounded;
     float accel=wasGrounded?30.0f:13.0f;
@@ -58,7 +58,12 @@ PhysicsEvents BallPhysics::step(float dt,float moveX,float moveZ,bool jump,bool 
     state_.vel.y-=18.5f*dt;state_.pos=add(state_.pos,mul(state_.vel,dt));
     for(const auto& p:kPlatforms)collideAabb(p,ev);
 
-    // Friendly launch pad on the opening platform.
+    // Course crates are gameplay objects, not scenery. The third one sweeps laterally.
+    const Aabb crateA{{-3.1f,.35f,-.5f},{.48f,.48f,.48f},3,false,false};
+    const Aabb crateB{{-2.0f,.35f,-.5f},{.48f,.48f,.48f},3,false,false};
+    const Aabb moving{{3.2f+std::sin(worldTime_*1.1f)*1.25f,.45f,-2.7f},{.48f,.48f,.48f},3,false,false};
+    collideAabb(crateA,ev);collideAabb(crateB,ev);collideAabb(moving,ev);
+
     if(std::abs(state_.pos.x-kBouncePad.x)<1.15f&&std::abs(state_.pos.z-kBouncePad.z)<1.15f&&state_.pos.y<1.45f&&state_.vel.y<=1.0f){
         state_.vel.y=12.0f;state_.grounded=false;ev.bounced=true;ev.impact=8.0f;state_.squashVel+=2.1f;
     }
