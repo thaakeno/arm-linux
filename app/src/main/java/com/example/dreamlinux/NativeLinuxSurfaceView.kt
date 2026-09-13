@@ -15,8 +15,8 @@ import android.view.inputmethod.InputMethodManager
 import kotlin.math.abs
 
 /**
- * Final Vessel desktop view: Android Surface + direct Linux evdev input.
- * The display bridge owns the Surface; input never goes through VNC/RFB.
+ * Final Vessel desktop view: SurfaceFlinger-backed Vulkan surface + direct input.
+ * Desktop pixels never pass through VNC, screenshots or a CPU framebuffer.
  */
 class NativeLinuxSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
     enum class PointerMode { DIRECT, TRACKPAD }
@@ -40,15 +40,15 @@ class NativeLinuxSurfaceView(context: Context) : SurfaceView(context), SurfaceHo
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         requestFocus()
-        VmSessionService.active?.attachSurface(holder.surface)
+        VesselWaylandPresenter.attach(holder.surface)
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        VmSessionService.active?.attachSurface(holder.surface)
+        VesselWaylandPresenter.attach(holder.surface)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        VmSessionService.active?.detachSurface(holder.surface)
+        VesselWaylandPresenter.detach()
     }
 
     fun showKeyboard() {
