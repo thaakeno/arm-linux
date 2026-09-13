@@ -13,23 +13,24 @@ permissions:
   contents: read
 
 jobs:
-  kwin-backend:
+  gpu-wayland-runtime:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
           submodules: false
-      - name: Syntax-check protocol 30 runtime
+      - name: Syntax-check protocol 31 runtime
         run: |
           set -euxo pipefail
           python3 -m py_compile \
-            tools/venus_poc/vessel_runtime_daemon_v30.py \
+            tools/venus_poc/vessel_runtime_daemon_v31.py \
             tools/venus_poc/guest_command_agent.py \
-            tools/venus_poc/guest_relay_wayland.py
+            tools/venus_poc/guest_relay_wayland.py \
+            tools/venus_poc/host_relay_wayland.py
           bash -n tools/venus_poc/run_venus_wayland.sh
-      - name: Compile KWin output backend on Debian 12
+      - name: Compile GPU output bridge and verify Debian 12 runtime
         run: |
           set -euxo pipefail
           docker run --rm \
@@ -41,8 +42,11 @@ jobs:
               apt-get update
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
                 ca-certificates cmake ninja-build g++ extra-cmake-modules \
-                qtbase5-dev libkf5coreaddons-dev kwin-dev \
-                libxcb1-dev libepoxy-dev libegl1-mesa-dev libgl-dev
+                qtbase5-dev qtwayland5 libkf5coreaddons-dev kwin-dev \
+                libxcb1-dev libepoxy-dev libegl1-mesa-dev libgl-dev \
+                libgl1-mesa-dri mesa-utils
+              find /usr/lib -path "*/dri/zink_dri.so" -print -quit | grep -F zink_dri.so
+              find /usr/lib -path "*/qt5/plugins/platforms/libqwayland-generic.so" -print -quit | grep -F libqwayland-generic.so
               rm -rf /tmp/vessel-kwin-build
               cmake -S tools/venus_poc/kwin_vessel_output \
                     -B /tmp/vessel-kwin-build \
@@ -53,7 +57,7 @@ jobs:
             '
 
   build:
-    needs: kwin-backend
+    needs: gpu-wayland-runtime
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -70,16 +74,23 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
-      - name: Verify Wayland Venus AHardwareBuffer architecture
+      - name: Verify protocol 31 GPU architecture
         run: |
           set -euxo pipefail
           test ! -e app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
           ! find app/src/main -type f | grep -E 'BounceQuest|native_vulkan_studio|native_cube\.(vert|frag)'
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v30.py tools/venus_poc/guest_command_agent.py tools/venus_poc/guest_relay_wayland.py
+          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v31.py tools/venus_poc/guest_command_agent.py tools/venus_poc/guest_relay_wayland.py tools/venus_poc/host_relay_wayland.py
           bash -n tools/venus_poc/run_venus_wayland.sh
-          grep -F 'REQUIRED_PROTOCOL = 30' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v30.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'wayland-venus-ahb-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'REQUIRED_PROTOCOL = 31' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v31.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'wayland-zink-venus-ahb-v2' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'MESA_LOADER_DRIVER_OVERRIDE=zink' tools/venus_poc/vessel_runtime_daemon_v31.py
+          grep -F 'GALLIUM_DRIVER=zink' tools/venus_poc/vessel_runtime_daemon_v31.py
+          grep -F 'LIBGL_ALWAYS_SOFTWARE=0' tools/venus_poc/vessel_runtime_daemon_v31.py
+          grep -F 'qtwayland5' tools/venus_poc/vessel_runtime_daemon_v31.py
+          ! grep -F -- '--xwayland' tools/venus_poc/vessel_runtime_daemon_v31.py
+          grep -F 'softwareFallback": False' tools/venus_poc/vessel_runtime_daemon_v31.py
+          grep -F 'damage-driven' tools/venus_poc/vessel_runtime_daemon_v31.py tools/venus_poc/kwin_vessel_output/vesseloutput.cpp
           grep -F 'VesselWaylandPresenter.attach' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           grep -F 'vessel_wayland_presenter' app/src/main/cpp/CMakeLists.txt
           ! grep -F 'implementation(project(":lorie"))' app/build.gradle.kts
@@ -87,7 +98,7 @@ jobs:
           test ! -e app/src/main/cpp/native_desktop_surface.cpp
           test ! -e tools/venus_poc/guest_frame_streamer_v2.c
           test ! -e tools/venus_poc/guest_frame_streamer.py
-          ! grep -E 'VFRM2|FRAME_STREAMER|ANativeWindow_lock|Xtigervnc|vncserver|lorie-direct-x11-v1' tools/venus_poc/vessel_runtime_daemon_v30.py app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt app/src/main/cpp/CMakeLists.txt
+          ! grep -E 'VFRM2|FRAME_STREAMER|ANativeWindow_lock|Xtigervnc|vncserver|lorie-direct-x11-v1' tools/venus_poc/vessel_runtime_daemon_v31.py app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt app/src/main/cpp/CMakeLists.txt
       - name: Build, test and lint app
         run: |
           chmod +x gradlew
