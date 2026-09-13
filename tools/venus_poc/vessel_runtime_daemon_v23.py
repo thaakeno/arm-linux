@@ -19,8 +19,11 @@ core = v22.core
 v11 = v22.v11
 PROTOCOL_VERSION = 23
 core.PROTOCOL_VERSION = PROTOCOL_VERSION
-INPUT_CLIENT_PORT = 47632
-INPUT_GUEST_PORT = 47633
+# 47631 = Android control protocol, 47632 = guest command agent.
+# Direct input has its own dedicated ports so it can never steal the command
+# listener and break Debian/Venus startup.
+INPUT_CLIENT_PORT = 47634
+INPUT_GUEST_PORT = 47635
 
 class InputBridge:
     def __init__(self):
@@ -87,7 +90,7 @@ def ensure_input_agent(self: core.Runtime) -> bool:
         cmd = (
             f"printf '%s' '{payload}' | base64 -d >/root/vessel_input_agent.py; chmod 700 /root/vessel_input_agent.py; "
             "if ! pgrep -f '^python3 /root/vessel_input_agent.py' >/dev/null; then "
-            "setsid -f python3 /root/vessel_input_agent.py 10.0.2.2 47633 >/tmp/vessel-input.log 2>&1 </dev/null; fi; "
+            f"setsid -f python3 /root/vessel_input_agent.py 10.0.2.2 {INPUT_GUEST_PORT} >/tmp/vessel-input.log 2>&1 </dev/null; fi; "
             "echo INPUT_READY"
         )
         out = v11.resilient_guest(self, cmd, 8.0, attempts=8)
