@@ -23,6 +23,7 @@ constexpr uint32_t kMagic = 0x31574656u; // VFW1
 constexpr uint32_t kImport = 1;
 constexpr uint32_t kFrame = 2;
 constexpr const char *kSocketPath = "/tmp/vessel-frame-export.sock";
+constexpr const char *kEffectLog = "/tmp/vessel-output-effect.log";
 
 #pragma pack(push, 1)
 struct FrameMessage {
@@ -38,6 +39,17 @@ struct FrameMessage {
     uint64_t serial;
 };
 #pragma pack(pop)
+
+void appendLog(const std::string &line)
+{
+    const int fd = open(kEffectLog, O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        return;
+    }
+    const std::string text = line + "\n";
+    (void)write(fd, text.data(), text.size());
+    close(fd);
+}
 
 bool sendAll(int fd, const void *ptr, size_t len)
 {
@@ -63,15 +75,16 @@ class VesselOutputEffect final : public Effect
 public:
     VesselOutputEffect()
     {
+        appendLog("effect-constructed");
         // Do not touch EGL here. KWin can construct/check effects before the
-        // compositor has made its OpenGL context current. Querying EGL in that
-        // phase is unsafe on the Zink/Venus stack. Prime one repaint only; the
-        // first postPaintScreen() is the first point where we probe EGL.
+        // compositor has made its OpenGL context current. Prime one repaint;
+        // postPaintScreen() is the first safe point to probe EGL.
         effects->addRepaintFull();
     }
 
     ~VesselOutputEffect() override
     {
+        appendLog("effect-destroyed");
         destroyExport();
         if (m_socket >= 0) {
             close(m_socket);
@@ -80,19 +93,19 @@ public:
 
     static bool supported()
     {
-        // Keep capability detection side-effect free. In particular, do not call
-        // eglGetCurrentDisplay()/eglQueryString() here: KWin invokes supported()
-        // while effects are being loaded, which may precede a current context.
         return effects->isOpenGLCompositing();
     }
 
     void postPaintScreen() override
     {
         effects->postPaintScreen();
+        if (!m_seenPaint) {
+            m_seenPaint = true;
+            appendLog("postPaintScreen-active");
+        }
         if (!ensureExport()) {
-            // Startup can race both compositor context creation and the relay
-            // socket. Retry until the first export succeeds, then become entirely
-            // damage-driven.
+            // Retry only while the output bridge is being established. Once the
+            // dmabuf is exported, normal KWin scene damage drives every frame.
             effects->addRepaintFull();
             return;
         }
@@ -101,8 +114,9 @@ public:
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, m_width, m_height);
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        // Correctness-first producer completion. Pixels stay on the GPU. The
-        // expensive wait now only happens for frames KWin actually paints.
+        // Correctness first: this guarantees producer completion before Android
+        // consumes the shared dma-buf. No pixels cross the CPU. The Android side
+        // is independently pipelined so it does not queue-wait after every frame.
         glFinish();
 
         FrameMessage msg{};
@@ -116,8 +130,11 @@ public:
         msg.modifier = m_modifier;
         msg.serial = ++m_serial;
         if (!sendFrame(msg, -1)) {
+            noteFailure("frame-notify-send-failed");
             disconnectSocket();
             effects->addRepaintFull();
+        } else if (m_serial <= 3 || (m_serial % 120) == 0) {
+            appendLog("frame serial=" + std::to_string(m_serial));
         }
     }
 
@@ -137,15 +154,36 @@ private:
     uint32_t m_fourcc = 0;
     uint64_t m_modifier = 0;
     uint64_t m_serial = 0;
+    bool m_seenPaint = false;
+    std::string m_lastFailure;
+
+    void noteFailure(const std::string &reason)
+    {
+        if (reason == m_lastFailure) {
+            return;
+        }
+        m_lastFailure = reason;
+        appendLog("waiting: " + reason);
+    }
+
+    void clearFailure()
+    {
+        if (!m_lastFailure.empty()) {
+            appendLog("recovered-from: " + m_lastFailure);
+            m_lastFailure.clear();
+        }
+    }
 
     bool initEglExport()
     {
         if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
+            noteFailure("no-current-egl-context");
             return false;
         }
 
         const EGLDisplay display = eglGetCurrentDisplay();
         if (display == EGL_NO_DISPLAY) {
+            noteFailure("no-current-egl-display");
             return false;
         }
 
@@ -159,7 +197,12 @@ private:
         m_display = display;
 
         const char *extensions = eglQueryString(m_display, EGL_EXTENSIONS);
-        if (!extensions || std::strstr(extensions, "EGL_MESA_image_dma_buf_export") == nullptr) {
+        if (!extensions) {
+            noteFailure("egl-extension-query-failed");
+            return false;
+        }
+        if (std::strstr(extensions, "EGL_MESA_image_dma_buf_export") == nullptr) {
+            noteFailure("EGL_MESA_image_dma_buf_export-missing");
             return false;
         }
 
@@ -169,8 +212,12 @@ private:
             m_exportQuery = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC>(eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
             m_export = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(eglGetProcAddress("eglExportDMABUFImageMESA"));
         }
-
-        return m_createImage && m_destroyImage && m_exportQuery && m_export;
+        if (!(m_createImage && m_destroyImage && m_exportQuery && m_export)) {
+            noteFailure("egl-dmabuf-export-entrypoint-missing");
+            return false;
+        }
+        clearFailure();
+        return true;
     }
 
     bool connectSocket()
@@ -180,6 +227,7 @@ private:
         }
         const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0) {
+            noteFailure("frame-socket-create-failed");
             return false;
         }
         sockaddr_un addr{};
@@ -187,9 +235,11 @@ private:
         std::strncpy(addr.sun_path, kSocketPath, sizeof(addr.sun_path) - 1);
         if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
             close(fd);
+            noteFailure("frame-relay-not-listening");
             return false;
         }
         m_socket = fd;
+        appendLog("frame-relay-connected");
         return true;
     }
 
@@ -248,6 +298,7 @@ private:
 
         const QSize size = effects->virtualScreenSize();
         if (size.isEmpty()) {
+            noteFailure("virtual-screen-size-empty");
             return false;
         }
         if (m_texture && size.width() == m_width && size.height() == m_height) {
@@ -266,11 +317,16 @@ private:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, m_width, m_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glBindTexture(GL_TEXTURE_2D, 0);
+        if (!m_texture) {
+            noteFailure("gl-export-texture-create-failed");
+            return false;
+        }
 
         const EGLint attrs[] = {EGL_GL_TEXTURE_LEVEL_KHR, 0, EGL_NONE};
         m_image = m_createImage(m_display, eglGetCurrentContext(), EGL_GL_TEXTURE_2D_KHR,
                                 reinterpret_cast<EGLClientBuffer>(static_cast<uintptr_t>(m_texture)), attrs);
         if (m_image == EGL_NO_IMAGE_KHR) {
+            noteFailure("eglCreateImageKHR-failed-" + std::to_string(static_cast<int>(eglGetError())));
             destroyExport();
             return false;
         }
@@ -278,7 +334,13 @@ private:
         int fourcc = 0;
         int planes = 0;
         EGLuint64KHR modifier = 0;
-        if (!m_exportQuery(m_display, m_image, &fourcc, &planes, &modifier) || planes != 1) {
+        if (!m_exportQuery(m_display, m_image, &fourcc, &planes, &modifier)) {
+            noteFailure("eglExportDMABUFImageQueryMESA-failed-" + std::to_string(static_cast<int>(eglGetError())));
+            destroyExport();
+            return false;
+        }
+        if (planes != 1) {
+            noteFailure("multi-plane-export-unsupported-planes=" + std::to_string(planes));
             destroyExport();
             return false;
         }
@@ -286,6 +348,7 @@ private:
         EGLint stride = 0;
         EGLint offset = 0;
         if (!m_export(m_display, m_image, &fd, &stride, &offset) || fd < 0) {
+            noteFailure("eglExportDMABUFImageMESA-failed-" + std::to_string(static_cast<int>(eglGetError())));
             destroyExport();
             return false;
         }
@@ -308,16 +371,20 @@ private:
         const bool ok = sendFrame(msg, fd);
         close(fd);
         if (!ok) {
+            noteFailure("dmabuf-import-message-send-failed");
             disconnectSocket();
             destroyExport();
             return false;
         }
+        clearFailure();
+        appendLog(
+            "dmabuf-export-ready " + std::to_string(m_width) + "x" + std::to_string(m_height) +
+            " stride=" + std::to_string(m_stride) + " fourcc=" + std::to_string(m_fourcc) +
+            " modifier=" + std::to_string(m_modifier));
         return true;
     }
 };
 
-// Debian 12 ships KWin 5.27, where this macro takes four arguments:
-// effect class, metadata JSON, supported body, enabled-by-default body.
 KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED(VesselOutputEffect,
                                       "vesseloutput.json",
                                       return VesselOutputEffect::supported();,
