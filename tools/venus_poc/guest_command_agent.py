@@ -7,13 +7,16 @@ parsing.
 """
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import socket
 import subprocess
 import time
 
 HOST = "10.0.2.2"
 PORT = 47640
+LOCK_PATH = "/tmp/vessel-guest-command-agent.lock"
 
 
 def send_line(sock: socket.socket, obj: dict) -> None:
@@ -22,7 +25,7 @@ def send_line(sock: socket.socket, obj: dict) -> None:
 
 def serve(sock: socket.socket) -> None:
     f = sock.makefile("rb")
-    send_line(sock, {"hello": "vessel-guest-command-v1"})
+    send_line(sock, {"hello": "vessel-guest-command-v1", "pid": os.getpid()})
     while True:
         raw = f.readline()
         if not raw:
@@ -41,6 +44,7 @@ def serve(sock: socket.socket) -> None:
                 stderr=subprocess.STDOUT,
                 timeout=timeout,
                 env=None,
+                start_new_session=True,
             )
             send_line(sock, {"id": req_id, "rc": cp.returncode, "output": cp.stdout[-2_000_000:]})
         except subprocess.TimeoutExpired as exc:
@@ -53,6 +57,16 @@ def serve(sock: socket.socket) -> None:
 
 
 def main() -> None:
+    # Only one reverse-command agent may exist in a guest. A second agent could
+    # race the first connection and replace the host's active RPC socket.
+    lock = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return
+    lock.write(str(os.getpid()))
+    lock.flush()
+
     while True:
         try:
             with socket.create_connection((HOST, PORT), timeout=5) as sock:
