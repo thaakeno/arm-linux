@@ -7,9 +7,10 @@ tile, encode, relay, decode, scale, or repost desktop pixels.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
-import pathlib
+import re
 import shlex
 import signal
 import socket
@@ -48,6 +49,97 @@ class DirectXRuntime(base.Runtime):
         })
         return state
 
+    def guest(self, command: str, timeout: float = 45.0) -> str:
+        """Run one shell command and do not hand the PTY to the next command
+        until bash has printed its prompt again.
+
+        The UML console is an interactive tty. Waiting only for a completion
+        marker can race bash re-entering readline, so commands are serialized
+        through the marker *and* the following prompt.
+        """
+        if not command.strip():
+            return ""
+        if not self.guest_ready:
+            raise RuntimeError("Debian is not ready")
+
+        marker = "__VESSEL_DONE_%x__" % int(time.time_ns())
+        wrapped = f"{command}\nprintf '{marker}:%s\\n' $?\n"
+        result_re = re.compile(re.escape(marker) + r":([0-9]+)")
+
+        with self.command_lock:
+            self._write(wrapped)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                with self.lock:
+                    text = self.console_text
+                match = result_re.search(text)
+                if match is not None:
+                    prompt_pos = text.find(base.PROMPT, match.end())
+                    if prompt_pos != -1:
+                        rc = int(match.group(1))
+                        output = text[max(0, match.start() - 50000):match.start()]
+                        if rc != 0:
+                            raise RuntimeError(f"guest command failed rc={rc}: {output[-5000:]}")
+                        return output
+                if self.proc is None or self.proc.poll() is not None:
+                    raise RuntimeError("UML exited while running guest command")
+                time.sleep(0.02)
+
+        with self.lock:
+            tail = repr(self.console_text[-3000:])
+        raise TimeoutError(f"Guest command timed out waiting for {marker!r}; console tail={tail}")
+
+    def _prepare_venus_guest(self) -> None:
+        """Install the relay without sending a >4 KiB command through the tty.
+
+        Linux canonical tty input is line-oriented and oversized injected lines
+        are not a safe transport for a base64-encoded Python source file. Send
+        the payload as small append commands instead, then decode it in-guest.
+        """
+        self.set_progress("venus", 40, "Preparing Mesa Venus relay")
+        source = base.GUEST_RELAY_SOURCE
+        if not source.exists():
+            raise RuntimeError(f"missing guest relay source: {source}")
+
+        payload = base64.b64encode(source.read_bytes()).decode("ascii")
+        self.guest("rm -f /root/guest_relay_direct.py.b64 /root/guest_relay_direct.py", 8)
+        chunk_size = 1024
+        for offset in range(0, len(payload), chunk_size):
+            chunk = payload[offset:offset + chunk_size]
+            self.guest(
+                f"printf '%s' {shlex.quote(chunk)} >> /root/guest_relay_direct.py.b64",
+                8,
+            )
+        self.guest(
+            "base64 -d /root/guest_relay_direct.py.b64 > /root/guest_relay_direct.py && "
+            "rm -f /root/guest_relay_direct.py.b64 && test -s /root/guest_relay_direct.py",
+            12,
+        )
+
+        check = self.guest(
+            "test -s /opt/mesa-venus-26.2.2/lib/aarch64-linux-gnu/libvulkan_virtio.so && "
+            "test -f /root/virtio-wsi-test.json && echo VENUS_READY",
+            10,
+        )
+        if "VENUS_READY" not in check:
+            raise RuntimeError("Mesa Venus 26.2.2 is not installed in this guest image")
+
+        self.guest(
+            "pkill -f '[g]uest_relay_direct.py' 2>/dev/null || true; "
+            "rm -f /tmp/.venus_test /tmp/vessel-guest-relay.log; "
+            "nohup python3 /root/guest_relay_direct.py --host 10.0.2.2 --port 5002 --unix /tmp/.venus_test "
+            ">/tmp/vessel-guest-relay.log 2>&1 </dev/null &",
+            10,
+        )
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            out = self.guest("test -S /tmp/.venus_test && echo RELAY_READY || true", 3)
+            if "RELAY_READY" in out:
+                self.set_progress("venus", 55, "Venus relay ready")
+                return
+            time.sleep(0.2)
+        raise RuntimeError("Venus guest relay did not create /tmp/.venus_test")
+
     @staticmethod
     def _apk_path() -> str:
         override = os.environ.get("VESSEL_APK_PATH", "").strip()
@@ -76,11 +168,15 @@ class DirectXRuntime(base.Runtime):
                 os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait(timeout=3)
             except Exception:
-                try: os.killpg(proc.pid, signal.SIGKILL)
-                except Exception: pass
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
         if self.xserver_log is not None:
-            try: self.xserver_log.close()
-            except Exception: pass
+            try:
+                self.xserver_log.close()
+            except Exception:
+                pass
             self.xserver_log = None
 
     def _ensure_xserver(self) -> None:
@@ -92,8 +188,6 @@ class DirectXRuntime(base.Runtime):
         self.xserver_log = open(log_path, "ab", buffering=0)
         env = dict(os.environ)
         env["CLASSPATH"] = apk
-        # Keep Termux's injected linker state out of app_process. CmdEntryPoint
-        # loads libXlorie from the Vessel APK through its PathClassLoader.
         env.pop("LD_PRELOAD", None)
         env.pop("LD_LIBRARY_PATH", None)
         args = [
@@ -103,8 +197,11 @@ class DirectXRuntime(base.Runtime):
         ]
         self.append("LORIE_XSERVER_LAUNCHED\n")
         self.xserver_proc = subprocess.Popen(
-            args, env=env, stdin=subprocess.DEVNULL,
-            stdout=self.xserver_log, stderr=subprocess.STDOUT,
+            args,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=self.xserver_log,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
         )
         deadline = time.monotonic() + 15
@@ -139,7 +236,7 @@ class DirectXRuntime(base.Runtime):
         )
 
     def ensure_desktop(self, width: int = 1600, height: int = 720, dpi: int = 120) -> dict[str, Any]:
-        del width, height, dpi  # Lorie follows the actual Android display size/refresh.
+        del width, height, dpi
         self.start()
         self.set_progress("desktop_check", 60, "Starting direct Android X server")
         self._ensure_xserver()
@@ -226,20 +323,34 @@ runtime = DirectXRuntime()
 def handle(req: dict[str, Any]) -> dict[str, Any]:
     action = str(req.get("action", "status"))
     try:
-        if action == "status": return runtime.state()
-        if action == "start": return runtime.start(float(req.get("timeout", 80)))
-        if action == "stop": return runtime.stop()
-        if action == "desktop": return runtime.ensure_desktop(int(req.get("width", 1600)), int(req.get("height", 720)), int(req.get("dpi", 120)))
-        if action == "desktopAction": return runtime.desktop_action(str(req.get("name", "")))
+        if action == "status":
+            return runtime.state()
+        if action == "start":
+            return runtime.start(float(req.get("timeout", 80)))
+        if action == "stop":
+            return runtime.stop()
+        if action == "desktop":
+            return runtime.ensure_desktop(
+                int(req.get("width", 1600)),
+                int(req.get("height", 720)),
+                int(req.get("dpi", 120)),
+            )
+        if action == "desktopAction":
+            return runtime.desktop_action(str(req.get("name", "")))
         if action == "guest":
             output = runtime.guest(str(req.get("command", "")), float(req.get("timeout", 45)))
-            result = runtime.state(); result["output"] = output; return result
-        if action == "logs": return runtime.state()
+            result = runtime.state()
+            result["output"] = output
+            return result
+        if action == "logs":
+            return runtime.state()
         return {"ok": False, "error": f"unknown action: {action}"}
     except Exception as exc:
         runtime.last_error = f"{type(exc).__name__}: {exc}"
         runtime.set_progress("error", -1, runtime.last_error)
-        result = runtime.state(); result.update({"ok": False, "error": runtime.last_error}); return result
+        result = runtime.state()
+        result.update({"ok": False, "error": runtime.last_error})
+        return result
 
 
 def serve_connection(conn: socket.socket) -> None:
@@ -249,26 +360,37 @@ def serve_connection(conn: socket.socket) -> None:
             data = b""
             while b"\n" not in data and len(data) < 1_000_000:
                 chunk = conn.recv(65536)
-                if not chunk: break
+                if not chunk:
+                    break
                 data += chunk
             req = json.loads(data.split(b"\n", 1)[0].decode() or "{}")
             reply = handle(req)
         except Exception as exc:
             reply = {"ok": False, "error": f"protocol: {type(exc).__name__}: {exc}"}
-        try: conn.sendall((json.dumps(reply, separators=(",", ":")) + "\n").encode())
-        except OSError: pass
+        try:
+            conn.sendall((json.dumps(reply, separators=(",", ":")) + "\n").encode())
+        except OSError:
+            pass
 
 
 def serve() -> None:
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 47631)); srv.listen(16)
+    srv.bind(("127.0.0.1", 47631))
+    srv.listen(16)
     print(f"[vessel-daemon] protocol={PROTOCOL_VERSION} display=lorie-direct-x11-v1 port={X11_PORT}", flush=True)
     while True:
         conn, _ = srv.accept()
-        threading.Thread(target=serve_connection, args=(conn,), daemon=True, name="vessel-control").start()
+        threading.Thread(
+            target=serve_connection,
+            args=(conn,),
+            daemon=True,
+            name="vessel-control",
+        ).start()
 
 
 if __name__ == "__main__":
-    try: serve()
-    finally: runtime.stop()
+    try:
+        serve()
+    finally:
+        runtime.stop()
