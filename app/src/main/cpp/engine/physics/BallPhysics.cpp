@@ -34,9 +34,9 @@ void BallPhysics::collideAabb(const Aabb& box, PhysicsEvents& ev){
     state_.pos=add(state_.pos,mul(n,penetration));
     float vn=dot(state_.vel,n);
     if(vn<0.0f){
-        float impact=-vn;float restitution=(n.y>.55f?0.62f:0.38f);
+        float impact=-vn;float restitution=(n.y>.55f?0.66f:0.40f);
         state_.vel=sub(state_.vel,mul(n,(1.0f+restitution)*vn));
-        if(n.y>.55f){state_.grounded=true;state_.vel.x*=.86f;state_.vel.z*=.86f;}
+        if(n.y>.55f){state_.grounded=true;state_.vel.x*=.87f;state_.vel.z*=.87f;}
         if(impact>.55f){ev.bounced=true;ev.impact=std::max(ev.impact,impact);state_.squashVel+=std::min(2.8f,impact*.34f);}
     }
 }
@@ -49,7 +49,7 @@ PhysicsEvents BallPhysics::step(float dt,float moveX,float moveZ,bool jump,bool 
     state_.vel.x+=moveX*accel*dt;state_.vel.z+=moveZ*accel*dt;
     float horizontal=std::sqrt(state_.vel.x*state_.vel.x+state_.vel.z*state_.vel.z);float maxSpeed=8.0f;
     if(horizontal>maxSpeed){float s=maxSpeed/horizontal;state_.vel.x*=s;state_.vel.z*=s;}
-    if(jump&&wasGrounded){state_.vel.y=8.0f;state_.grounded=false;ev.jumped=true;state_.squashVel-=.8f;}
+    if(jump&&wasGrounded){state_.vel.y=8.2f;state_.grounded=false;ev.jumped=true;state_.squashVel-=.8f;}
     if(dash&&dashCooldown_<=0.0f){
         Vec3 dir=ml>.1f?norm(Vec3{moveX,0,moveZ}):norm(Vec3{state_.vel.x,0,state_.vel.z});
         if(len(dir)<.2f)dir={0,0,-1};state_.vel.x+=dir.x*9.5f;state_.vel.z+=dir.z*9.5f;dashCooldown_=.72f;ev.dashed=true;
@@ -58,10 +58,9 @@ PhysicsEvents BallPhysics::step(float dt,float moveX,float moveZ,bool jump,bool 
     state_.vel.y-=18.5f*dt;state_.pos=add(state_.pos,mul(state_.vel,dt));
     for(const auto& p:kPlatforms)collideAabb(p,ev);
 
-    // Course crates are gameplay objects, not scenery. The third one sweeps laterally.
-    const Aabb crateA{{-3.1f,.35f,-.5f},{.48f,.48f,.48f},3,false,false};
-    const Aabb crateB{{-2.0f,.35f,-.5f},{.48f,.48f,.48f},3,false,false};
-    const Aabb moving{{3.2f+std::sin(worldTime_*1.1f)*1.25f,.45f,-2.7f},{.48f,.48f,.48f},3,false,false};
+    const Aabb crateA{{-3.4f,.38f,-.4f},{.52f,.52f,.52f},3,false,false};
+    const Aabb crateB{{-2.15f,.38f,-.4f},{.52f,.52f,.52f},3,false,false};
+    const Aabb moving{{3.35f+std::sin(worldTime_*1.15f)*1.05f,.48f,-5.15f},{.52f,.52f,.52f},3,false,false};
     collideAabb(crateA,ev);collideAabb(crateB,ev);collideAabb(moving,ev);
 
     if(std::abs(state_.pos.x-kBouncePad.x)<1.15f&&std::abs(state_.pos.z-kBouncePad.z)<1.15f&&state_.pos.y<1.45f&&state_.vel.y<=1.0f){
@@ -70,7 +69,8 @@ PhysicsEvents BallPhysics::step(float dt,float moveX,float moveZ,bool jump,bool 
 
     for(int i=0;i<10;i++)if((state_.coinMask&(1u<<i))==0&&dist(state_.pos,kCoins[i])<.95f){state_.coinMask|=(1u<<i);state_.coins++;ev.collected=true;}
 
-    if(state_.pos.z<-4.55f&&state_.pos.z>-5.65f&&std::abs(state_.pos.x)<2.5f&&state_.pos.y<.2f){state_.dead=true;ev.died=true;}
+    // Seven visible spikes span the center of the hazard lane at z ~= -8.85.
+    if(state_.pos.z<-8.25f&&state_.pos.z>-9.45f&&state_.pos.x>-2.55f&&state_.pos.x<2.45f&&state_.pos.y<1.20f){state_.dead=true;ev.died=true;}
     if(state_.pos.y<-5.0f){state_.dead=true;ev.died=true;}
     if(dist(state_.pos,kGoal)<1.9f&&state_.coins>=10){state_.won=true;ev.won=true;}
     if(state_.dead){auto mask=state_.coinMask;int coins=state_.coins;reset();state_.coinMask=mask;state_.coins=coins;}
