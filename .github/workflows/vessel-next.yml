@@ -55,6 +55,9 @@ jobs:
                     -DCMAKE_BUILD_TYPE=Release \
                     -DCMAKE_INSTALL_PREFIX=/usr
               cmake --build /tmp/vessel-kwin-build -j2
+              cmake --install /tmp/vessel-kwin-build
+              /tmp/vessel-kwin-build/vesseloutput_probe | tee /tmp/vesseloutput-probe.log
+              grep -F "VESSEL_KWIN_PLUGIN_OK id=vesseloutput" /tmp/vesseloutput-probe.log
             '
 
   build:
@@ -93,6 +96,7 @@ jobs:
           grep -F 'softwareFallback": False' tools/venus_poc/vessel_runtime_daemon_v31.py
           grep -F 'damage-driven' tools/venus_poc/vessel_runtime_daemon_v31.py tools/venus_poc/kwin_vessel_output/vesseloutput.cpp
           grep -F 'org.kde.kwin.Effects.loadEffect' tools/venus_poc/guest_command_agent.py
+          grep -F 'VESSEL_KWIN_PLUGIN_OK' tools/venus_poc/kwin_vessel_output/CMakeLists.txt
           grep -F 'host_input_bridge.py' tools/venus_poc/run_venus_wayland.sh
           grep -F 'VesselInputClient.absolute' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           grep -F 'VesselWaylandPresenter.attach' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
