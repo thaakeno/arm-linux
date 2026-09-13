@@ -5,6 +5,13 @@ Venus SCM_RIGHTS objects are registered in UML once and retained here. Returned
 object references from Debian are converted back to the original host fd. KWin
 frame exports are forwarded by SCM_RIGHTS to the Android APK's native Vulkan
 presenter without copying pixel payloads through Python or TCP.
+
+Important: AF_UNIX SOCK_STREAM ancillary data is a barrier, not a record.  A
+recvmsg() that receives SCM_RIGHTS may also return ordinary bytes that were sent
+*before* the descriptor carrier byte.  Mesa Venus later calls read() for those
+ordinary protocol bytes and recvmsg() for exactly the one-byte FD carrier.  We
+therefore preserve that boundary explicitly across the TCP relay: prefix bytes
+are forwarded as DATA and only the final carrier byte is forwarded with the FD.
 """
 from __future__ import annotations
 
@@ -13,7 +20,6 @@ import array
 import os
 import select
 import socket
-import stat
 import struct
 import threading
 import time
@@ -227,18 +233,34 @@ class Relay:
             except OSError:
                 pass
 
-    def _forward_sync_fd(self, fd: int, data: bytes) -> None:
+    def _forward_sync_fd(self, fd: int, carrier: bytes) -> None:
         sync_id = self.alloc_id()
         with self.sync_lock:
             self.sync_fds.add(fd)
-        self.writer.send(FD_SIGNAL_H2G, struct.pack("!II", sync_id, len(data)) + data)
+        self.writer.send(FD_SIGNAL_H2G, struct.pack("!II", sync_id, len(carrier)) + carrier)
         threading.Thread(target=self._watch_sync_fd, args=(sync_id, fd), daemon=True).start()
+
+    @staticmethod
+    def _split_fd_carrier(data: bytes) -> tuple[bytes, bytes]:
+        """Preserve Linux AF_UNIX SCM_RIGHTS stream-barrier semantics.
+
+        recvmsg() may return ordinary stream bytes that precede the byte carrying
+        ancillary data.  For Mesa vtest the FD carrier itself is exactly one
+        dummy byte.  Re-attaching SCM_RIGHTS to the first byte of the whole
+        chunk makes Mesa's earlier read() consume and discard the control
+        message.  Keep the prefix as plain data and the final byte as carrier.
+        """
+        if not data:
+            raise RuntimeError("SCM_RIGHTS message missing carrier byte")
+        return data[:-1], data[-1:]
 
     def venus_to_guest(self) -> None:
         assert self.vsock is not None
         ancbuf = socket.CMSG_SPACE(16 * struct.calcsize("i"))
         while not self.stop.is_set():
-            data, anc, _flags, _ = self.vsock.recvmsg(65536, ancbuf)
+            data, anc, flags, _ = self.vsock.recvmsg(65536, ancbuf)
+            if flags & getattr(socket, "MSG_CTRUNC", 0):
+                raise RuntimeError("Venus SCM_RIGHTS control message truncated")
             if not data and not anc:
                 raise EOFError("Venus socket closed")
             fds: list[int] = []
@@ -256,19 +278,28 @@ class Relay:
                 for fd in fds:
                     os.close(fd)
                 raise RuntimeError(f"unexpected Venus SCM_RIGHTS count={len(fds)} data={len(data)}")
+
+            prefix, carrier = self._split_fd_carrier(data)
+            if prefix:
+                self.writer.send(DATA_H2G, prefix)
+
             fd = fds[0]
             keep_fd = False
             try:
                 st = os.fstat(fd)
                 size = st.st_size
                 if size == 0:
-                    self._forward_sync_fd(fd, data)
+                    self._forward_sync_fd(fd, carrier)
                     keep_fd = True
                     continue
                 backing = self.pad_memfd(fd, size)
                 obj_id = self.alloc_id()
                 self.register_object(obj_id, fd, backing)
-                self.writer.send(FD_DIRECT_H2G, struct.pack("!IQI", obj_id, size, len(data)) + data)
+                self.writer.send(FD_DIRECT_H2G, struct.pack("!IQI", obj_id, size, len(carrier)) + carrier)
+                print(
+                    f"[host-wayland] forwarded Venus object id={obj_id} with exact 1-byte SCM_RIGHTS carrier",
+                    flush=True,
+                )
             finally:
                 if not keep_fd:
                     os.close(fd)
@@ -278,6 +309,8 @@ class Relay:
         fd = self.object_fds.get(obj_id)
         if fd is None:
             raise RuntimeError(f"guest referenced unknown host Venus object id={obj_id}")
+        if len(data) != 1:
+            raise RuntimeError(f"Venus fd return requires one-byte carrier, got {len(data)}")
         anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]).tobytes())]
         sent = self.vsock.sendmsg([data], anc)
         if sent != len(data):
@@ -294,7 +327,7 @@ class Relay:
                     raise RuntimeError("short FD_REF_G2H")
                 obj_id, data_len = struct.unpack("!II", payload[:8])
                 data = payload[8:8 + data_len]
-                if len(data) != data_len or not data:
+                if len(data) != data_len or len(data) != 1:
                     raise RuntimeError("bad returned fd carrier")
                 self._send_fd_to_venus(obj_id, data)
             elif t == FRAME_IMPORT_G2H:
