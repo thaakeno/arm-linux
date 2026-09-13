@@ -108,6 +108,15 @@ def state_v23(self: core.Runtime):
     state = _prev_state(self)
     state["directInputReady"] = bool(_direct_input_ready)
     state["inputMode"] = "evdev" if _direct_input_ready else "rfb"
+
+    # Preserve the familiar staged boot feedback from the older Vessel UI.
+    phase = state.get("progressPhase", "")
+    percent = int(state.get("progressPercent", -1))
+    uptime = int(state.get("uptimeMs", 0))
+    if phase == "uml_boot":
+        state["progressPercent"] = 20 if uptime >= 1000 else 10
+    elif phase == "vnc_start" and percent == 90:
+        state["progressPercent"] = 94
     return state
 core.Runtime.state = state_v23
 
