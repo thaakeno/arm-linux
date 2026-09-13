@@ -81,11 +81,32 @@ screen_ray = '''    void screenRayV7(float nx,float ny,Vec3&ro,Vec3&rd)const{
     '''
 patch_between("app/src/main/cpp/native_vulkan_studio_v7_part3.inc", "    void screenRayV7(float nx,float ny,Vec3&ro,Vec3&rd)const", "    void grabStartImpl", screen_ray)
 
+# Jolt startup crash fix: Jolt's allocator/factory/type registration MUST exist
+# before TempAllocatorImpl and JobSystemThreadPool constructors run. Previously
+# those members were constructed before Impl() entered, so Android could die as
+# soon as the native 3D activity created the physics world.
 p = ROOT / "app/src/main/cpp/vessel_jolt_world.cpp"
 text = p.read_text()
-old = 'JobSystemThreadPool jobs{cMaxPhysicsJobs, cMaxPhysicsBarriers, std::max(1u, std::min(3u, std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u))};'
-new = 'JobSystemThreadPool jobs{cMaxPhysicsJobs, cMaxPhysicsBarriers, static_cast<int>(std::max(1u, std::min(3u, std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u)))};'
-if old not in text: raise SystemExit("Jolt worker marker missing")
-p.write_text(text.replace(old,new))
+worker_old = 'JobSystemThreadPool jobs{cMaxPhysicsJobs, cMaxPhysicsBarriers, std::max(1u, std::min(3u, std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u))};'
+worker_new = 'JobSystemThreadPool jobs{cMaxPhysicsJobs, cMaxPhysicsBarriers, static_cast<int>(std::max(1u, std::min(3u, std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u)))};'
+if worker_old in text: text = text.replace(worker_old, worker_new)
+elif worker_new not in text: raise SystemExit("Jolt worker marker missing")
 
-print("v13 post-fix applied: RT boxes + Jolt authority + light setter + FPS ray + reset vector + Android Jolt workers")
+init_marker = 'struct VesselJoltWorld::Impl {\n    BPInterface bp;'
+init_repl = '''struct JoltRuntimeInit {
+    JoltRuntimeInit(){ ensureJoltRegistered(); }
+};
+
+struct VesselJoltWorld::Impl {
+    JoltRuntimeInit runtime_init;
+    BPInterface bp;'''
+if init_marker not in text: raise SystemExit("Jolt init-order marker missing")
+text = text.replace(init_marker, init_repl, 1)
+
+# Do not start any dynamic sphere embedded inside the static hero cube. Deep
+# penetration on frame zero is unnecessary solver stress and made startup much
+# less deterministic across mobile builds.
+text = text.replace('makeDynamic(1,RVec3( .25f,-.25f,.45f));', 'makeDynamic(1,RVec3( .25f,1.35f,3.20f));')
+p.write_text(text)
+
+print("v13 post-fix applied: RT boxes + Jolt authority + light setter + FPS ray + reset vector + safe Jolt init order")
