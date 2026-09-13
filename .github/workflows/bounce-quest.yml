@@ -27,7 +27,7 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
 
-      - name: Fetch CC0 PBR textures and game audio
+      - name: Fetch CC0 PBR/audio and compile real scene assets
         run: |
           set -euxo pipefail
           A=app/src/main/assets/bounce
@@ -41,6 +41,12 @@ jobs:
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_arm_2k.jpg' "$A/concrete_arm.jpg"
           get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$T/stb_image.h"
 
+          # The scene compiler downloads and bakes actual CC0 Poly Haven photogrammetry
+          # (road barriers, rock faces, ferns) plus an Alps environment into scene.bqmesh.
+          python3 tools/build_bounce_scene.py
+          test -s "$A/scene.bqmesh"
+          test -s "$A/alps.jpg"
+
           BASE='https://raw.githubusercontent.com/Sonofg0tham/tailgate/main/public/assets/audio'
           get "$BASE/footstep-carpet-1.ogg" "$R/bq_bounce_1.ogg"
           get "$BASE/footstep-carpet-2.ogg" "$R/bq_bounce_2.ogg"
@@ -50,22 +56,25 @@ jobs:
           get "$BASE/badge-deny.ogg" "$R/bq_death.ogg"
           get "$BASE/plant-complete.ogg" "$R/bq_win.ogg"
 
-      - name: Verify clean game tree
+      - name: Verify clean asset-driven game tree
         run: |
           set -eux
           test -f app/src/main/cpp/engine/renderer/BounceRenderer.cpp
           test -f app/src/main/cpp/engine/physics/BallPhysics.cpp
           test -f app/src/main/cpp/engine/game/Level.h
+          test -f tools/build_bounce_scene.py
           test ! -f tools/venus_poc/apply_containment_game.py
           ! grep -R "native_vulkan_studio_v7" app/src/main/cpp/CMakeLists.txt
+          ! grep -R "platformInfo(" app/src/main/cpp/engine/renderer/shaders
+          ! grep -R "boxGeom(" app/src/main/cpp/engine/renderer/shaders
 
-      - name: Build and validate APK
+      - name: Build and validate Vessel APK
         run: bash ./gradlew assembleDebug testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
 
-      - name: Upload Bounce Quest APK
+      - name: Upload Vessel + Bounce Quest APK
         uses: actions/upload-artifact@v4
         with:
-          name: bounce-quest-debug
+          name: vessel-bounce-quest-asset-driven-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
