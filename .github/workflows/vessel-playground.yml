@@ -37,7 +37,7 @@ jobs:
           UA='Vessel-Playground-v1/1.0'
           get(){ curl --fail --location --retry 4 --retry-delay 2 --user-agent "$UA" "$1" --output "$2"; test -s "$2"; }
 
-          # Poly Haven CC0: worn concrete floor, concrete hero, rough obsidian-like rock and HDR IBL.
+          # Poly Haven CC0: concrete arena, concrete hero, rough obsidian-like rock and HDR IBL.
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_diff_2k.jpg' "$A/cobblestone_diff_2k.jpg" || get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_diff_2k.jpg' "$A/cobblestone_diff_2k.jpg"
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_nor_gl_2k.jpg' "$A/cobblestone_nor_gl_2k.jpg" || get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_nor_gl_2k.jpg' "$A/cobblestone_nor_gl_2k.jpg"
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_arm_2k.jpg' "$A/cobblestone_arm_2k.jpg" || get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_arm_2k.jpg' "$A/cobblestone_arm_2k.jpg"
@@ -54,9 +54,9 @@ jobs:
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/dark_rock/dark_rock_disp_2k.png' "$A/dark_rock_disp_2k.png"
           get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/alps_field_1k.hdr' "$A/evening_museum_courtyard_1k.hdr"
 
-          # Kenney Impact Sounds, CC0. Same source samples are pitch/gain-varied by material at runtime.
-          get 'https://raw.githubusercontent.com/euuuuuuuan/moonshard-warden-public/main/src/assets/kenney-impact/impactMetal_heavy_001.ogg' "$R/impact_metal.ogg"
-          get 'https://raw.githubusercontent.com/euuuuuuuan/moonshard-warden-public/main/src/assets/kenney-impact/impactMining_002.ogg' "$R/impact_soft.ogg"
+          # Kenney Impact Sounds, CC0. Gain/playback rate vary by material at runtime.
+          get 'https://raw.githubusercontent.com/euuuuuuan/moonshard-warden-public/main/src/assets/kenney-impact/impactMetal_heavy_001.ogg' "$R/impact_metal.ogg"
+          get 'https://raw.githubusercontent.com/euuuuuuan/moonshard-warden-public/main/src/assets/kenney-impact/impactMining_002.ogg' "$R/impact_soft.ogg"
 
           get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$T/stb_image.h"
 
