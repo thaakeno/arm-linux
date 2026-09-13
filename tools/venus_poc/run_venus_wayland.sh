@@ -13,7 +13,7 @@ RELAY_LOG="${RELAY_LOG:-$UML_DIR/vessel-relay.log}"
 PORT="${VENUS_RELAY_PORT:-5002}"
 VESSEL_VCPUS="${VESSEL_VCPUS:-6}"
 VESSEL_MEM_MB="${VESSEL_MEM_MB:-8192}"
-THREAD_WORKER_MARKER="${THREAD_WORKER_MARKER:-$PREFIX/opt/virglrenderer-android/.venus-thread-worker}"
+PROCESS_WORKER_MARKER="${PROCESS_WORKER_MARKER:-$PREFIX/opt/virglrenderer-android/.venus-process-worker}"
 
 start_virgl() {
   rm -f "$VENUS_SOCK"
@@ -76,8 +76,9 @@ for f in \
   [ -e "$f" ] || { echo "[venus-wayland] missing: $f" >&2; exit 1; }
 done
 
-[ -e "$THREAD_WORKER_MARKER" ] || {
-  echo "[venus-wayland] custom thread-worker virglrenderer is not installed" >&2
+[ -e "$PROCESS_WORKER_MARKER" ] || {
+  echo "[venus-wayland] process-isolated Venus virglrenderer is not installed" >&2
+  echo "[venus-wayland] run tools/venus_poc/build_virglrenderer_android_process.sh once" >&2
   exit 1
 }
 
