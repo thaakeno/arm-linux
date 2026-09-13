@@ -76,9 +76,11 @@ public:
     VesselOutputEffect()
     {
         appendLog("effect-constructed");
-        // Do not touch EGL here. KWin can construct/check effects before the
-        // compositor has made its OpenGL context current. Prime one repaint;
-        // postPaintScreen() is the first safe point to probe EGL.
+        // Construction itself must not be gated on KWin reporting OpenGL
+        // compositing yet. KWin's plugin loader may query the factory before
+        // the virtual backend has fully established its Zink/EGL compositor.
+        // The paint callback is the correct place to wait for a current EGL
+        // context and report the exact export capability that is missing.
         effects->addRepaintFull();
     }
 
@@ -89,11 +91,6 @@ public:
         if (m_socket >= 0) {
             close(m_socket);
         }
-    }
-
-    static bool supported()
-    {
-        return effects->isOpenGLCompositing();
     }
 
     void postPaintScreen() override
@@ -385,10 +382,13 @@ private:
     }
 };
 
-KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED(VesselOutputEffect,
-                                      "vesseloutput.json",
-                                      return VesselOutputEffect::supported();,
-                                      return true;)
+// Do not use the SUPPORTED factory variant here. KWin's plugin loader calls
+// isSupported() before creating the effect; on the virtual backend that check
+// can happen before OpenGL/Zink is fully established, which silently prevents
+// construction even though the compositor becomes OpenGL-backed moments later.
+// The effect itself performs capability checks at the first paint with a
+// guaranteed-current context and reports the precise EGL/dma-buf failure.
+KWIN_EFFECT_FACTORY(VesselOutputEffect, "vesseloutput.json")
 
 } // namespace KWin
 
