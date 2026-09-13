@@ -37,8 +37,6 @@ jobs:
           mkdir -p "$A" "$R" "$T" "$M"
           get(){ curl --fail --location --retry 5 --retry-delay 2 "$1" -o "$2"; test -s "$2"; }
 
-          # Three genuinely different CC0 PBR surfaces are packed into one atlas so the
-          # mobile renderer keeps only three material samplers: concrete, wood and metal.
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_floor/concrete_floor_diff_1k.jpg' "$M/concrete_diff.jpg"
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_floor/concrete_floor_nor_gl_1k.jpg' "$M/concrete_normal.jpg"
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_floor/concrete_floor_arm_1k.jpg' "$M/concrete_arm.jpg"
@@ -91,7 +89,9 @@ jobs:
           grep -q 'requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE' app/src/main/java/com/example/dreamlinux/BounceQuestActivity.kt
           grep -q 'if(thread_.joinable())thread_.join()' app/src/main/cpp/engine/renderer/BounceRenderer.cpp
           grep -q "wooden_crate_01" tools/build_bounce_scene.py
-          grep -q "for row,z in enumerate" tools/build_bounce_scene.py
+          grep -q "-9.70,-10.05,-10.40" tools/build_bounce_scene.py
+          grep -q "wood_planks" .github/workflows/bounce-quest.yml
+          grep -q "painted_metal_shutter" .github/workflows/bounce-quest.yml
           ! grep -R "native_vulkan_studio_v7" app/src/main/cpp/CMakeLists.txt
           ! grep -R "platformInfo(" app/src/main/cpp/engine/renderer/shaders
           ! grep -R "boxGeom(" app/src/main/cpp/engine/renderer/shaders
