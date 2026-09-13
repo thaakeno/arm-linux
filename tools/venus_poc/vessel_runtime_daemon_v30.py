@@ -86,7 +86,7 @@ class WaylandRuntime(base.Runtime):
                 if old is not None:
                     try: old.close()
                     except Exception: pass
-                self.append("GUEST_COMMAND_AGENT_READY\n")
+                self.append(f"GUEST_COMMAND_AGENT_READY pid={obj.get('pid', '?')}\n")
             except Exception as exc:
                 self.append(f"GUEST_COMMAND_AGENT_ACCEPT_ERROR {exc}\n")
                 time.sleep(.2)
@@ -158,15 +158,19 @@ class WaylandRuntime(base.Runtime):
                 reply = json.loads(raw.decode("utf-8"))
                 if reply.get("id") != req_id:
                     raise RuntimeError(f"guest command reply id mismatch {reply.get('id')} != {req_id}")
-                rc = int(reply.get("rc", 125))
-                output = str(reply.get("output", ""))
-                if rc != 0:
-                    detail = str(reply.get("error", ""))
-                    raise RuntimeError(f"guest command failed rc={rc}: {(output + chr(10) + detail)[-8000:]}")
-                return output
             except Exception:
                 self._drop_rpc()
                 raise
+
+            rc = int(reply.get("rc", 125))
+            output = str(reply.get("output", ""))
+            if rc != 0:
+                detail = str(reply.get("error", ""))
+                raise RuntimeError(
+                    f"guest command failed id={req_id} rc={rc} cmd={command[:240]!r}: "
+                    f"{(output + chr(10) + detail)[-8000:]}"
+                )
+            return output
 
     @staticmethod
     def _b64(path: pathlib.Path) -> str:
@@ -185,7 +189,6 @@ class WaylandRuntime(base.Runtime):
 
     def _rpc_upload(self, source: pathlib.Path, target: str) -> None:
         payload = self._b64(source)
-        # RPC is not constrained by the tty canonical input buffer.
         self.guest(
             f"printf '%s' {shlex.quote(payload)} | base64 -d > {shlex.quote(target)}",
             60,
@@ -199,7 +202,6 @@ class WaylandRuntime(base.Runtime):
             raise RuntimeError("protocol 30 guest helpers are missing")
         self._bootstrap_upload(agent, "/root/vessel_guest_command_agent.py")
         self._pty_guest(
-            "pkill -f '[v]essel_guest_command_agent.py' 2>/dev/null || true; "
             "nohup python3 /root/vessel_guest_command_agent.py >/tmp/vessel-command-agent.log 2>&1 </dev/null &",
             20,
         )
@@ -215,9 +217,13 @@ class WaylandRuntime(base.Runtime):
         )
         if "VENUS_READY" not in check:
             raise RuntimeError("Mesa Venus 26.2.2 or /dev/umshm is unavailable")
+
+        # Never combine pkill -f with the command that launches the same script.
+        # The shell command line itself then contains the target text and pkill can SIGTERM
+        # its own RPC shell, yielding return code -15.
+        self.guest("pkill -f '^python3 /root/guest_relay_wayland.py( |$)' 2>/dev/null || true", 10)
+        self.guest("rm -f /tmp/.venus_test /tmp/vessel-frame-export.sock /tmp/vessel-guest-wayland.log", 10)
         self.guest(
-            "pkill -f '[g]uest_relay_wayland.py' 2>/dev/null || true; "
-            "rm -f /tmp/.venus_test /tmp/vessel-frame-export.sock /tmp/vessel-guest-wayland.log; "
             "nohup python3 /root/guest_relay_wayland.py --host 10.0.2.2 --port 5002 "
             "--unix /tmp/.venus_test --frame-unix /tmp/vessel-frame-export.sock "
             ">/tmp/vessel-guest-wayland.log 2>&1 </dev/null &",
@@ -243,7 +249,6 @@ class WaylandRuntime(base.Runtime):
             if not source.exists():
                 raise RuntimeError(f"missing KWin effect source: {source}")
             self._rpc_upload(source, f"/root/vessel-kwin-output/{name}") if name != "CMakeLists.txt" else None
-        # Ensure directory exists before uploading all sources. Re-upload CMake after mkdir.
         self.guest("mkdir -p /root/vessel-kwin-output", 10)
         for name in ("CMakeLists.txt", "vesseloutput.cpp", "vesseloutput.json"):
             self._rpc_upload(effect_root / name, f"/root/vessel-kwin-output/{name}")
