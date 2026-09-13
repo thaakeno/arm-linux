@@ -15,6 +15,7 @@ import pathlib
 import shlex
 import socket
 import threading
+import time
 from typing import Any
 
 import vessel_runtime_daemon_v24 as v24
@@ -29,9 +30,50 @@ class NativeRuntimeV25(v24.NativeRuntime):
         # Do not download/replace the UML kernel at runtime. The already proven
         # SMP kernel boots normally; input can use uinput when present or XTest
         # against the guest-local Xvfb display when it is not.
-        result = v24.base.Runtime.start(self, timeout)
+        v24.base.Runtime.start(self, timeout)
         self.last_error = ""
         return self.state()
+
+    def _prepare_venus_guest(self) -> None:
+        """Prepare the guest relay without process-name pkill self-matches."""
+        self.set_progress("venus", 40, "Preparing Mesa Venus relay")
+        source = v24.base.GUEST_RELAY_SOURCE
+        if not source.exists():
+            raise RuntimeError(f"missing guest relay source: {source}")
+        payload = base64.b64encode(source.read_bytes()).decode()
+        self.guest(f"printf '%s' {shlex.quote(payload)} | base64 -d > /root/guest_relay_direct.py", 15)
+        check = self.guest(
+            "test -s /opt/mesa-venus-26.2.2/lib/aarch64-linux-gnu/libvulkan_virtio.so && "
+            "test -f /root/virtio-wsi-test.json && echo VENUS_READY",
+            10,
+        )
+        if "VENUS_READY" not in check:
+            raise RuntimeError("Mesa Venus 26.2.2 is not installed in this guest image")
+
+        # Do not use `pkill -f guest_relay_direct.py` here. The current
+        # `bash -lc` command itself contains that text and can kill itself with
+        # SIGTERM (rc=-15). Track the actual helper PID instead.
+        launch = (
+            "if [ -r /tmp/vessel-guest-relay.pid ]; then "
+            "old=$(cat /tmp/vessel-guest-relay.pid 2>/dev/null || true); "
+            "[ -n \"$old\" ] && kill \"$old\" 2>/dev/null || true; fi; "
+            "rm -f /tmp/vessel-guest-relay.pid /tmp/.venus_test /tmp/vessel-guest-relay.log; "
+            "nohup python3 /root/guest_relay_direct.py --host 10.0.2.2 --port 5002 --unix /tmp/.venus_test "
+            ">/tmp/vessel-guest-relay.log 2>&1 </dev/null & "
+            "echo $! >/tmp/vessel-guest-relay.pid; echo RELAY_LAUNCHED"
+        )
+        out = self.guest(launch, 10)
+        if "RELAY_LAUNCHED" not in out:
+            raise RuntimeError("Venus guest relay failed to launch")
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            out = self.guest("test -S /tmp/.venus_test && echo RELAY_READY || true", 3)
+            if "RELAY_READY" in out:
+                self.set_progress("venus", 55, "Venus relay ready")
+                return
+            time.sleep(0.2)
+        tail = self.guest("tail -100 /tmp/vessel-guest-relay.log 2>/dev/null || true", 5)
+        raise RuntimeError("Venus guest relay did not create /tmp/.venus_test: " + tail[-3000:])
 
     def _ensure_input_agent(self) -> None:
         source = pathlib.Path(__file__).resolve().parent / "guest_input_agent_v25.py"
@@ -39,10 +81,13 @@ class NativeRuntimeV25(v24.NativeRuntime):
         command = (
             f"printf '%s' {shlex.quote(payload)} | base64 -d >/root/vessel_input_agent.py; "
             "chmod 700 /root/vessel_input_agent.py; "
-            "pkill -f '[v]essel_input_agent.py' 2>/dev/null || true; "
+            "if [ -r /tmp/vessel-input.pid ]; then old=$(cat /tmp/vessel-input.pid 2>/dev/null || true); "
+            "[ -n \"$old\" ] && kill \"$old\" 2>/dev/null || true; fi; "
+            "rm -f /tmp/vessel-input.pid; "
             f"setsid -f env DISPLAY=:1 python3 /root/vessel_input_agent.py 10.0.2.2 {v24.INPUT_GUEST_PORT} "
             ">/tmp/vessel-input.log 2>&1 </dev/null; sleep .15; "
-            "pgrep -f '^python3 /root/vessel_input_agent.py' >/dev/null && echo INPUT_READY"
+            "pid=$(pgrep -f '^python3 /root/vessel_input_agent.py' | head -n1); "
+            "[ -n \"$pid\" ] && echo $pid >/tmp/vessel-input.pid && echo INPUT_READY"
         )
         out = self.guest(command, 10)
         if "INPUT_READY" not in out:
@@ -55,7 +100,7 @@ class NativeRuntimeV25(v24.NativeRuntime):
         # Protocol 24's desktop path is already native Xvfb -> VFRM1 -> Android
         # and contains no VNC/RFB/Termux:X11. Start it first, then bring input up
         # once :1 exists so the XTest fallback can attach immediately.
-        result = v24.NativeRuntime.ensure_desktop(self, width, height, dpi)
+        v24.NativeRuntime.ensure_desktop(self, width, height, dpi)
         self._ensure_input_agent()
         self.native_display_ready = True
         self.desktop_ready = True
