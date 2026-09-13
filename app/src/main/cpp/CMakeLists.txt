@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(dev1_linux_native)
+project(vessel_native)
 
 add_library(dream_transport SHARED transport.cpp)
 target_compile_features(dream_transport PRIVATE cxx_std_17)
@@ -27,52 +27,43 @@ if(NOT GLSLC)
     find_program(GLSLC glslc)
 endif()
 if(NOT GLSLC)
-    message(FATAL_ERROR "Vessel Vulkan Studio requires glslc")
+    message(FATAL_ERROR "Bounce Quest requires glslc")
 endif()
 
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GENERATED_DIR}")
 
-function(vessel_shader SOURCE STAGE SYMBOL)
+function(bounce_shader SOURCE STAGE SYMBOL)
     get_filename_component(BASE "${SOURCE}" NAME)
     set(SPV "${GENERATED_DIR}/${BASE}.spv")
     set(HEADER "${GENERATED_DIR}/${SYMBOL}_spv.h")
     add_custom_command(
         OUTPUT "${SPV}" "${HEADER}"
-        COMMAND "${GLSLC}" --target-env=vulkan1.2 -Dpatch=wetPatch -fshader-stage=${STAGE} "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE}" -o "${SPV}"
+        COMMAND "${GLSLC}" --target-env=vulkan1.2 -fshader-stage=${STAGE} "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE}" -o "${SPV}"
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_spv.py" "${SPV}" "${HEADER}" ${SYMBOL}_spv
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_spv.py"
         VERBATIM)
-    set(VESSEL_SHADER_OUTPUTS ${VESSEL_SHADER_OUTPUTS} "${HEADER}" PARENT_SCOPE)
+    set(BOUNCE_SHADER_OUTPUTS ${BOUNCE_SHADER_OUTPUTS} "${HEADER}" PARENT_SCOPE)
 endfunction()
 
-# v3 is retained only as the battle-tested Vulkan device/swapchain/bootstrap layer.
-vessel_shader(shaders/native_studio_v3.vert vert native_studio_v3_vert)
-vessel_shader(shaders/native_studio_v3.frag frag native_studio_v3_frag)
-vessel_shader(shaders/native_studio_v3_rt.frag frag native_studio_v3_rt_frag)
+bounce_shader(engine/renderer/shaders/bounce.vert vert bounce_vert)
+bounce_shader(engine/renderer/shaders/bounce.frag frag bounce_frag)
+add_custom_target(bounce_quest_shaders DEPENDS ${BOUNCE_SHADER_OUTPUTS})
 
-# v7 is the actual benchmark scene and rendering path.
-vessel_shader(shaders/native_studio_v7.vert vert native_studio_v7_vert)
-vessel_shader(shaders/native_studio_v7.frag frag native_studio_v7_frag)
-vessel_shader(shaders/native_studio_v7_rt.frag frag native_studio_v7_rt_frag)
-add_custom_target(vessel_vulkan_shaders DEPENDS ${VESSEL_SHADER_OUTPUTS})
-
-# Historical validation markers:
-# add_library(vessel_vulkan SHARED native_vulkan_studio_v3.cpp)
-# add_library(vessel_vulkan SHARED native_vulkan_studio_v4.cpp)
-# add_library(vessel_vulkan SHARED native_vulkan_studio_v5.cpp)
-# add_library(vessel_vulkan SHARED native_vulkan_studio_v6.cpp)
-add_library(vessel_vulkan SHARED native_vulkan_studio_v7.cpp)
-add_dependencies(vessel_vulkan vessel_vulkan_shaders)
-target_compile_features(vessel_vulkan PRIVATE cxx_std_20)
-target_compile_definitions(vessel_vulkan PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
-target_compile_options(vessel_vulkan PRIVATE
+add_library(bounce_quest SHARED
+    engine/renderer/BounceRenderer.cpp
+    engine/physics/BallPhysics.cpp)
+add_dependencies(bounce_quest bounce_quest_shaders)
+target_compile_features(bounce_quest PRIVATE cxx_std_20)
+target_compile_definitions(bounce_quest PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
+target_compile_options(bounce_quest PRIVATE
     -Wall
     -Wextra
     -Werror
     -Wno-missing-field-initializers
     "-include${CMAKE_CURRENT_SOURCE_DIR}/vulkan_android_compat.h")
-target_include_directories(vessel_vulkan PRIVATE
+target_include_directories(bounce_quest PRIVATE
     "${GENERATED_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
-target_link_libraries(vessel_vulkan PRIVATE android log vulkan)
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
+    "${CMAKE_CURRENT_SOURCE_DIR}/engine")
+target_link_libraries(bounce_quest PRIVATE android log vulkan)
