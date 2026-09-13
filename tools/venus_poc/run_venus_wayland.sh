@@ -97,6 +97,8 @@ echo "[venus-wayland] relay log: $RELAY_LOG"
 echo "[venus-wayland] booting Debian UML with $VESSEL_VCPUS vCPUs and ${VESSEL_MEM_MB} MiB RAM..."
 
 cd "$UML_DIR"
+# umnet owns fd 3 and injects the UML vec0:transport=fd network argument itself.
+# Passing vec0 again here registers uml-vector.0 twice and breaks the guest network.
 exec ./umnet --passt ./passt --dns 1.1.1.1 -- \
   ./linux-umshm \
     mem="${VESSEL_MEM_MB}M" \
@@ -111,5 +113,4 @@ exec ./umnet --passt ./passt --dns 1.1.1.1 -- \
     panic=-1 \
     con=null \
     con0=fd:0,fd:1 \
-    vec0:transport=fd,fd=3,mac=02:00:00:00:00:01 \
     console=tty0
