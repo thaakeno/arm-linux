@@ -1,0 +1,92 @@
+name: Vessel Playground
+
+on:
+  push:
+    branches: [ app/vessel-playground ]
+  workflow_dispatch:
+
+concurrency:
+  group: vessel-playground-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: temurin
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK and NDK
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
+
+      - name: Fetch CC0 playground assets
+        run: |
+          set -euxo pipefail
+          A=app/src/main/assets/vulkan_v7
+          R=app/src/main/res/raw
+          T=app/src/main/cpp/third_party
+          mkdir -p "$A" "$R" "$T"
+          UA='Vessel-Playground-v1/1.0'
+          get(){ curl --fail --location --retry 4 --retry-delay 2 --user-agent "$UA" "$1" --output "$2"; test -s "$2"; }
+
+          # Poly Haven CC0: worn concrete floor, concrete hero, rough obsidian-like rock and HDR IBL.
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_diff_2k.jpg' "$A/cobblestone_diff_2k.jpg" || get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_diff_2k.jpg' "$A/cobblestone_diff_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_nor_gl_2k.jpg' "$A/cobblestone_nor_gl_2k.jpg" || get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_nor_gl_2k.jpg' "$A/cobblestone_nor_gl_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_arm_2k.jpg' "$A/cobblestone_arm_2k.jpg" || get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_arm_2k.jpg' "$A/cobblestone_arm_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/concrete_floor/concrete_floor_disp_2k.png' "$A/cobblestone_disp_2k.png" || get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/rough_concrete/rough_concrete_disp_2k.png' "$A/cobblestone_disp_2k.png"
+
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_diff_2k.jpg' "$A/rough_concrete_diff_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_nor_gl_2k.jpg' "$A/rough_concrete_nor_gl_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_concrete/rough_concrete_arm_2k.jpg' "$A/rough_concrete_arm_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/rough_concrete/rough_concrete_disp_2k.png' "$A/rough_concrete_disp_2k.png"
+
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_diff_2k.jpg' "$A/dark_rock_diff_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_nor_gl_2k.jpg' "$A/dark_rock_nor_gl_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_arm_2k.jpg' "$A/dark_rock_arm_2k.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/dark_rock/dark_rock_disp_2k.png' "$A/dark_rock_disp_2k.png"
+          get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/alps_field_1k.hdr' "$A/evening_museum_courtyard_1k.hdr"
+
+          # Kenney Impact Sounds, CC0. Same source samples are pitch/gain-varied by material at runtime.
+          get 'https://raw.githubusercontent.com/euuuuuuuan/moonshard-warden-public/main/src/assets/kenney-impact/impactMetal_heavy_001.ogg' "$R/impact_metal.ogg"
+          get 'https://raw.githubusercontent.com/euuuuuuuan/moonshard-warden-public/main/src/assets/kenney-impact/impactMining_002.ogg' "$R/impact_soft.ogg"
+
+          get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$T/stb_image.h"
+
+      - name: Apply Vessel Playground source patch
+        run: |
+          set -euxo pipefail
+          python3 -m py_compile tools/venus_poc/apply_vessel_playground.py
+          python3 tools/venus_poc/apply_vessel_playground.py
+
+      - name: Validate playground renderer
+        run: |
+          set -euxo pipefail
+          grep -F 'VESSEL PLAYGROUND  //  v1.0' app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
+          grep -F 'IMPULSE BLAST' app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
+          grep -F 'SFX:' app/src/main/cpp/native_vulkan_studio_v7_part3.inc
+          grep -F 'Vessel Playground v1.0' app/src/main/cpp/native_vulkan_studio_v7_part5.inc
+          grep -F 'const int LEAVES=0' app/src/main/cpp/shaders/native_studio_v7.vert
+          test -s app/src/main/res/raw/impact_metal.ogg
+          test -s app/src/main/res/raw/impact_soft.ogg
+          GLSLC="$ANDROID_HOME/ndk/29.0.14206865/shader-tools/linux-x86_64/glslc"
+          "$GLSLC" --target-env=vulkan1.2 -fshader-stage=frag app/src/main/cpp/shaders/native_studio_v7_rt.frag -o /tmp/playground-rt.spv
+          "$GLSLC" --target-env=vulkan1.2 -fshader-stage=vert app/src/main/cpp/shaders/native_studio_v7.vert -o /tmp/playground.vert.spv
+
+      - name: Build APK
+        run: bash ./gradlew assembleDebug testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: vessel-playground-v1-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
