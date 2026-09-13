@@ -39,13 +39,13 @@
         <activity
             android:name=".BounceQuestActivity"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
-            android:screenOrientation="sensorLandscape"
+            android:screenOrientation="landscape"
             android:exported="false" />
 
         <activity
             android:name=".NativeCubeActivity"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
-            android:screenOrientation="sensorLandscape"
+            android:screenOrientation="landscape"
             android:exported="false" />
 
         <activity
