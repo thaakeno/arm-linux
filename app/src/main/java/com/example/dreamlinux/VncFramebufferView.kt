@@ -44,6 +44,8 @@ class VncFramebufferView(context: Context) : FrameLayout(context) {
         private const val GUEST_H = 720f
     }
 
+    private data class ContentRect(val left: Float, val top: Float, val width: Float, val height: Float)
+
     private external fun nativeAttach(surface: Surface)
     private external fun nativeDetach()
 
@@ -99,6 +101,11 @@ class VncFramebufferView(context: Context) : FrameLayout(context) {
         updateCursorOverlay()
     }
 
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        updateCursorOverlay()
+    }
+
     override fun onDetachedFromWindow() {
         releaseButtons()
         nativeDetach()
@@ -116,10 +123,22 @@ class VncFramebufferView(context: Context) : FrameLayout(context) {
         updateCursorOverlay()
     }
 
+    private fun contentRect(): ContentRect {
+        val vw = width.coerceAtLeast(1).toFloat()
+        val vh = height.coerceAtLeast(1).toFloat()
+        val scale = minOf(vw / GUEST_W, vh / GUEST_H)
+        val cw = GUEST_W * scale
+        val ch = GUEST_H * scale
+        return ContentRect((vw - cw) * .5f, (vh - ch) * .5f, cw, ch)
+    }
+
     private fun updateCursorOverlay() {
         if (cursor.visibility != View.VISIBLE || width <= 0 || height <= 0) return
-        cursor.translationX = (cursorX / GUEST_W * width).coerceIn(0f, (width - cursor.measuredWidth).coerceAtLeast(0).toFloat())
-        cursor.translationY = (cursorY / GUEST_H * height).coerceIn(0f, (height - cursor.measuredHeight).coerceAtLeast(0).toFloat())
+        val r = contentRect()
+        val x = r.left + (cursorX / GUEST_W) * r.width
+        val y = r.top + (cursorY / GUEST_H) * r.height
+        cursor.translationX = x.coerceIn(r.left, (r.left + r.width - cursor.measuredWidth).coerceAtLeast(r.left))
+        cursor.translationY = y.coerceIn(r.top, (r.top + r.height - cursor.measuredHeight).coerceAtLeast(r.top))
     }
 
     private fun moveLocalCursor(ix: Int, iy: Int) {
@@ -192,9 +211,11 @@ class VncFramebufferView(context: Context) : FrameLayout(context) {
         when (pointerMode) {
             PointerMode.DIRECT -> {
                 cursor.visibility = View.GONE
-                val nx = (e.x / width.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
-                val ny = (e.y / height.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
-                cursorX = nx * (GUEST_W - 1f); cursorY = ny * (GUEST_H - 1f)
+                val r = contentRect()
+                val nx = ((e.x - r.left) / r.width.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                val ny = ((e.y - r.top) / r.height.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                cursorX = nx * (GUEST_W - 1f)
+                cursorY = ny * (GUEST_H - 1f)
                 when (e.actionMasked) {
                     MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> VesselInputClient.absolute(nx, ny, true)
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> VesselInputClient.absolute(nx, ny, false)
@@ -328,14 +349,22 @@ class VncFramebufferView(context: Context) : FrameLayout(context) {
 
     private class CursorView(context: Context) : View(context) {
         private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.FILL }
-        private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(24,24,24); style = Paint.Style.STROKE; strokeWidth = resources.displayMetrics.density * 1.8f }
+        private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(24,24,24)
+            style = Paint.Style.STROKE
+            strokeWidth = resources.displayMetrics.density * 1.8f
+        }
         private val path = Path()
         init { setLayerType(LAYER_TYPE_HARDWARE, null) }
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val w = width.toFloat(); val h = height.toFloat()
-            path.reset(); path.moveTo(w*.08f,h*.04f); path.lineTo(w*.08f,h*.78f); path.lineTo(w*.30f,h*.59f); path.lineTo(w*.46f,h*.94f); path.lineTo(w*.62f,h*.85f); path.lineTo(w*.47f,h*.53f); path.lineTo(w*.79f,h*.52f); path.close()
-            canvas.drawPath(path, fill); canvas.drawPath(path, stroke)
+            path.reset()
+            path.moveTo(w*.08f,h*.04f); path.lineTo(w*.08f,h*.78f); path.lineTo(w*.30f,h*.59f)
+            path.lineTo(w*.46f,h*.94f); path.lineTo(w*.62f,h*.85f); path.lineTo(w*.47f,h*.53f)
+            path.lineTo(w*.79f,h*.52f); path.close()
+            canvas.drawPath(path, fill)
+            canvas.drawPath(path, stroke)
         }
     }
 }
