@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -18,11 +19,13 @@
 namespace {
 constexpr int kPort = 47636;
 std::mutex gMutex;
+std::condition_variable gCv;
 ANativeWindow* gWindow = nullptr;
 std::vector<uint8_t> gFrame;
 int gFrameW = 0, gFrameH = 0;
 float gCursorX = .5f, gCursorY = .5f;
 bool gCursorVisible = false;
+bool gDirty = false;
 std::atomic<bool> gRunning{false};
 
 bool recvAll(int fd, void* dst, size_t len) {
@@ -113,7 +116,7 @@ void streamLoop() {
         if (w<320||h<240||w>7680||h>4320) { close(fd); continue; }
         {
             std::lock_guard<std::mutex> lk(gMutex);
-            gFrameW=w; gFrameH=h; gFrame.assign(static_cast<size_t>(w)*h*4,0);
+            gFrameW=w; gFrameH=h; gFrame.assign(static_cast<size_t>(w)*h*4,0); gDirty=true; gCv.notify_one();
         }
         while (gRunning.load()) {
             uint8_t head[13]; if(!recvAll(fd,head,sizeof(head))) break;
@@ -122,7 +125,7 @@ void streamLoop() {
             if (kind=='F') {
                 if (value != static_cast<uint32_t>(w*h*4)) break;
                 std::vector<uint8_t> tmp(value); if(!recvAll(fd,tmp.data(),tmp.size())) break;
-                std::lock_guard<std::mutex> lk(gMutex); gFrame.swap(tmp); postFrameLocked();
+                std::lock_guard<std::mutex> lk(gMutex); gFrame.swap(tmp); gDirty=true; gCv.notify_one();
             } else if (kind=='D') {
                 if (value>8192) break;
                 bool bad=false;
@@ -137,16 +140,31 @@ void streamLoop() {
                     for(uint16_t yy=0;yy<thh;yy++) std::memcpy(gFrame.data()+((static_cast<size_t>(y+yy)*w+x)*4),tile.data()+static_cast<size_t>(yy)*tw*4,static_cast<size_t>(tw)*4);
                 }
                 if(bad) break;
-                postFrameLocked();
+                gDirty=true; gCv.notify_one();
             } else break;
         }
         close(fd);
     }
 }
 
+void renderLoop() {
+    using namespace std::chrono_literals;
+    std::unique_lock<std::mutex> lk(gMutex);
+    while (gRunning.load()) {
+        gCv.wait_for(lk, 8ms, [] { return gDirty || !gRunning.load(); });
+        if (!gRunning.load()) break;
+        if (!gDirty) continue;
+        gDirty=false;
+        postFrameLocked();
+    }
+}
+
 void ensureThread() {
     bool expected=false;
-    if (gRunning.compare_exchange_strong(expected,true)) std::thread(streamLoop).detach();
+    if (gRunning.compare_exchange_strong(expected,true)) {
+        std::thread(streamLoop).detach();
+        std::thread(renderLoop).detach();
+    }
 }
 }
 
@@ -157,7 +175,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VncFramebufferView
         std::lock_guard<std::mutex> lk(gMutex);
         if (gWindow) ANativeWindow_release(gWindow);
         gWindow=nw;
-        postFrameLocked();
+        gDirty=true; gCv.notify_one();
     }
     ensureThread();
 }
@@ -166,16 +184,16 @@ extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VncFramebufferView
     if(gWindow){ANativeWindow_release(gWindow);gWindow=nullptr;}
 }
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VncFramebufferView_nativeSetCursorVisible(JNIEnv*,jobject,jboolean visible) {
-    std::lock_guard<std::mutex> lk(gMutex); gCursorVisible=visible; postFrameLocked();
+    std::lock_guard<std::mutex> lk(gMutex); gCursorVisible=visible; gDirty=true; gCv.notify_one();
 }
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VncFramebufferView_nativeCursorAbsolute(JNIEnv*,jobject,jfloat x,jfloat y) {
-    std::lock_guard<std::mutex> lk(gMutex); gCursorX=std::clamp(float(x),0.f,1.f); gCursorY=std::clamp(float(y),0.f,1.f); if(gCursorVisible) postFrameLocked();
+    std::lock_guard<std::mutex> lk(gMutex); gCursorX=std::clamp(float(x),0.f,1.f); gCursorY=std::clamp(float(y),0.f,1.f); if(gCursorVisible){gDirty=true;gCv.notify_one();}
 }
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VncFramebufferView_nativeCursorRelative(JNIEnv*,jobject,jfloat dx,jfloat dy) {
     std::lock_guard<std::mutex> lk(gMutex);
     if(gFrameW>0) gCursorX=std::clamp(gCursorX+float(dx)/gFrameW,0.f,1.f);
     if(gFrameH>0) gCursorY=std::clamp(gCursorY+float(dy)/gFrameH,0.f,1.f);
-    if(gCursorVisible) postFrameLocked();
+    if(gCursorVisible){gDirty=true;gCv.notify_one();}
 }
 
-JNIEXPORT jint JNI_OnLoad(JavaVM*, void*) { return JNI_VERSION_1_6; }
+extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM*, void*) { return JNI_VERSION_1_6; }
