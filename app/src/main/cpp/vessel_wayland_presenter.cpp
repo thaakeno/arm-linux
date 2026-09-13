@@ -34,7 +34,6 @@ constexpr uint32_t kMsgReset = 3;
 constexpr uint32_t kAhbCount = 3;
 constexpr uint64_t kDrmModifierLinear = 0;
 
-// Common DRM fourcc values. Keep these local so libdrm is not an APK dependency.
 constexpr uint32_t fourcc(char a, char b, char c, char d) {
     return static_cast<uint32_t>(a) |
            (static_cast<uint32_t>(b) << 8u) |
@@ -85,18 +84,6 @@ void logi(const std::string &s) { __android_log_print(ANDROID_LOG_INFO, kTag, "%
 
 std::string vkerr(const char *what, VkResult result) {
     return std::string(what) + " failed VkResult=" + std::to_string(static_cast<int>(result));
-}
-
-bool recv_exact(int fd, void *dst, size_t size) {
-    auto *p = static_cast<uint8_t *>(dst);
-    while (size > 0) {
-        const ssize_t n = recv(fd, p, size, 0);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return false;
-        p += n;
-        size -= static_cast<size_t>(n);
-    }
-    return true;
 }
 
 class Presenter {
@@ -534,7 +521,6 @@ private:
         mai.memoryTypeIndex = memoryType;
         vr = vkAllocateMemory(device_, &mai, nullptr, &source_.memory);
         if (vr != VK_SUCCESS) { status_ = vkerr("source vkAllocateMemory", vr); source_.fd = -1; close(fd); destroySourceLocked(); return false; }
-        // Vulkan consumed the fd on successful import.
         source_.fd = -1;
         vr = vkBindImageMemory(device_, source_.image, source_.memory, 0);
         if (vr != VK_SUCCESS) { status_ = vkerr("source vkBindImageMemory", vr); destroySourceLocked(); return false; }
@@ -639,9 +625,6 @@ private:
         pi.pImageIndices = &swapIndex;
         vr = vkQueuePresentKHR(queue_, &pi);
         if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) { status_ = vkerr("vkQueuePresentKHR", vr); return false; }
-        // The producer calls glFinish before frame notification. Waiting here keeps
-        // buffer ownership simple and deterministic until explicit sync_fd handoff
-        // is negotiated by both ends.
         vkQueueWaitIdle(queue_);
         mid.initialized = true;
         ++frames_;
