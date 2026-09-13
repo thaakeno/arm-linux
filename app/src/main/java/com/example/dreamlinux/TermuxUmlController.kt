@@ -20,7 +20,7 @@ class TermuxUmlController(private val context: Context) {
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = -1
-        const val REQUIRED_PROTOCOL = 25
+        const val REQUIRED_PROTOCOL = 26
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
         private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
@@ -40,12 +40,9 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) switching to protocol 25 native runtime"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) switching to protocol 26 native runtime"
               set -e
 
-              # Match only an actual Python Vessel daemon process. Do not use a
-              # broad `pkill -f vessel_runtime_daemon` here: the launcher shell's
-              # own `bash -lc` argv contains this script text and would match it.
               DAEMON_RE='^([^ ]*/)?python(3)?[[:space:]]+[^ ]*/vessel_runtime_daemon(_v[0-9]+)?\.py([[:space:]].*)?${'$'}'
               OLD_PIDS="${'$'}(pgrep -f "${'$'}DAEMON_RE" 2>/dev/null || true)"
               if [ -n "${'$'}OLD_PIDS" ]; then
@@ -71,12 +68,12 @@ class TermuxUmlController(private val context: Context) {
                 git -C ~/vessel-poc-runtime clean -ffd
               fi
 
-              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v25.py
+              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v26.py
               export VESSEL_POC_DIR=~/vessel-poc-runtime
               export VESSEL_MEM_MB=8192
               export ENABLE_X11=0
-              echo "[vessel-launch] exec protocol 25 daemon"
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v25.py
+              echo "[vessel-launch] exec protocol 26 daemon"
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v26.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
@@ -122,10 +119,6 @@ class TermuxUmlController(private val context: Context) {
     suspend fun ensureDaemon(): JSONObject = withContext(Dispatchers.IO) {
         val existing = runCatching { requestBlocking(JSONObject().put("action", "status"), 900) }.getOrNull()
         if (existing != null && isNativeProtocol(existing)) return@withContext existing
-
-        // Ask an old daemon to stop its UML guest, then replace only the actual
-        // Python daemon process through Termux. The launcher shell is never part
-        // of the daemon PID match.
         if (existing != null) {
             runCatching { requestBlocking(JSONObject().put("action", "stop"), 15_000) }
             delay(250)
@@ -139,7 +132,7 @@ class TermuxUmlController(private val context: Context) {
                 if (isNativeProtocol(status)) return@withContext status
             } catch (t: Throwable) { last = t }
         }
-        throw IllegalStateException("Vessel protocol 25 native runtime did not start. In Termux run: cat ~/vessel-daemon.log", last)
+        throw IllegalStateException("Vessel protocol 26 native runtime did not start. In Termux run: cat ~/vessel-daemon.log", last)
     }
 
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
