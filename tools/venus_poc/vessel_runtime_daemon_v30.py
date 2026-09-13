@@ -218,9 +218,6 @@ class WaylandRuntime(base.Runtime):
         if "VENUS_READY" not in check:
             raise RuntimeError("Mesa Venus 26.2.2 or /dev/umshm is unavailable")
 
-        # Never combine pkill -f with the command that launches the same script.
-        # The shell command line itself then contains the target text and pkill can SIGTERM
-        # its own RPC shell, yielding return code -15.
         self.guest("pkill -f '^python3 /root/guest_relay_wayland.py( |$)' 2>/dev/null || true", 10)
         self.guest("rm -f /tmp/.venus_test /tmp/vessel-frame-export.sock /tmp/vessel-guest-wayland.log", 10)
         self.guest(
@@ -231,12 +228,15 @@ class WaylandRuntime(base.Runtime):
         )
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
+            # The frame-export socket is created by Relay.frame_export_loop only
+            # after Mesa/KWin connects to the Venus socket. Waiting for it here
+            # would deadlock startup because KWin has not been started yet.
             out = self.guest(
-                "test -S /tmp/.venus_test && test -S /tmp/vessel-frame-export.sock && echo WAYLAND_RELAY_READY || true",
+                "test -S /tmp/.venus_test && echo WAYLAND_RELAY_READY || true",
                 10,
             )
             if "WAYLAND_RELAY_READY" in out:
-                self.set_progress("debian_ready", 55, "Debian + Venus + dma-buf relay ready")
+                self.set_progress("debian_ready", 55, "Debian + Venus relay ready")
                 return
             time.sleep(.25)
         tail = self.guest("tail -120 /tmp/vessel-guest-wayland.log 2>/dev/null || true", 10)
@@ -248,7 +248,8 @@ class WaylandRuntime(base.Runtime):
             source = effect_root / name
             if not source.exists():
                 raise RuntimeError(f"missing KWin effect source: {source}")
-            self._rpc_upload(source, f"/root/vessel-kwin-output/{name}") if name != "CMakeLists.txt" else None
+
+        # Create the guest destination before uploading any source into it.
         self.guest("mkdir -p /root/vessel-kwin-output", 10)
         for name in ("CMakeLists.txt", "vesseloutput.cpp", "vesseloutput.json"):
             self._rpc_upload(effect_root / name, f"/root/vessel-kwin-output/{name}")
@@ -263,7 +264,7 @@ class WaylandRuntime(base.Runtime):
             self.guest(
                 "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y --no-install-recommends "
                 "kwin-wayland kwin-dev plasma-workspace plasma-desktop dbus-x11 cmake ninja-build "
-                "extra-cmake-modules build-essential libegl-dev libgl-dev libkf5coreaddons-dev",
+                "extra-cmake-modules build-essential libegl-dev libgl-dev libkf5coreaddons-dev libxcb1-dev libepoxy-dev",
                 1200,
             )
 
@@ -329,7 +330,8 @@ wait "$KWIN_PID"
         while time.monotonic() < deadline:
             out = self.guest(
                 "pgrep -x kwin_wayland >/dev/null && pgrep -x plasmashell >/dev/null && "
-                "test -S /tmp/vessel-runtime/wayland-0 && echo WAYLAND_SESSION_READY || true",
+                "test -S /tmp/vessel-runtime/wayland-0 && test -S /tmp/vessel-frame-export.sock && "
+                "echo WAYLAND_SESSION_READY || true",
                 12,
             )
             relay = ""
@@ -340,7 +342,7 @@ wait "$KWIN_PID"
             if "WAYLAND_SESSION_READY" in out and "Android imported KWin object" in relay:
                 self.desktop_ready = True
                 self.last_error = ""
-                self.append("KWINDOW_WAYLAND_READY\nVENUS_DMABUF_TO_AHB_READY\n")
+                self.append("KWIN_WAYLAND_READY\nVENUS_DMABUF_TO_AHB_READY\n")
                 self.set_progress("desktop_ready", 100, "KWin Wayland is live through Vulkan/AHardwareBuffer")
                 return self.state()
             time.sleep(.35)
