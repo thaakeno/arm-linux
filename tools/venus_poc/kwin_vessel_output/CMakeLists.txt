@@ -13,13 +13,18 @@ include(KDECompilerSettings NO_POLICY_SCOPE)
 include(KDEClangFormat)
 include(ECMSetupQtPluginMacroNames)
 
-# Debian 12 ships KWin 5.27. Its effect factory macros take the metadata JSON
-# as argument 2. Teach Qt5 AutoMoc exactly that, matching kwineffects.h.
+# Match KWin's actual effect factory macro signatures. The JSON metadata is
+# argument 2 for KWIN_EFFECT_FACTORY, argument 3 for the single-callback
+# variants, and argument 4 for KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED.
+# Registering all of them as JSON_ARG2 can leave Qt's plugin metadata malformed
+# even though the shared object still compiles and installs.
 ecm_setup_qtplugin_macro_names(
     JSON_ARG2
         "KWIN_EFFECT_FACTORY"
+    JSON_ARG3
         "KWIN_EFFECT_FACTORY_ENABLED"
         "KWIN_EFFECT_FACTORY_SUPPORTED"
+    JSON_ARG4
         "KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED"
 )
 
