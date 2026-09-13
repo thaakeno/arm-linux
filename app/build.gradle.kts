@@ -20,8 +20,8 @@ android {
         buildConfigField("boolean", "LOCAL_TEST", localTest.toString())
         minSdk = 29
         targetSdk = 36
-        versionCode = 2000 + buildRevision
-        versionName = "1.0.0-alpha1"
+        versionCode = 3000 + buildRevision
+        versionName = "2.0.0-alpha1"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
         ndk { abiFilters += "arm64-v8a" }
