@@ -62,6 +62,7 @@ jobs:
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/dark_rock/dark_rock_disp_2k.png' "$ASSETS/dark_rock_disp_2k.png"
 
           get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/alps_field_1k.hdr' "$ASSETS/evening_museum_courtyard_1k.hdr"
+          get 'https://opengameart.org/sites/default/files/fire1_64.png' "$ASSETS/fire1_64.png"
           get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$THIRD/stb_image.h"
 
       - name: Apply Vulkan Studio v13 source stack
@@ -82,6 +83,7 @@ jobs:
       - name: Validate rootless runtime and Vulkan Studio v13
         run: |
           set -euxo pipefail
+          test -s app/src/main/assets/vulkan_v7/fire1_64.png
           for f in tools/venus_poc/vessel_runtime_daemon.py \
                    tools/venus_poc/vessel_runtime_daemon_v22.py \
                    tools/venus_poc/vessel_acceptance.py \
