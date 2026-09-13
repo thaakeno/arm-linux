@@ -48,6 +48,28 @@ jobs:
           test ! -e tools/venus_poc/guest_frame_streamer_v2.c
           test ! -e tools/venus_poc/guest_frame_streamer.py
           ! grep -E 'VFRM2|FRAME_STREAMER|ANativeWindow_lock|Xtigervnc|vncserver|lorie-direct-x11-v1' tools/venus_poc/vessel_runtime_daemon_v30.py app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt app/src/main/cpp/CMakeLists.txt
+      - name: Compile KWin output backend on Debian 12
+        run: |
+          set -euxo pipefail
+          docker run --rm \
+            -v "$PWD:/src:ro" \
+            -w /src \
+            debian:12-slim \
+            bash -lc '
+              set -euxo pipefail
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                ca-certificates cmake ninja-build g++ extra-cmake-modules \
+                qtbase5-dev libkf5coreaddons-dev kwin-dev \
+                libxcb1-dev libepoxy-dev libegl1-mesa-dev libgl-dev
+              rm -rf /tmp/vessel-kwin-build
+              cmake -S tools/venus_poc/kwin_vessel_output \
+                    -B /tmp/vessel-kwin-build \
+                    -G Ninja \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_INSTALL_PREFIX=/usr
+              cmake --build /tmp/vessel-kwin-build -j2
+            '
       - name: Build, test and lint app
         run: |
           chmod +x gradlew
