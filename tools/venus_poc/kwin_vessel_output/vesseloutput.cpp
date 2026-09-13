@@ -64,6 +64,10 @@ public:
     VesselOutputEffect()
     {
         m_display = eglGetCurrentDisplay();
+        m_createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(
+            eglGetProcAddress("eglCreateImageKHR"));
+        m_destroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
+            eglGetProcAddress("eglDestroyImageKHR"));
         m_exportQuery = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC>(
             eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
         m_export = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(
@@ -120,6 +124,8 @@ public:
 
 private:
     EGLDisplay m_display = EGL_NO_DISPLAY;
+    PFNEGLCREATEIMAGEKHRPROC m_createImage = nullptr;
+    PFNEGLDESTROYIMAGEKHRPROC m_destroyImage = nullptr;
     PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC m_exportQuery = nullptr;
     PFNEGLEXPORTDMABUFIMAGEMESAPROC m_export = nullptr;
     EGLImageKHR m_image = EGL_NO_IMAGE_KHR;
@@ -145,7 +151,7 @@ private:
         sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
         std::strncpy(addr.sun_path, kSocketPath, sizeof(addr.sun_path) - 1);
-        if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
+        if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
             close(fd);
             return false;
         }
@@ -188,7 +194,9 @@ private:
     void destroyExport()
     {
         if (m_image != EGL_NO_IMAGE_KHR) {
-            eglDestroyImageKHR(m_display, m_image);
+            if (m_destroyImage) {
+                m_destroyImage(m_display, m_image);
+            }
             m_image = EGL_NO_IMAGE_KHR;
         }
         if (m_texture) {
@@ -200,7 +208,7 @@ private:
 
     bool ensureExport()
     {
-        if (!m_exportQuery || !m_export || m_display == EGL_NO_DISPLAY) {
+        if (!m_createImage || !m_destroyImage || !m_exportQuery || !m_export || m_display == EGL_NO_DISPLAY) {
             return false;
         }
         const QSize size = effects->virtualScreenSize();
@@ -225,8 +233,8 @@ private:
         glBindTexture(GL_TEXTURE_2D, 0);
 
         const EGLint attrs[] = {EGL_GL_TEXTURE_LEVEL_KHR, 0, EGL_NONE};
-        m_image = eglCreateImageKHR(m_display, eglGetCurrentContext(), EGL_GL_TEXTURE_2D_KHR,
-                                    reinterpret_cast<EGLClientBuffer>(static_cast<uintptr_t>(m_texture)), attrs);
+        m_image = m_createImage(m_display, eglGetCurrentContext(), EGL_GL_TEXTURE_2D_KHR,
+                                reinterpret_cast<EGLClientBuffer>(static_cast<uintptr_t>(m_texture)), attrs);
         if (m_image == EGL_NO_IMAGE_KHR) {
             destroyExport();
             return false;
