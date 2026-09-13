@@ -15,9 +15,48 @@ VESSEL_VCPUS="${VESSEL_VCPUS:-6}"
 VESSEL_MEM_MB="${VESSEL_MEM_MB:-8192}"
 THREAD_WORKER_MARKER="${THREAD_WORKER_MARKER:-$PREFIX/opt/virglrenderer-android/.venus-thread-worker}"
 
+start_virgl() {
+  rm -f "$VENUS_SOCK"
+  cd "$POC_DIR"
+  virgl_test_server_android \
+    --angle-vulkan \
+    --venus \
+    --multi-clients \
+    --socket-path "$VENUS_SOCK" \
+    >>"$HOST_LOG" 2>&1 &
+  VIRGL_PID=$!
+  export VIRGL_PID
+  for _ in $(seq 1 80); do
+    [ -S "$VENUS_SOCK" ] && return 0
+    kill -0 "$VIRGL_PID" 2>/dev/null || {
+      echo "[venus-wayland] virglrenderer died during startup" >&2
+      tail -120 "$HOST_LOG" >&2 || true
+      return 1
+    }
+    sleep .1
+  done
+  echo "[venus-wayland] Venus socket missing after virglrenderer startup" >&2
+  return 1
+}
+
+venus_watchdog() {
+  while :; do
+    sleep .25
+    [ -n "${VIRGL_PID:-}" ] || continue
+    if ! kill -0 "$VIRGL_PID" 2>/dev/null || [ ! -S "$VENUS_SOCK" ]; then
+      echo "[venus-wayland] Venus listener disappeared; recycling virglrenderer" >>"$HOST_LOG"
+      kill "$VIRGL_PID" 2>/dev/null || true
+      wait "$VIRGL_PID" 2>/dev/null || true
+      start_virgl || exit 1
+      echo "[venus-wayland] Venus listener restored pid=$VIRGL_PID" >>"$HOST_LOG"
+    fi
+  done
+}
+
 cleanup() {
   rc=$?
   trap - EXIT INT TERM
+  [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
   [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null || true
   [ -n "${VIRGL_PID:-}" ] && kill "$VIRGL_PID" 2>/dev/null || true
   pkill -f '[h]ost_relay_wayland.py' 2>/dev/null || true
@@ -42,7 +81,6 @@ done
   exit 1
 }
 
-# Kill only UML instances using this persistent image.
 for proc in /proc/[0-9]*; do
   pid="${proc##*/}"
   [ "$pid" = "$$" ] && continue
@@ -61,21 +99,11 @@ sleep .4
 pkill -f '[h]ost_relay_wayland.py' 2>/dev/null || true
 pkill -f '[v]irgl_test_server_android' 2>/dev/null || true
 rm -f "$VENUS_SOCK" "$UMSHM_SOCK"
+: >"$HOST_LOG"
 
-cd "$POC_DIR"
-virgl_test_server_android \
-  --angle-vulkan \
-  --venus \
-  --multi-clients \
-  --socket-path "$VENUS_SOCK" \
-  >"$HOST_LOG" 2>&1 &
-VIRGL_PID=$!
-for _ in $(seq 1 80); do
-  [ -S "$VENUS_SOCK" ] && break
-  kill -0 "$VIRGL_PID" 2>/dev/null || { echo "[venus-wayland] virglrenderer died" >&2; tail -120 "$HOST_LOG"; exit 1; }
-  sleep .1
-done
-[ -S "$VENUS_SOCK" ] || { echo "[venus-wayland] Venus socket missing" >&2; exit 1; }
+start_virgl
+venus_watchdog &
+WATCHDOG_PID=$!
 
 python3 "$POC_DIR/tools/venus_poc/host_relay_wayland.py" \
   --venus-unix "$VENUS_SOCK" \
@@ -97,8 +125,6 @@ echo "[venus-wayland] relay log: $RELAY_LOG"
 echo "[venus-wayland] booting Debian UML with $VESSEL_VCPUS vCPUs and ${VESSEL_MEM_MB} MiB RAM..."
 
 cd "$UML_DIR"
-# umnet owns fd 3 and injects the UML vec0:transport=fd network argument itself.
-# Passing vec0 again here registers uml-vector.0 twice and breaks the guest network.
 exec ./umnet --passt ./passt --dns 1.1.1.1 -- \
   ./linux-umshm \
     mem="${VESSEL_MEM_MB}M" \
