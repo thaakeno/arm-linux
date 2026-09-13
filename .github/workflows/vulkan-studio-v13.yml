@@ -47,6 +47,7 @@ jobs:
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock/dark_rock_arm_2k.jpg' "$A/dark_rock_arm_2k.jpg"
           get 'https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/dark_rock/dark_rock_disp_2k.png' "$A/dark_rock_disp_2k.png"
           get 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/alps_field_1k.hdr' "$A/evening_museum_courtyard_1k.hdr"
+          get 'https://opengameart.org/sites/default/files/fire1_64.png' "$A/fire1_64.png"
           get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$T/stb_image.h"
       - name: Apply v13 source stack
         run: |
@@ -60,6 +61,7 @@ jobs:
       - name: Validate v13 Jolt integration
         run: |
           set -euxo pipefail
+          test -s app/src/main/assets/vulkan_v7/fire1_64.png
           grep -F 'VULKAN STUDIO  //  v13.0' app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
           grep -F 'nativeSetFirstPerson' app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
           grep -F 'nativeFirstPersonMove' app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
