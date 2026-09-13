@@ -1,0 +1,71 @@
+name: Bounce Quest
+
+on:
+  push:
+    branches: [ app/bounce-quest ]
+  workflow_dispatch:
+
+concurrency:
+  group: bounce-quest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: temurin
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK and NDK
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
+
+      - name: Fetch CC0 PBR textures and game audio
+        run: |
+          set -euxo pipefail
+          A=app/src/main/assets/bounce
+          R=app/src/main/res/raw
+          T=app/src/main/cpp/third_party
+          mkdir -p "$A" "$R" "$T"
+          get(){ curl --fail --location --retry 5 --retry-delay 2 "$1" -o "$2"; test -s "$2"; }
+
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_diff_2k.jpg' "$A/concrete_diff.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_nor_gl_2k.jpg' "$A/concrete_normal.jpg"
+          get 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/concrete_floor/concrete_floor_arm_2k.jpg' "$A/concrete_arm.jpg"
+          get 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' "$T/stb_image.h"
+
+          BASE='https://raw.githubusercontent.com/Sonofg0tham/tailgate/main/public/assets/audio'
+          get "$BASE/footstep-carpet-1.ogg" "$R/bq_bounce_1.ogg"
+          get "$BASE/footstep-carpet-2.ogg" "$R/bq_bounce_2.ogg"
+          get "$BASE/badge-accept.ogg" "$R/bq_collect.ogg"
+          get "$BASE/breaker-trip.ogg" "$R/bq_jump.ogg"
+          get "$BASE/bolt-throw.ogg" "$R/bq_dash.ogg"
+          get "$BASE/badge-deny.ogg" "$R/bq_death.ogg"
+          get "$BASE/plant-complete.ogg" "$R/bq_win.ogg"
+
+      - name: Verify clean game tree
+        run: |
+          set -eux
+          test -f app/src/main/cpp/engine/renderer/BounceRenderer.cpp
+          test -f app/src/main/cpp/engine/physics/BallPhysics.cpp
+          test -f app/src/main/cpp/engine/game/Level.h
+          test ! -f tools/venus_poc/apply_containment_game.py
+          ! grep -R "native_vulkan_studio_v7" app/src/main/cpp/CMakeLists.txt
+
+      - name: Build and validate APK
+        run: bash ./gradlew assembleDebug testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
+
+      - name: Upload Bounce Quest APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounce-quest-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
