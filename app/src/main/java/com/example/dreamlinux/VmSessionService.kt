@@ -36,7 +36,7 @@ data class SessionState(
     val kdeInstalling:Boolean=false,
     val kdeStage:String="not started",
     val capabilities:String="Not checked",
-    val graphics:String="Venus · virglrenderer · host Adreno GPU",
+    val graphics:String="Mesa Zink + Venus · host Adreno GPU",
     val internetReady:Boolean=false,
     val internetStage:String="offline",
     val progressPhase:String="idle",
@@ -55,9 +55,8 @@ class VmSessionService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var uml: TermuxUmlController
-    // 1600x720 matches modern ~20:9 phones much better than 1920x1080 and cuts
-    // the software desktop pixel workload almost in half. Fullscreen GL scales
-    // it cleanly to the panel while the guest keeps a useful desktop DPI.
+    // 1600x720 matches modern ~20:9 phones well and avoids wasting bandwidth
+    // and GPU work on pixels the physical panel cannot use at this scale.
     private var requestedWidth = 1600
     private var requestedHeight = 720
     private var requestedDpi = 120
@@ -177,8 +176,15 @@ class VmSessionService : Service() {
         val error = shortError(rawError)
         val percent = obj.optInt("progressPercent", state.value.progressPercent)
         val rawDetail = obj.optString("progressDetail", state.value.progressDetail).ifBlank { state.value.progressDetail }
-        val detail = if (rawError.isNotBlank() && phase == "error") error else rawDetail
+        val detail = when {
+            rawError.isNotBlank() && phase == "error" -> error
+            phase == "wayland_present" -> "Connecting KWin GPU output to Android display"
+            phase == "wayland_start" -> "Starting KWin GPU compositor"
+            phase == "wayland_build" -> "Preparing native GPU display bridge"
+            else -> rawDetail
+        }
         val uptime = obj.optLong("uptimeMs", if (running) state.value.uptimeMs else 0L)
+        val compositorStarting = running && phase in setOf("wayland_build", "wayland_start", "wayland_present")
         val message = when {
             error.isNotBlank() -> error
             desktop -> "KDE Plasma is live · ${formatUptime(uptime)}"
@@ -194,11 +200,12 @@ class VmSessionService : Service() {
             running = running,
             debianStarting = running && !guest,
             kdeInstalled = desktop,
-            kdeInstalling = (!desktop && running && phase.startsWith("desktop")),
+            kdeInstalling = !desktop && compositorStarting,
             kdeStage = when {
-                desktop -> "KDE Plasma live · VFRM2 native surface · ${formatUptime(uptime)}"
-                running && phase.startsWith("desktop") -> detail
-                running -> "desktop not started"
+                desktop -> "KWin/Plasma live · native Vulkan display · ${formatUptime(uptime)}"
+                running && phase == "wayland_present" -> "KWin compositor running · connecting Android display"
+                running && compositorStarting -> detail
+                running && guest -> "Debian ready · desktop not requested"
                 else -> "not started"
             },
             internetReady = guest,
@@ -218,8 +225,8 @@ class VmSessionService : Service() {
                 else -> "runtime_ready"
             },
             message = message,
-            graphics = if (guest) "Mesa Venus 26.2.2 · virglrenderer/Turnip · shared umshm transport" else state.value.graphics,
-            capabilities = if (ok) "Rootless UML · Venus · VFRM2 native desktop · persistent ext4" else state.value.capabilities
+            graphics = if (guest) "Mesa Zink + Venus · Adreno GPU · dma-buf/umshm" else state.value.graphics,
+            capabilities = if (ok) "Rootless UML · native Vulkan desktop · direct evdev input · persistent ext4" else state.value.capabilities
         )
     }
 
