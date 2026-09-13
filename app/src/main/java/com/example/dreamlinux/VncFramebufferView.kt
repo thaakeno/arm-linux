@@ -5,8 +5,11 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.RectF
+import android.os.Build
 import android.os.SystemClock
 import android.text.InputType
 import android.view.InputDevice
@@ -27,13 +30,13 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.Inflater
 import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 /**
- * Compatibility class name retained so the existing Compose screen does not
- * need a migration commit. This implementation contains no VNC/RFB code.
- *
- * Display: Vessel VFRM1 -> Android SurfaceView.
- * Input: Android touch/trackpad/keyboard -> protocol-25 native input bridge.
+ * Compatibility class name retained for the Compose screen. There is no VNC/RFB
+ * code here: Vessel VFRM1 is drawn directly to an Android SurfaceView and input
+ * is sent over Vessel's native input bridge.
  */
 class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
     enum class PointerMode { DIRECT, TRACKPAD }
@@ -41,17 +44,18 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
     companion object {
         @Volatile var active: VncFramebufferView? = null
         private const val FRAME_PORT = 47636
+        private const val BTN_LEFT = 0x110
+        private const val BTN_RIGHT = 0x111
     }
 
     private val running = AtomicBoolean(false)
     private var readerThread: Thread? = null
-    private var bitmap: Bitmap? = null
+    @Volatile private var bitmap: Bitmap? = null
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
-    private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        style = Paint.Style.FILL
-        setShadowLayer(5f, 0f, 1f, Color.BLACK)
-    }
+    private val cursorFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.FILL }
+    private val cursorStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 2.1f }
+    private val cursorPath = Path()
+    private val contentRect = RectF()
     private var pointerMode = PointerMode.DIRECT
     private var lastX = 0f
     private var lastY = 0f
@@ -60,7 +64,11 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
     private var downAt = 0L
     private var moved = false
     private var twoFingerY = 0f
+    private var twoFingerDownAt = 0L
+    private var twoFingerMoved = false
     private var mouseLeftDown = false
+    private var dragging = false
+    private var lastTapAt = 0L
     private var localCursorX = 0f
     private var localCursorY = 0f
     @Volatile private var lastFrameSeq = 0L
@@ -76,11 +84,13 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
     }
 
     fun setPointerMode(mode: PointerMode) {
-        pointerMode = mode
-        if (localCursorX == 0f && width > 0) {
-            localCursorX = width / 2f
-            localCursorY = height / 2f
+        if (pointerMode == mode) return
+        if (dragging) {
+            VesselInputClient.button(BTN_LEFT, false)
+            dragging = false
         }
+        pointerMode = mode
+        ensureCursorInitialized()
         drawLatest()
     }
 
@@ -92,15 +102,8 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
 
     fun tapKey(keysym: Int) {
         val code = when (keysym) {
-            0xff1b -> 1      // Esc
-            0xff09 -> 15     // Tab
-            0xffe3 -> 29     // Ctrl
-            0xffe9 -> 56     // Alt
-            0xffeb -> 125    // Super
-            0xff51 -> 105    // Left
-            0xff52 -> 103    // Up
-            0xff53 -> 106    // Right
-            0xff54 -> 108    // Down
+            0xff1b -> 1; 0xff09 -> 15; 0xffe3 -> 29; 0xffe9 -> 56; 0xffeb -> 125
+            0xff51 -> 105; 0xff52 -> 103; 0xff53 -> 106; 0xff54 -> 108
             else -> 0
         }
         if (code != 0) {
@@ -112,16 +115,12 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
     override fun surfaceCreated(holder: SurfaceHolder) {
         active = this
         requestFocus()
-        localCursorX = width / 2f
-        localCursorY = height / 2f
+        ensureCursorInitialized()
         startFrameReader()
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        if (localCursorX <= 0f || localCursorY <= 0f) {
-            localCursorX = width / 2f
-            localCursorY = height / 2f
-        }
+        ensureCursorInitialized()
         drawLatest()
     }
 
@@ -129,34 +128,44 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
         running.set(false)
         readerThread?.interrupt()
         readerThread = null
+        if (dragging || mouseLeftDown) VesselInputClient.button(BTN_LEFT, false)
+        dragging = false
+        mouseLeftDown = false
         if (active === this) active = null
+    }
+
+    private fun ensureCursorInitialized() {
+        if (localCursorX > 0f && localCursorY > 0f) return
+        localCursorX = width.coerceAtLeast(1) / 2f
+        localCursorY = height.coerceAtLeast(1) / 2f
     }
 
     private fun startFrameReader() {
         if (!running.compareAndSet(false, true)) return
         readerThread = Thread({ frameLoop() }, "vessel-native-frame-client").apply {
             isDaemon = true
+            priority = Thread.MAX_PRIORITY
             start()
         }
     }
 
     private fun frameLoop() {
-        var backoff = 80L
+        var backoff = 30L
         while (running.get()) {
             try {
                 Socket().use { socket ->
                     socket.tcpNoDelay = true
                     socket.keepAlive = true
-                    socket.connect(InetSocketAddress("127.0.0.1", FRAME_PORT), 1500)
-                    val input = BufferedInputStream(socket.getInputStream(), 256 * 1024)
-                    val headerLine = readLine(input, 4096)
-                    val header = JSONObject(headerLine)
+                    socket.receiveBufferSize = 1024 * 1024
+                    socket.connect(InetSocketAddress("127.0.0.1", FRAME_PORT), 1200)
+                    val input = BufferedInputStream(socket.getInputStream(), 1024 * 1024)
+                    val header = JSONObject(readLine(input, 4096))
                     require(header.optString("magic") == "VFRM1") { "Unexpected Vessel frame protocol" }
                     val frameWidth = header.getInt("width")
                     val frameHeight = header.getInt("height")
                     require(frameWidth in 320..7680 && frameHeight in 240..4320)
-                    require(header.optString("format") == "BGRA8888")
-                    backoff = 80L
+                    require(header.optString("format") == "RGBA8888") { "Unexpected Vessel pixel format" }
+                    backoff = 30L
 
                     while (running.get()) {
                         val prefix = readExact(input, 16)
@@ -180,32 +189,55 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
             } catch (_: Throwable) {
                 if (!running.get()) break
                 try { Thread.sleep(backoff) } catch (_: InterruptedException) { break }
-                backoff = (backoff * 2).coerceAtMost(1000L)
+                backoff = (backoff * 2).coerceAtMost(500L)
             }
         }
     }
 
+    @Synchronized
     private fun drawLatest() {
         if (!holder.surface.isValid) return
         val frame = bitmap ?: return
         var canvas: Canvas? = null
         try {
-            canvas = holder.lockCanvas()
+            canvas = if (Build.VERSION.SDK_INT >= 23) holder.lockHardwareCanvas() else holder.lockCanvas()
             canvas.drawColor(Color.BLACK)
-            // The native desktop is presented directly into the Android surface.
-            // Scale to the actual surface bounds so the old RFB letterbox bars are
-            // impossible; fullscreen landscape naturally remains aspect-correct.
-            canvas.drawBitmap(frame, null, Rect(0, 0, canvas.width, canvas.height), paint)
-            if (pointerMode == PointerMode.TRACKPAD) {
-                val x = localCursorX.coerceIn(0f, canvas.width.toFloat())
-                val y = localCursorY.coerceIn(0f, canvas.height.toFloat())
-                canvas.drawCircle(x, y, 7f, cursorPaint)
-                canvas.drawCircle(x, y, 2.5f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK })
-            }
+
+            // Preserve the Linux desktop's aspect ratio. The old stretch-to-fill
+            // path distorted every window whenever the Android view was portrait.
+            val sx = canvas.width.toFloat() / frame.width.toFloat()
+            val sy = canvas.height.toFloat() / frame.height.toFloat()
+            val scale = minOf(sx, sy)
+            val dw = frame.width * scale
+            val dh = frame.height * scale
+            val left = (canvas.width - dw) * 0.5f
+            val top = (canvas.height - dh) * 0.5f
+            contentRect.set(left, top, left + dw, top + dh)
+            val dst = Rect(left.roundToInt(), top.roundToInt(), (left + dw).roundToInt(), (top + dh).roundToInt())
+            canvas.drawBitmap(frame, null, dst, paint)
+
+            if (pointerMode == PointerMode.TRACKPAD) drawCursor(canvas)
         } catch (_: Throwable) {
         } finally {
             if (canvas != null) runCatching { holder.unlockCanvasAndPost(canvas) }
         }
+    }
+
+    private fun drawCursor(canvas: Canvas) {
+        val bounds = if (!contentRect.isEmpty) contentRect else RectF(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat())
+        val x = localCursorX.coerceIn(bounds.left, bounds.right)
+        val y = localCursorY.coerceIn(bounds.top, bounds.bottom)
+        cursorPath.reset()
+        cursorPath.moveTo(x, y)
+        cursorPath.lineTo(x + 2.5f, y + 20f)
+        cursorPath.lineTo(x + 7.5f, y + 14f)
+        cursorPath.lineTo(x + 13f, y + 25f)
+        cursorPath.lineTo(x + 17f, y + 23f)
+        cursorPath.lineTo(x + 11.5f, y + 12f)
+        cursorPath.lineTo(x + 20f, y + 11f)
+        cursorPath.close()
+        canvas.drawPath(cursorPath, cursorFill)
+        canvas.drawPath(cursorPath, cursorStroke)
     }
 
     private fun readLine(input: BufferedInputStream, limit: Int): String {
@@ -249,50 +281,106 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
         }
     }
 
+    private fun normalizedTouch(x: Float, y: Float): Pair<Float, Float> {
+        val r = if (!contentRect.isEmpty) contentRect else RectF(0f, 0f, width.coerceAtLeast(1).toFloat(), height.coerceAtLeast(1).toFloat())
+        return Pair(((x - r.left) / r.width()).coerceIn(0f, 1f), ((y - r.top) / r.height()).coerceIn(0f, 1f))
+    }
+
+    private fun accelerated(dx: Float, dy: Float): Pair<Float, Float> {
+        val speed = hypot(dx.toDouble(), dy.toDouble()).toFloat()
+        val gain = 1.45f + (speed / 18f).coerceIn(0f, 1.35f)
+        return Pair(dx * gain, dy * gain)
+    }
+
+    private fun moveTrackpad(dx: Float, dy: Float) {
+        if (abs(dx) + abs(dy) < 0.15f) return
+        val (sx, sy) = accelerated(dx, dy)
+        VesselInputClient.relative(sx, sy)
+        val r = if (!contentRect.isEmpty) contentRect else RectF(0f, 0f, width.toFloat(), height.toFloat())
+        localCursorX = (localCursorX + sx).coerceIn(r.left, r.right)
+        localCursorY = (localCursorY + sy).coerceIn(r.top, r.bottom)
+        drawLatest()
+    }
+
+    private fun handlePhysicalMouse(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE,
+            MotionEvent.ACTION_MOVE, MotionEvent.ACTION_HOVER_MOVE -> {
+                val left = (e.buttonState and MotionEvent.BUTTON_PRIMARY) != 0
+                if (left != mouseLeftDown) {
+                    mouseLeftDown = left
+                    VesselInputClient.button(BTN_LEFT, left)
+                }
+                val dx = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
+                val dy = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
+                if (dx != 0f || dy != 0f) moveTrackpad(dx, dy)
+                return true
+            }
+        }
+        return false
+    }
+
     override fun onTouchEvent(e: MotionEvent): Boolean {
         requestFocus()
-        val w = width.coerceAtLeast(1).toFloat()
-        val h = height.coerceAtLeast(1).toFloat()
+        if ((e.source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE && handlePhysicalMouse(e)) return true
+
         when (pointerMode) {
-            PointerMode.DIRECT -> when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> VesselInputClient.absolute(e.x / w, e.y / h, true)
-                MotionEvent.ACTION_MOVE -> VesselInputClient.absolute(e.x / w, e.y / h, true)
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> VesselInputClient.absolute(e.x / w, e.y / h, false)
+            PointerMode.DIRECT -> {
+                val (nx, ny) = normalizedTouch(e.x, e.y)
+                when (e.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> VesselInputClient.absolute(nx, ny, true)
+                    MotionEvent.ACTION_MOVE -> VesselInputClient.absolute(nx, ny, true)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> VesselInputClient.absolute(nx, ny, false)
+                }
             }
             PointerMode.TRACKPAD -> when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     lastX = e.x; lastY = e.y; downX = e.x; downY = e.y
-                    downAt = SystemClock.uptimeMillis(); moved = false
+                    downAt = SystemClock.uptimeMillis(); moved = false; twoFingerMoved = false
+                    if (downAt - lastTapAt in 1..260) {
+                        dragging = true
+                        VesselInputClient.button(BTN_LEFT, true)
+                        lastTapAt = 0L
+                    }
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> if (e.pointerCount == 2) {
                     twoFingerY = (e.getY(0) + e.getY(1)) * 0.5f
+                    twoFingerDownAt = SystemClock.uptimeMillis()
+                    twoFingerMoved = false
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (e.pointerCount >= 2) {
                         val y = (e.getY(0) + e.getY(1)) * 0.5f
                         val dy = y - twoFingerY
-                        if (abs(dy) > 5f) {
-                            VesselInputClient.scroll(0, if (dy < 0) 1 else -1)
+                        if (abs(dy) > 2.5f) {
+                            val steps = (abs(dy) / 12f).coerceAtLeast(1f).roundToInt()
+                            VesselInputClient.scroll(0, if (dy < 0) steps else -steps)
                             twoFingerY = y
+                            twoFingerMoved = true
                         }
                     } else {
                         val dx = e.x - lastX
                         val dy = e.y - lastY
-                        if (abs(dx) + abs(dy) > 0.8f) {
-                            val sx = dx * 1.35f
-                            val sy = dy * 1.35f
-                            VesselInputClient.relative(sx, sy)
-                            localCursorX = (localCursorX + sx).coerceIn(0f, w)
-                            localCursorY = (localCursorY + sy).coerceIn(0f, h)
-                            moved = moved || abs(e.x - downX) + abs(e.y - downY) > 8f
-                            drawLatest()
-                        }
+                        moveTrackpad(dx, dy)
+                        moved = moved || abs(e.x - downX) + abs(e.y - downY) > 7f
                         lastX = e.x; lastY = e.y
                     }
                 }
-                MotionEvent.ACTION_UP -> if (!moved && SystemClock.uptimeMillis() - downAt < 280) {
-                    VesselInputClient.button(0x110, true)
-                    VesselInputClient.button(0x110, false)
+                MotionEvent.ACTION_POINTER_UP -> {
+                    if (e.pointerCount == 2 && !twoFingerMoved && SystemClock.uptimeMillis() - twoFingerDownAt < 260) {
+                        VesselInputClient.button(BTN_RIGHT, true)
+                        VesselInputClient.button(BTN_RIGHT, false)
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (dragging) {
+                        VesselInputClient.button(BTN_LEFT, false)
+                        dragging = false
+                    } else if (!moved && SystemClock.uptimeMillis() - downAt < 260) {
+                        VesselInputClient.button(BTN_LEFT, true)
+                        VesselInputClient.button(BTN_LEFT, false)
+                        lastTapAt = SystemClock.uptimeMillis()
+                    }
                 }
             }
         }
@@ -304,20 +392,17 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
             if (e.action == MotionEvent.ACTION_HOVER_MOVE || e.action == MotionEvent.ACTION_MOVE) {
                 val dx = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
                 val dy = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
-                if (dx != 0f || dy != 0f) {
-                    VesselInputClient.relative(dx, dy)
-                    localCursorX = (localCursorX + dx).coerceIn(0f, width.toFloat())
-                    localCursorY = (localCursorY + dy).coerceIn(0f, height.toFloat())
-                    drawLatest()
-                }
+                if (dx != 0f || dy != 0f) moveTrackpad(dx, dy)
             }
-            val vy = e.getAxisValue(MotionEvent.AXIS_VSCROLL).toInt()
-            val hx = e.getAxisValue(MotionEvent.AXIS_HSCROLL).toInt()
-            if (vy != 0 || hx != 0) VesselInputClient.scroll(hx, vy)
+            val vy = e.getAxisValue(MotionEvent.AXIS_VSCROLL)
+            val hx = e.getAxisValue(MotionEvent.AXIS_HSCROLL)
+            if (abs(vy) >= 0.05f || abs(hx) >= 0.05f) {
+                VesselInputClient.scroll(hx.roundToInt(), vy.roundToInt())
+            }
             val left = (e.buttonState and MotionEvent.BUTTON_PRIMARY) != 0
             if (left != mouseLeftDown) {
                 mouseLeftDown = left
-                VesselInputClient.button(0x110, left)
+                VesselInputClient.button(BTN_LEFT, left)
             }
             return true
         }
