@@ -1,6 +1,14 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
+# UML ptrace mode represents guest execution contexts with host-side file
+# descriptors. A full Plasma session can exhaust Android/Termux's inherited
+# soft RLIMIT_NOFILE even when RAM is still available, at which point UML logs
+# `socketpair failed, errno = 24` and guest forks misleadingly report ENOMEM.
+# Raise the soft limit to the process hard limit before umnet/UML starts.
+HARD_NOFILE="$(ulimit -Hn 2>/dev/null || echo 8192)"
+ulimit -Sn "$HARD_NOFILE" 2>/dev/null || ulimit -Sn 8192 2>/dev/null || true
+
 POC_DIR="${POC_DIR:-$HOME/venus-poc}"
 UML_DIR="${UML_DIR:-$HOME/uml-test}"
 VENUS_SOCK="${VENUS_SOCK:-$PREFIX/tmp/venus.sock}"
@@ -11,9 +19,26 @@ X11_LOG="${X11_LOG:-$HOME/venus-x11-proxy.log}"
 PORT="${VENUS_RELAY_PORT:-5002}"
 X11_DISPLAY_NUM="${X11_DISPLAY_NUM:-0}"
 X11_TCP_PORT="${X11_TCP_PORT:-6000}"
-ENABLE_X11="${ENABLE_X11:-1}"
+ENABLE_X11="${ENABLE_X11:-0}"
+VESSEL_VCPUS="${VESSEL_VCPUS:-6}"
+VESSEL_MEM_MB="${VESSEL_MEM_MB:-8192}"
 REQUIRE_THREAD_WORKER="${REQUIRE_THREAD_WORKER:-1}"
 THREAD_WORKER_MARKER="${THREAD_WORKER_MARKER:-$PREFIX/opt/virglrenderer-android/.venus-thread-worker}"
+
+case "$VESSEL_VCPUS" in
+  ''|*[!0-9]*) echo "[venus-run] VESSEL_VCPUS must be an integer from 1 to 8" >&2; exit 1 ;;
+esac
+if [ "$VESSEL_VCPUS" -lt 1 ] || [ "$VESSEL_VCPUS" -gt 8 ]; then
+  echo "[venus-run] VESSEL_VCPUS must be between 1 and CONFIG_NR_CPUS=8" >&2
+  exit 1
+fi
+case "$VESSEL_MEM_MB" in
+  ''|*[!0-9]*) echo "[venus-run] VESSEL_MEM_MB must be an integer" >&2; exit 1 ;;
+esac
+if [ "$VESSEL_MEM_MB" -lt 1024 ] || [ "$VESSEL_MEM_MB" -gt 16384 ]; then
+  echo "[venus-run] VESSEL_MEM_MB must be between 1024 and 16384" >&2
+  exit 1
+fi
 
 cleanup() {
   rc=$?
@@ -31,6 +56,68 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+proc_cmdline() {
+  local proc="$1"
+  cat "$proc/cmdline" 2>/dev/null | tr '\0' ' ' || true
+}
+
+cleanup_stale_uml() {
+  local found=0 pid cmd cwd proc alive
+  for proc in /proc/[0-9]*; do
+    pid="${proc##*/}"
+    [ "$pid" = "$$" ] && continue
+    cmd="$(proc_cmdline "$proc")"
+    [ -n "$cmd" ] || continue
+    case "$cmd" in
+      *linux-umshm*ubd0=debian-docker.ext4*) ;;
+      *) continue ;;
+    esac
+    cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
+    if [ "$cwd" = "$UML_DIR" ] || [[ "$cmd" == *"$UML_DIR/linux-umshm"* ]]; then
+      echo "[venus-run] stopping stale UML pid=$pid holding $UML_DIR/debian-docker.ext4"
+      kill "$pid" 2>/dev/null || true
+      found=1
+    fi
+  done
+
+  if [ "$found" = "1" ]; then
+    for _ in $(seq 1 40); do
+      alive=0
+      for proc in /proc/[0-9]*; do
+        cmd="$(proc_cmdline "$proc")"
+        [ -n "$cmd" ] || continue
+        case "$cmd" in
+          *linux-umshm*ubd0=debian-docker.ext4*)
+            cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
+            if [ "$cwd" = "$UML_DIR" ] || [[ "$cmd" == *"$UML_DIR/linux-umshm"* ]]; then
+              alive=1
+              break
+            fi
+            ;;
+        esac
+      done
+      [ "$alive" = "0" ] && break
+      sleep 0.1
+    done
+
+    for proc in /proc/[0-9]*; do
+      pid="${proc##*/}"
+      cmd="$(proc_cmdline "$proc")"
+      [ -n "$cmd" ] || continue
+      case "$cmd" in
+        *linux-umshm*ubd0=debian-docker.ext4*)
+          cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
+          if [ "$cwd" = "$UML_DIR" ] || [[ "$cmd" == *"$UML_DIR/linux-umshm"* ]]; then
+            echo "[venus-run] force-stopping stale UML pid=$pid"
+            kill -9 "$pid" 2>/dev/null || true
+          fi
+          ;;
+      esac
+    done
+    sleep 0.2
+  fi
+}
+
 for f in \
   "$POC_DIR/tools/venus_poc/host_relay_direct.py" \
   "$UML_DIR/linux-umshm" \
@@ -44,12 +131,19 @@ for f in \
   fi
 done
 
+if ! "$UML_DIR/linux-umshm" --help 2>&1 | grep -q 'ncpus='; then
+  echo "[venus-run] linux-umshm is the old uniprocessor build." >&2
+  echo "[venus-run] rebuild/install the Vessel SMP kernel before booting." >&2
+  exit 1
+fi
+
 if [ "$REQUIRE_THREAD_WORKER" = "1" ] && [ ! -e "$THREAD_WORKER_MARKER" ]; then
   echo "[venus-run] custom thread-worker virglrenderer is not installed." >&2
   echo "[venus-run] run: bash $POC_DIR/tools/venus_poc/build_virglrenderer_android_thread.sh" >&2
   exit 1
 fi
 
+cleanup_stale_uml
 pkill -f '[h]ost_relay_direct.py' 2>/dev/null || true
 pkill -f '[v]irgl_test_server_android' 2>/dev/null || true
 rm -f "$VENUS_SOCK" "$UMSHM_SOCK"
@@ -65,16 +159,10 @@ if [ "$ENABLE_X11" = "1" ]; then
   }
 
   X11_UNIX="$PREFIX/tmp/.X11-unix/X${X11_DISPLAY_NUM}"
-
-  # A stale X socket can survive an old Termux:X11 process. Starting the
-  # launcher based only on `-S` then leaves the Android activity showing
-  # "Not connected" even though the proxy socket exists. Always establish a
-  # fresh X server for this self-contained Venus session.
   pkill -f '[t]ermux-x11' 2>/dev/null || true
   pkill -f "socat TCP-LISTEN:${X11_TCP_PORT}.*X${X11_DISPLAY_NUM}" 2>/dev/null || true
   rm -f "$X11_UNIX"
-
-  termux-x11 ":$X11_DISPLAY_NUM" >"$HOME/termux-x11.log" 2>&1 &
+  termux-x11 ":$X11_DISPLAY_NUM" -legacy-drawing >"$HOME/termux-x11.log" 2>&1 &
   TERMUX_X11_PID=$!
   for _ in $(seq 1 50); do
     [ -S "$X11_UNIX" ] && break
@@ -152,12 +240,14 @@ if [ "$ENABLE_X11" = "1" ]; then
   echo "[venus-run] X11 guest display: 10.0.2.2:${X11_DISPLAY_NUM}"
   echo "[venus-run] X11 proxy log: $X11_LOG"
 fi
-echo "[venus-run] booting Debian UML..."
+echo "[venus-run] booting Debian UML with $VESSEL_VCPUS vCPUs and ${VESSEL_MEM_MB} MiB RAM..."
 
 cd "$UML_DIR"
 ./umnet --passt ./passt --dns 1.1.1.1 -- \
   ./linux-umshm \
-    mem=2048M \
+    mem="${VESSEL_MEM_MB}M" \
+    ncpus="$VESSEL_VCPUS" \
+    seccomp=on \
     ubd0=debian-docker.ext4 \
     root=/dev/ubda \
     rw \

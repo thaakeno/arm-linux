@@ -1,0 +1,15 @@
+{
+  "KPlugin": {
+    "Name": "Vessel Wayland Output",
+    "Description": "Exports the KWin Wayland composited output as a Venus-backed dma-buf for Vessel Android",
+    "Category": "Accessibility",
+    "EnabledByDefault": true,
+    "License": "GPL-2.0-or-later",
+    "Authors": [
+      { "Name": "Vessel" }
+    ]
+  },
+  "org.kde.kwin.effect": {
+    "enabledByDefaultMethod": true
+  }
+}

@@ -1,52 +1,120 @@
-name: Vessel Next
+name: Vessel Linux APK
 
 on:
   push:
-    branches: [ app/vessel-next ]
-  pull_request:
-    branches: [ dev-1 ]
+    branches: [ app/vessel-final ]
   workflow_dispatch:
 
 concurrency:
-  group: vessel-next-${{ github.ref }}
+  group: vessel-linux-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  compile:
+  gpu-wayland-runtime:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+      - name: Syntax-check protocol 31 runtime
+        run: |
+          set -euxo pipefail
+          python3 -m py_compile \
+            tools/venus_poc/vessel_runtime_daemon_v31.py \
+            tools/venus_poc/guest_command_agent.py \
+            tools/venus_poc/guest_relay_wayland.py \
+            tools/venus_poc/host_relay_wayland.py \
+            tools/venus_poc/host_input_bridge.py
+          bash -n tools/venus_poc/run_venus_wayland.sh
+      - name: Compile GPU output bridge and verify Debian 12 runtime
+        run: |
+          set -euxo pipefail
+          docker run --rm \
+            -v "$PWD:/src:ro" \
+            -w /src \
+            debian:12-slim \
+            bash -lc '
+              set -euxo pipefail
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                ca-certificates cmake ninja-build g++ extra-cmake-modules \
+                qtbase5-dev qtwayland5 libkf5coreaddons-dev kwin-dev \
+                libxcb1-dev libepoxy-dev libegl1-mesa-dev libgl-dev \
+                libgl1-mesa-dri mesa-utils
+              find /usr/lib -path "*/dri/zink_dri.so" -print -quit | grep -F zink_dri.so
+              find /usr/lib -path "*/qt5/plugins/platforms/libqwayland-generic.so" -print -quit | grep -F libqwayland-generic.so
+              rm -rf /tmp/vessel-kwin-build
+              cmake -S tools/venus_poc/kwin_vessel_output \
+                    -B /tmp/vessel-kwin-build \
+                    -G Ninja \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_INSTALL_PREFIX=/usr
+              cmake --build /tmp/vessel-kwin-build -j2
+              cmake --install /tmp/vessel-kwin-build
+              /tmp/vessel-kwin-build/vesseloutput_probe | tee /tmp/vesseloutput-probe.log
+              grep -F "VESSEL_KWIN_PLUGIN_OK id=vesseloutput" /tmp/vesseloutput-probe.log
+            '
+
+  build:
+    needs: gpu-wayland-runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: JDK 17
-        uses: actions/setup-java@v4
+          submodules: recursive
+      - uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: temurin
-
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK/NDK
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK and NDK
         run: |
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
-
-      - name: Compile, unit-test and lint
+      - name: Verify protocol 31 GPU architecture
+        run: |
+          set -euxo pipefail
+          test ! -e app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
+          ! find app/src/main -type f | grep -E 'BounceQuest|native_vulkan_studio|native_cube\.(vert|frag)'
+          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v31.py tools/venus_poc/guest_command_agent.py tools/venus_poc/guest_relay_wayland.py tools/venus_poc/host_relay_wayland.py tools/venus_poc/host_input_bridge.py
+          bash -n tools/venus_poc/run_venus_wayland.sh
+          grep -F 'REQUIRED_PROTOCOL = 31' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v31.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'wayland-zink-venus-ahb-v2' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'MESA_LOADER_DRIVER_OVERRIDE=zink' tools/venus_poc/vessel_runtime_daemon_v31.py
+          grep -F 'GALLIUM_DRIVER=zink' tools/venus_poc/vessel_runtime_daemon_v31.py
+          grep -F 'LIBGL_ALWAYS_SOFTWARE=0' tools/venus_poc/vessel_runtime_daemon_v31.py
+          grep -F 'qtwayland5' tools/venus_poc/vessel_runtime_daemon_v31.py
+          ! grep -F -- '--xwayland' tools/venus_poc/vessel_runtime_daemon_v31.py
+          grep -F 'softwareFallback": False' tools/venus_poc/vessel_runtime_daemon_v31.py
+          grep -F 'damage-driven' tools/venus_poc/vessel_runtime_daemon_v31.py tools/venus_poc/kwin_vessel_output/vesseloutput.cpp
+          grep -F 'org.kde.kwin.Effects.loadEffect' tools/venus_poc/guest_command_agent.py
+          grep -F 'VESSEL_KWIN_PLUGIN_OK' tools/venus_poc/kwin_vessel_output/CMakeLists.txt
+          grep -F 'host_input_bridge.py' tools/venus_poc/run_venus_wayland.sh
+          grep -F 'VesselInputClient.absolute' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -F 'VesselWaylandPresenter.attach' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -F 'vessel_wayland_presenter' app/src/main/cpp/CMakeLists.txt
+          ! grep -F 'implementation(project(":lorie"))' app/build.gradle.kts
+          ! grep -F 'com.termux.x11.MainActivity' app/src/main/AndroidManifest.xml app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          test ! -e app/src/main/cpp/native_desktop_surface.cpp
+          test ! -e tools/venus_poc/guest_frame_streamer_v2.c
+          test ! -e tools/venus_poc/guest_frame_streamer.py
+          ! grep -E 'VFRM2|FRAME_STREAMER|ANativeWindow_lock|Xtigervnc|vncserver|lorie-direct-x11-v1' tools/venus_poc/vessel_runtime_daemon_v31.py app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt app/src/main/cpp/CMakeLists.txt
+      - name: Build, test and lint app
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
-
-      - name: Upload debug APK
-        if: always()
+          ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon --no-configuration-cache
+      - name: Upload Vessel APK
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-next-debug
+          name: vessel-linux-debug
           path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: ignore
-          retention-days: 3
+          if-no-files-found: error
+          retention-days: 7

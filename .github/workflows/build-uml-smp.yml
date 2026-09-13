@@ -1,0 +1,74 @@
+name: Vessel UML SMP Kernel
+
+# Rebuild trigger: rerun after accidental cancellation.
+on:
+  push:
+    branches: [ app/vessel-final ]
+    paths:
+      - 'tools/venus_poc/build_uml_smp_android.sh'
+      - 'tools/venus_poc/apply_umshm.py'
+      - 'tools/venus_poc/fix_umshm_nonblock.py'
+      - 'tools/venus_poc/fix_umshm_ptrace_fds.py'
+      - 'tools/venus_poc/run_venus_uml.sh'
+      - '.github/workflows/build-uml-smp.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: vessel-uml-smp-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Vessel
+        uses: actions/checkout@v4
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK and kernel build dependencies
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses || true
+          sdkmanager --install 'ndk;27.2.12479018'
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang build-essential flex bison bc rsync cpio pkg-config \
+            libssl-dev libelf-dev dwarves python3 git file
+
+      - name: Build CONFIG_SMP UML/arm64 with Vessel umshm
+        env:
+          NDK: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          JOBS: '4'
+        run: |
+          set -euxo pipefail
+          bash tools/venus_poc/build_uml_smp_android.sh
+
+      - name: Verify kernel configuration and command line
+        run: |
+          set -euxo pipefail
+          ART=.kernel-build/artifacts
+          grep -qx 'CONFIG_SMP=y' "$ART/vessel-uml-smp.config"
+          grep -qx 'CONFIG_NR_CPUS=8' "$ART/vessel-uml-smp.config"
+          strings "$ART/linux-umshm" | grep -F 'ncpus=<# of desired CPUs>'
+          file "$ART/linux-umshm" | grep -Ei 'aarch64|ARM aarch64'
+          test -s "$ART/stub_exe-umshm"
+          cat "$ART/SHA256SUMS.txt"
+
+      - name: Upload SMP kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: vessel-uml-smp-arm64
+          path: |
+            .kernel-build/artifacts/linux-umshm
+            .kernel-build/artifacts/stub_exe-umshm
+            .kernel-build/artifacts/vessel-uml-smp.config
+            .kernel-build/artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
