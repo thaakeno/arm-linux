@@ -1,22 +1,13 @@
 package com.example.dreamlinux
 
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Path
-import android.graphics.PixelFormat
-import android.graphics.Rect
-import android.graphics.RectF
-import android.os.Build
+import android.opengl.GLES20
+import android.opengl.GLSurfaceView
 import android.os.SystemClock
 import android.text.InputType
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -27,18 +18,23 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.zip.Inflater
+import javax.microedition.khronos.egl.EGLConfig
+import javax.microedition.khronos.opengles.GL10
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 /**
- * Compatibility class name retained for the Compose screen. There is no VNC/RFB
- * code here: Vessel VFRM1 is drawn directly to an Android SurfaceView and input
- * is sent over Vessel's native input bridge.
+ * Vessel's low-latency Linux desktop surface.
+ *
+ * VFRM2 sends raw damaged tiles from the guest. Tiles are uploaded directly to
+ * one persistent GL texture with glTexSubImage2D, so there is no full-frame
+ * zlib inflate, Android Bitmap copy, Canvas rescale, or fake local cursor.
+ * The real X cursor is part of the Linux desktop stream.
  */
-class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
+class VncFramebufferView(context: Context) : GLSurfaceView(context), GLSurfaceView.Renderer {
     enum class PointerMode { DIRECT, TRACKPAD }
 
     companion object {
@@ -46,17 +42,24 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
         private const val FRAME_PORT = 47636
         private const val BTN_LEFT = 0x110
         private const val BTN_RIGHT = 0x111
+        private const val BTN_MIDDLE = 0x112
     }
 
     private val running = AtomicBoolean(false)
     private var readerThread: Thread? = null
-    @Volatile private var bitmap: Bitmap? = null
-    private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
-    private val cursorFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.FILL }
-    private val cursorStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 2.1f }
-    private val cursorPath = Path()
-    private val contentRect = RectF()
-    private var pointerMode = PointerMode.DIRECT
+    @Volatile private var pointerMode = PointerMode.DIRECT
+
+    private var textureId = 0
+    private var program = 0
+    private var frameWidth = 0
+    private var frameHeight = 0
+    private var surfaceWidth = 1
+    private var surfaceHeight = 1
+    @Volatile private var contentLeft = 0f
+    @Volatile private var contentTop = 0f
+    @Volatile private var contentWidth = 1f
+    @Volatile private var contentHeight = 1f
+
     private var lastX = 0f
     private var lastY = 0f
     private var downX = 0f
@@ -64,23 +67,47 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
     private var downAt = 0L
     private var moved = false
     private var twoFingerY = 0f
+    private var twoFingerX = 0f
     private var twoFingerDownAt = 0L
     private var twoFingerMoved = false
-    private var mouseLeftDown = false
     private var dragging = false
     private var lastTapAt = 0L
-    private var localCursorX = 0f
-    private var localCursorY = 0f
-    @Volatile private var lastFrameSeq = 0L
+    private var mouseLeftDown = false
+    private var mouseRightDown = false
+    private var mouseMiddleDown = false
+
+    private val vertices: FloatBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
+        put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)); position(0)
+    }
+    // Xvfb's first row is the top row; OpenGL's texture origin is bottom-left.
+    private val texCoords: FloatBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
+        put(floatArrayOf(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f)); position(0)
+    }
 
     init {
-        holder.addCallback(this)
-        holder.setFormat(PixelFormat.RGBA_8888)
-        setZOrderOnTop(false)
+        setEGLContextClientVersion(2)
+        setRenderer(this)
+        renderMode = RENDERMODE_WHEN_DIRTY
+        preserveEGLContextOnPause = true
         isFocusable = true
         isFocusableInTouchMode = true
         keepScreenOn = true
-        setLayerType(LAYER_TYPE_HARDWARE, null)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        active = this
+        requestFocus()
+        startFrameReader()
+    }
+
+    override fun onDetachedFromWindow() {
+        running.set(false)
+        readerThread?.interrupt()
+        readerThread = null
+        releaseButtons()
+        if (active === this) active = null
+        super.onDetachedFromWindow()
     }
 
     fun setPointerMode(mode: PointerMode) {
@@ -90,8 +117,6 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
             dragging = false
         }
         pointerMode = mode
-        ensureCursorInitialized()
-        drawLatest()
     }
 
     fun showKeyboard() {
@@ -112,37 +137,121 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
         }
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
-        active = this
-        requestFocus()
-        ensureCursorInitialized()
-        startFrameReader()
+    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        program = createProgram(
+            "attribute vec2 aPos; attribute vec2 aUv; varying vec2 vUv; void main(){ vUv=aUv; gl_Position=vec4(aPos,0.0,1.0); }",
+            "precision mediump float; varying vec2 vUv; uniform sampler2D uTex; void main(){ gl_FragColor=texture2D(uTex,vUv); }"
+        )
+        val ids = IntArray(1)
+        GLES20.glGenTextures(1, ids, 0)
+        textureId = ids[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+        if (frameWidth > 0 && frameHeight > 0) allocateTexture()
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        ensureCursorInitialized()
-        drawLatest()
+    override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+        surfaceWidth = width.coerceAtLeast(1)
+        surfaceHeight = height.coerceAtLeast(1)
+        updateViewport()
     }
 
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
-        running.set(false)
-        readerThread?.interrupt()
-        readerThread = null
-        if (dragging || mouseLeftDown) VesselInputClient.button(BTN_LEFT, false)
-        dragging = false
-        mouseLeftDown = false
-        if (active === this) active = null
+    override fun onDrawFrame(gl: GL10?) {
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        if (textureId == 0 || frameWidth <= 0 || frameHeight <= 0 || program == 0) return
+        val vpX = contentLeft.roundToInt()
+        val vpTop = contentTop.roundToInt()
+        val vpW = contentWidth.roundToInt().coerceAtLeast(1)
+        val vpH = contentHeight.roundToInt().coerceAtLeast(1)
+        val vpY = (surfaceHeight - vpTop - vpH).coerceAtLeast(0)
+        GLES20.glViewport(vpX, vpY, vpW, vpH)
+        GLES20.glUseProgram(program)
+        val pos = GLES20.glGetAttribLocation(program, "aPos")
+        val uv = GLES20.glGetAttribLocation(program, "aUv")
+        GLES20.glEnableVertexAttribArray(pos)
+        GLES20.glEnableVertexAttribArray(uv)
+        vertices.position(0); texCoords.position(0)
+        GLES20.glVertexAttribPointer(pos, 2, GLES20.GL_FLOAT, false, 0, vertices)
+        GLES20.glVertexAttribPointer(uv, 2, GLES20.GL_FLOAT, false, 0, texCoords)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uTex"), 0)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES20.glDisableVertexAttribArray(pos)
+        GLES20.glDisableVertexAttribArray(uv)
+        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight)
     }
 
-    private fun ensureCursorInitialized() {
-        if (localCursorX > 0f && localCursorY > 0f) return
-        localCursorX = width.coerceAtLeast(1) / 2f
-        localCursorY = height.coerceAtLeast(1) / 2f
+    private fun allocateTexture() {
+        if (textureId == 0 || frameWidth <= 0 || frameHeight <= 0) return
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+            frameWidth, frameHeight, 0,
+            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+        )
+        updateViewport()
+    }
+
+    private fun updateViewport() {
+        if (frameWidth <= 0 || frameHeight <= 0) {
+            contentLeft = 0f; contentTop = 0f
+            contentWidth = surfaceWidth.toFloat(); contentHeight = surfaceHeight.toFloat()
+            return
+        }
+        val scale = minOf(surfaceWidth.toFloat() / frameWidth, surfaceHeight.toFloat() / frameHeight)
+        val w = frameWidth * scale
+        val h = frameHeight * scale
+        contentLeft = (surfaceWidth - w) * 0.5f
+        contentTop = (surfaceHeight - h) * 0.5f
+        contentWidth = w
+        contentHeight = h
+        requestRender()
+    }
+
+    private fun uploadFull(width: Int, height: Int, bytes: ByteArray) {
+        queueEvent {
+            if (frameWidth != width || frameHeight != height) {
+                frameWidth = width; frameHeight = height
+                allocateTexture()
+            }
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+            GLES20.glTexSubImage2D(
+                GLES20.GL_TEXTURE_2D, 0, 0, 0, width, height,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
+                ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); position(0) }
+            )
+            requestRender()
+        }
+    }
+
+    private data class Tile(val x: Int, val y: Int, val w: Int, val h: Int, val data: ByteArray)
+
+    private fun uploadTiles(tiles: List<Tile>) {
+        if (tiles.isEmpty()) return
+        queueEvent {
+            if (textureId == 0 || frameWidth <= 0 || frameHeight <= 0) return@queueEvent
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+            for (t in tiles) {
+                val buf = ByteBuffer.allocateDirect(t.data.size)
+                buf.put(t.data).position(0)
+                GLES20.glTexSubImage2D(
+                    GLES20.GL_TEXTURE_2D, 0, t.x, t.y, t.w, t.h,
+                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf
+                )
+            }
+            requestRender()
+        }
     }
 
     private fun startFrameReader() {
         if (!running.compareAndSet(false, true)) return
-        readerThread = Thread({ frameLoop() }, "vessel-native-frame-client").apply {
+        readerThread = Thread({ frameLoop() }, "vessel-vfrm2-client").apply {
             isDaemon = true
             priority = Thread.MAX_PRIORITY
             start()
@@ -150,38 +259,52 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
     }
 
     private fun frameLoop() {
-        var backoff = 30L
+        var backoff = 20L
         while (running.get()) {
             try {
                 Socket().use { socket ->
                     socket.tcpNoDelay = true
                     socket.keepAlive = true
-                    socket.receiveBufferSize = 1024 * 1024
-                    socket.connect(InetSocketAddress("127.0.0.1", FRAME_PORT), 1200)
-                    val input = BufferedInputStream(socket.getInputStream(), 1024 * 1024)
+                    socket.receiveBufferSize = 4 * 1024 * 1024
+                    socket.connect(InetSocketAddress("127.0.0.1", FRAME_PORT), 1000)
+                    val input = BufferedInputStream(socket.getInputStream(), 2 * 1024 * 1024)
                     val header = JSONObject(readLine(input, 4096))
-                    require(header.optString("magic") == "VFRM1") { "Unexpected Vessel frame protocol" }
-                    val frameWidth = header.getInt("width")
-                    val frameHeight = header.getInt("height")
-                    require(frameWidth in 320..7680 && frameHeight in 240..4320)
-                    require(header.optString("format") == "RGBA8888") { "Unexpected Vessel pixel format" }
-                    backoff = 30L
-
+                    require(header.optString("magic") == "VFRM2") { "Unexpected Vessel frame protocol" }
+                    val width = header.getInt("width")
+                    val height = header.getInt("height")
+                    require(width in 320..7680 && height in 240..4320)
+                    require(header.optString("format") == "RGBA8888")
+                    frameWidth = width; frameHeight = height
+                    queueEvent { allocateTexture() }
+                    backoff = 20L
                     while (running.get()) {
-                        val prefix = readExact(input, 16)
+                        val prefix = readExact(input, 13)
                         val meta = ByteBuffer.wrap(prefix).order(ByteOrder.BIG_ENDIAN)
-                        val seq = meta.long
-                        val compressed = meta.int
-                        val rawSize = meta.int
-                        require(compressed in 1..(32 * 1024 * 1024))
-                        require(rawSize == frameWidth * frameHeight * 4)
-                        val payload = readExact(input, compressed)
-                        val raw = inflate(payload, rawSize)
-                        val target = bitmap?.takeIf { it.width == frameWidth && it.height == frameHeight }
-                            ?: Bitmap.createBitmap(frameWidth, frameHeight, Bitmap.Config.ARGB_8888).also { bitmap = it }
-                        target.copyPixelsFromBuffer(ByteBuffer.wrap(raw))
-                        lastFrameSeq = seq
-                        drawLatest()
+                        val kind = meta.get().toInt().toChar()
+                        meta.long // sequence, useful for diagnostics later
+                        val value = meta.int
+                        when (kind) {
+                            'F' -> {
+                                require(value == width * height * 4)
+                                uploadFull(width, height, readExact(input, value))
+                            }
+                            'D' -> {
+                                require(value in 0..8192)
+                                val tiles = ArrayList<Tile>(value)
+                                repeat(value) {
+                                    val th = ByteBuffer.wrap(readExact(input, 12)).order(ByteOrder.BIG_ENDIAN)
+                                    val x = th.short.toInt() and 0xffff
+                                    val y = th.short.toInt() and 0xffff
+                                    val w = th.short.toInt() and 0xffff
+                                    val h = th.short.toInt() and 0xffff
+                                    val size = th.int
+                                    require(w > 0 && h > 0 && size == w * h * 4)
+                                    tiles.add(Tile(x, y, w, h, readExact(input, size)))
+                                }
+                                uploadTiles(tiles)
+                            }
+                            else -> error("Unknown VFRM2 record $kind")
+                        }
                     }
                 }
             } catch (_: InterruptedException) {
@@ -189,55 +312,9 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
             } catch (_: Throwable) {
                 if (!running.get()) break
                 try { Thread.sleep(backoff) } catch (_: InterruptedException) { break }
-                backoff = (backoff * 2).coerceAtMost(500L)
+                backoff = (backoff * 2).coerceAtMost(350L)
             }
         }
-    }
-
-    @Synchronized
-    private fun drawLatest() {
-        if (!holder.surface.isValid) return
-        val frame = bitmap ?: return
-        var canvas: Canvas? = null
-        try {
-            canvas = if (Build.VERSION.SDK_INT >= 23) holder.lockHardwareCanvas() else holder.lockCanvas()
-            canvas.drawColor(Color.BLACK)
-
-            // Preserve the Linux desktop's aspect ratio. The old stretch-to-fill
-            // path distorted every window whenever the Android view was portrait.
-            val sx = canvas.width.toFloat() / frame.width.toFloat()
-            val sy = canvas.height.toFloat() / frame.height.toFloat()
-            val scale = minOf(sx, sy)
-            val dw = frame.width * scale
-            val dh = frame.height * scale
-            val left = (canvas.width - dw) * 0.5f
-            val top = (canvas.height - dh) * 0.5f
-            contentRect.set(left, top, left + dw, top + dh)
-            val dst = Rect(left.roundToInt(), top.roundToInt(), (left + dw).roundToInt(), (top + dh).roundToInt())
-            canvas.drawBitmap(frame, null, dst, paint)
-
-            if (pointerMode == PointerMode.TRACKPAD) drawCursor(canvas)
-        } catch (_: Throwable) {
-        } finally {
-            if (canvas != null) runCatching { holder.unlockCanvasAndPost(canvas) }
-        }
-    }
-
-    private fun drawCursor(canvas: Canvas) {
-        val bounds = if (!contentRect.isEmpty) contentRect else RectF(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat())
-        val x = localCursorX.coerceIn(bounds.left, bounds.right)
-        val y = localCursorY.coerceIn(bounds.top, bounds.bottom)
-        cursorPath.reset()
-        cursorPath.moveTo(x, y)
-        cursorPath.lineTo(x + 2.5f, y + 20f)
-        cursorPath.lineTo(x + 7.5f, y + 14f)
-        cursorPath.lineTo(x + 13f, y + 25f)
-        cursorPath.lineTo(x + 17f, y + 23f)
-        cursorPath.lineTo(x + 11.5f, y + 12f)
-        cursorPath.lineTo(x + 20f, y + 11f)
-        cursorPath.close()
-        canvas.drawPath(cursorPath, cursorFill)
-        canvas.drawPath(cursorPath, cursorStroke)
     }
 
     private fun readLine(input: BufferedInputStream, limit: Int): String {
@@ -262,67 +339,48 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
         return out
     }
 
-    private fun inflate(payload: ByteArray, rawSize: Int): ByteArray {
-        val inflater = Inflater()
-        return try {
-            inflater.setInput(payload)
-            val out = ByteArray(rawSize)
-            var offset = 0
-            while (!inflater.finished() && offset < rawSize) {
-                val n = inflater.inflate(out, offset, rawSize - offset)
-                if (n == 0) {
-                    if (inflater.needsInput() || inflater.needsDictionary()) break
-                } else offset += n
-            }
-            require(offset == rawSize) { "short Vessel frame: $offset/$rawSize" }
-            out
-        } finally {
-            inflater.end()
-        }
-    }
-
-    private fun normalizedTouch(x: Float, y: Float): Pair<Float, Float> {
-        val r = if (!contentRect.isEmpty) contentRect else RectF(0f, 0f, width.coerceAtLeast(1).toFloat(), height.coerceAtLeast(1).toFloat())
-        return Pair(((x - r.left) / r.width()).coerceIn(0f, 1f), ((y - r.top) / r.height()).coerceIn(0f, 1f))
-    }
+    private fun normalizedTouch(x: Float, y: Float): Pair<Float, Float> = Pair(
+        ((x - contentLeft) / contentWidth.coerceAtLeast(1f)).coerceIn(0f, 1f),
+        ((y - contentTop) / contentHeight.coerceAtLeast(1f)).coerceIn(0f, 1f)
+    )
 
     private fun accelerated(dx: Float, dy: Float): Pair<Float, Float> {
         val speed = hypot(dx.toDouble(), dy.toDouble()).toFloat()
-        val gain = 1.45f + (speed / 18f).coerceIn(0f, 1.35f)
+        val gain = 1.15f + (speed / 22f).coerceIn(0f, 1.45f)
         return Pair(dx * gain, dy * gain)
     }
 
     private fun moveTrackpad(dx: Float, dy: Float) {
-        if (abs(dx) + abs(dy) < 0.15f) return
+        if (abs(dx) + abs(dy) < 0.08f) return
         val (sx, sy) = accelerated(dx, dy)
         VesselInputClient.relative(sx, sy)
-        val r = if (!contentRect.isEmpty) contentRect else RectF(0f, 0f, width.toFloat(), height.toFloat())
-        localCursorX = (localCursorX + sx).coerceIn(r.left, r.right)
-        localCursorY = (localCursorY + sy).coerceIn(r.top, r.bottom)
-        drawLatest()
     }
 
-    private fun handlePhysicalMouse(e: MotionEvent): Boolean {
-        when (e.actionMasked) {
-            MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE,
-            MotionEvent.ACTION_MOVE, MotionEvent.ACTION_HOVER_MOVE -> {
-                val left = (e.buttonState and MotionEvent.BUTTON_PRIMARY) != 0
-                if (left != mouseLeftDown) {
-                    mouseLeftDown = left
-                    VesselInputClient.button(BTN_LEFT, left)
-                }
-                val dx = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
-                val dy = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
-                if (dx != 0f || dy != 0f) moveTrackpad(dx, dy)
-                return true
-            }
-        }
-        return false
+    private fun updatePhysicalButtons(e: MotionEvent) {
+        val left = (e.buttonState and MotionEvent.BUTTON_PRIMARY) != 0
+        val right = (e.buttonState and MotionEvent.BUTTON_SECONDARY) != 0
+        val middle = (e.buttonState and MotionEvent.BUTTON_TERTIARY) != 0
+        if (left != mouseLeftDown) { mouseLeftDown = left; VesselInputClient.button(BTN_LEFT, left) }
+        if (right != mouseRightDown) { mouseRightDown = right; VesselInputClient.button(BTN_RIGHT, right) }
+        if (middle != mouseMiddleDown) { mouseMiddleDown = middle; VesselInputClient.button(BTN_MIDDLE, middle) }
+    }
+
+    private fun releaseButtons() {
+        if (mouseLeftDown || dragging) VesselInputClient.button(BTN_LEFT, false)
+        if (mouseRightDown) VesselInputClient.button(BTN_RIGHT, false)
+        if (mouseMiddleDown) VesselInputClient.button(BTN_MIDDLE, false)
+        mouseLeftDown = false; mouseRightDown = false; mouseMiddleDown = false; dragging = false
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         requestFocus()
-        if ((e.source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE && handlePhysicalMouse(e)) return true
+        if ((e.source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
+            updatePhysicalButtons(e)
+            val dx = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
+            val dy = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
+            if (dx != 0f || dy != 0f) moveTrackpad(dx, dy)
+            return true
+        }
 
         when (pointerMode) {
             PointerMode.DIRECT -> {
@@ -337,48 +395,52 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
                 MotionEvent.ACTION_DOWN -> {
                     lastX = e.x; lastY = e.y; downX = e.x; downY = e.y
                     downAt = SystemClock.uptimeMillis(); moved = false; twoFingerMoved = false
-                    if (downAt - lastTapAt in 1..260) {
+                    if (downAt - lastTapAt in 1..300) {
                         dragging = true
                         VesselInputClient.button(BTN_LEFT, true)
                         lastTapAt = 0L
                     }
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> if (e.pointerCount == 2) {
-                    twoFingerY = (e.getY(0) + e.getY(1)) * 0.5f
+                    twoFingerX = (e.getX(0) + e.getX(1)) * .5f
+                    twoFingerY = (e.getY(0) + e.getY(1)) * .5f
                     twoFingerDownAt = SystemClock.uptimeMillis()
                     twoFingerMoved = false
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (e.pointerCount >= 2) {
-                        val y = (e.getY(0) + e.getY(1)) * 0.5f
-                        val dy = y - twoFingerY
-                        if (abs(dy) > 2.5f) {
-                            val steps = (abs(dy) / 12f).coerceAtLeast(1f).roundToInt()
-                            VesselInputClient.scroll(0, if (dy < 0) steps else -steps)
-                            twoFingerY = y
-                            twoFingerMoved = true
+                        val x = (e.getX(0) + e.getX(1)) * .5f
+                        val y = (e.getY(0) + e.getY(1)) * .5f
+                        val dx = x - twoFingerX; val dy = y - twoFingerY
+                        if (abs(dx) + abs(dy) > 1.5f) {
+                            val sx = (dx / 11f).roundToInt()
+                            val sy = (-dy / 11f).roundToInt()
+                            if (sx != 0 || sy != 0) VesselInputClient.scroll(sx, sy)
+                            twoFingerX = x; twoFingerY = y; twoFingerMoved = true
                         }
                     } else {
-                        val dx = e.x - lastX
-                        val dy = e.y - lastY
+                        val dx = e.x - lastX; val dy = e.y - lastY
+                        val distance = abs(e.x - downX) + abs(e.y - downY)
+                        // Long-press + move behaves like holding a real left mouse button.
+                        if (!dragging && !moved && SystemClock.uptimeMillis() - downAt > 170 && distance > 3f) {
+                            dragging = true
+                            VesselInputClient.button(BTN_LEFT, true)
+                        }
                         moveTrackpad(dx, dy)
-                        moved = moved || abs(e.x - downX) + abs(e.y - downY) > 7f
+                        moved = moved || distance > 6f
                         lastX = e.x; lastY = e.y
                     }
                 }
                 MotionEvent.ACTION_POINTER_UP -> {
-                    if (e.pointerCount == 2 && !twoFingerMoved && SystemClock.uptimeMillis() - twoFingerDownAt < 260) {
-                        VesselInputClient.button(BTN_RIGHT, true)
-                        VesselInputClient.button(BTN_RIGHT, false)
+                    if (e.pointerCount == 2 && !twoFingerMoved && SystemClock.uptimeMillis() - twoFingerDownAt < 280) {
+                        VesselInputClient.button(BTN_RIGHT, true); VesselInputClient.button(BTN_RIGHT, false)
                     }
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     if (dragging) {
-                        VesselInputClient.button(BTN_LEFT, false)
-                        dragging = false
-                    } else if (!moved && SystemClock.uptimeMillis() - downAt < 260) {
-                        VesselInputClient.button(BTN_LEFT, true)
-                        VesselInputClient.button(BTN_LEFT, false)
+                        VesselInputClient.button(BTN_LEFT, false); dragging = false
+                    } else if (!moved && SystemClock.uptimeMillis() - downAt < 300) {
+                        VesselInputClient.button(BTN_LEFT, true); VesselInputClient.button(BTN_LEFT, false)
                         lastTapAt = SystemClock.uptimeMillis()
                     }
                 }
@@ -389,6 +451,7 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
 
     override fun onGenericMotionEvent(e: MotionEvent): Boolean {
         if ((e.source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
+            updatePhysicalButtons(e)
             if (e.action == MotionEvent.ACTION_HOVER_MOVE || e.action == MotionEvent.ACTION_MOVE) {
                 val dx = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
                 val dy = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
@@ -396,14 +459,7 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
             }
             val vy = e.getAxisValue(MotionEvent.AXIS_VSCROLL)
             val hx = e.getAxisValue(MotionEvent.AXIS_HSCROLL)
-            if (abs(vy) >= 0.05f || abs(hx) >= 0.05f) {
-                VesselInputClient.scroll(hx.roundToInt(), vy.roundToInt())
-            }
-            val left = (e.buttonState and MotionEvent.BUTTON_PRIMARY) != 0
-            if (left != mouseLeftDown) {
-                mouseLeftDown = left
-                VesselInputClient.button(BTN_LEFT, left)
-            }
+            if (abs(vy) >= .05f || abs(hx) >= .05f) VesselInputClient.scroll(hx.roundToInt(), vy.roundToInt())
             return true
         }
         return super.onGenericMotionEvent(e)
@@ -437,8 +493,7 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
         val code = when (lower) {
             in 'a'..'z' -> intArrayOf(30,48,46,32,18,33,34,35,23,36,37,38,50,49,24,25,16,19,31,20,22,47,17,45,21,44)[lower - 'a']
             '1' -> 2; '2' -> 3; '3' -> 4; '4' -> 5; '5' -> 6; '6' -> 7; '7' -> 8; '8' -> 9; '9' -> 10; '0' -> 11
-            ' ' -> 57; '\n' -> 28; '\t' -> 15
-            '.' -> 52; ',' -> 51; '-' -> 12; '=' -> 13; '/' -> 53; ';' -> 39; '\'' -> 40
+            ' ' -> 57; '\n' -> 28; '\t' -> 15; '.' -> 52; ',' -> 51; '-' -> 12; '=' -> 13; '/' -> 53; ';' -> 39; '\'' -> 40
             else -> 0
         }
         if (code == 0) return
@@ -455,5 +510,24 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
         KeyEvent.KEYCODE_ALT_LEFT -> 56; KeyEvent.KEYCODE_SPACE -> 57; KeyEvent.KEYCODE_F1 -> 59; KeyEvent.KEYCODE_F2 -> 60; KeyEvent.KEYCODE_F3 -> 61; KeyEvent.KEYCODE_F4 -> 62; KeyEvent.KEYCODE_F5 -> 63; KeyEvent.KEYCODE_F6 -> 64; KeyEvent.KEYCODE_F7 -> 65; KeyEvent.KEYCODE_F8 -> 66; KeyEvent.KEYCODE_F9 -> 67; KeyEvent.KEYCODE_F10 -> 68; KeyEvent.KEYCODE_F11 -> 87; KeyEvent.KEYCODE_F12 -> 88
         KeyEvent.KEYCODE_HOME -> 102; KeyEvent.KEYCODE_DPAD_UP -> 103; KeyEvent.KEYCODE_PAGE_UP -> 104; KeyEvent.KEYCODE_DPAD_LEFT -> 105; KeyEvent.KEYCODE_DPAD_RIGHT -> 106; KeyEvent.KEYCODE_MOVE_END -> 107; KeyEvent.KEYCODE_DPAD_DOWN -> 108; KeyEvent.KEYCODE_PAGE_DOWN -> 109; KeyEvent.KEYCODE_INSERT -> 110; KeyEvent.KEYCODE_FORWARD_DEL -> 111; KeyEvent.KEYCODE_CTRL_RIGHT -> 97; KeyEvent.KEYCODE_ALT_RIGHT -> 100; KeyEvent.KEYCODE_META_LEFT -> 125; KeyEvent.KEYCODE_META_RIGHT -> 126
         else -> 0
+    }
+
+    private fun createProgram(vertex: String, fragment: String): Int {
+        fun compile(type: Int, src: String): Int {
+            val shader = GLES20.glCreateShader(type)
+            GLES20.glShaderSource(shader, src)
+            GLES20.glCompileShader(shader)
+            val ok = IntArray(1); GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, ok, 0)
+            check(ok[0] != 0) { GLES20.glGetShaderInfoLog(shader) }
+            return shader
+        }
+        val vs = compile(GLES20.GL_VERTEX_SHADER, vertex)
+        val fs = compile(GLES20.GL_FRAGMENT_SHADER, fragment)
+        val p = GLES20.glCreateProgram()
+        GLES20.glAttachShader(p, vs); GLES20.glAttachShader(p, fs); GLES20.glLinkProgram(p)
+        val ok = IntArray(1); GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, ok, 0)
+        check(ok[0] != 0) { GLES20.glGetProgramInfoLog(p) }
+        GLES20.glDeleteShader(vs); GLES20.glDeleteShader(fs)
+        return p
     }
 }
