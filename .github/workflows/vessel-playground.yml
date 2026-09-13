@@ -63,11 +63,11 @@ jobs:
       - name: Apply Vessel Playground source patch
         run: |
           set -euxo pipefail
-          python3 -m py_compile tools/venus_poc/apply_vessel_playground.py tools/venus_poc/fix_playground_rt_frag.py
+          python3 -m py_compile tools/venus_poc/apply_vessel_playground.py tools/venus_poc/fix_playground_rt_frag.py tools/venus_poc/fix_playground_cpp.py
           python3 tools/venus_poc/apply_vessel_playground.py
-          # The first patch intentionally changes most renderer files. Restore the
-          # known-good complete RT translation unit, then patch it with safe bounded
-          # replacements so main() and all helper functions stay intact.
+          python3 tools/venus_poc/fix_playground_cpp.py
+          # Restore the known-good complete RT translation unit, then apply only
+          # safe bounded Playground replacements so main() remains intact.
           git show 0f679b03b47304444527e801573ee9424d6711e1:app/src/main/cpp/shaders/native_studio_v7_rt.frag > app/src/main/cpp/shaders/native_studio_v7_rt.frag
           python3 tools/venus_poc/fix_playground_rt_frag.py
 
