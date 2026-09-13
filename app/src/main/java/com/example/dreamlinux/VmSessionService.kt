@@ -55,9 +55,12 @@ class VmSessionService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var uml: TermuxUmlController
-    private var requestedWidth = 1920
-    private var requestedHeight = 1080
-    private var requestedDpi = 144
+    // 1600x720 matches modern ~20:9 phones much better than 1920x1080 and cuts
+    // the software desktop pixel workload almost in half. Fullscreen GL scales
+    // it cleanly to the panel while the guest keeps a useful desktop DPI.
+    private var requestedWidth = 1600
+    private var requestedHeight = 720
+    private var requestedDpi = 120
 
     private fun shortError(raw: String): String {
         val e = raw.trim()
@@ -68,7 +71,6 @@ class VmSessionService : Service() {
                 "Guest command transport stalled after Debian boot"
             e.contains("Failed to lock", ignoreCase = true) || e.contains("disk is locked", ignoreCase = true) ->
                 "Debian disk is already in use by another UML process"
-            e.contains("TigerVNC failed", ignoreCase = true) -> "TigerVNC failed to start"
             e.contains("Mesa Venus", ignoreCase = true) -> "Mesa Venus is missing or failed to initialize"
             e.contains("runtime daemon did not start", ignoreCase = true) -> "Vessel runtime daemon failed to start"
             e.contains("UML exited during boot", ignoreCase = true) -> "Debian UML exited during boot"
@@ -171,8 +173,6 @@ class VmSessionService : Service() {
         val desktop = obj.optBoolean("desktopReady", false)
         val phase = obj.optString("progressPhase", state.value.progressPhase)
         val candidateError = obj.optString("error").ifBlank { obj.optString("lastError") }
-        // A healthy status response may still contain an old transient lastError.
-        // Only expose it while the backend itself says this response/phase failed.
         val rawError = if (!ok || phase == "error") candidateError else ""
         val error = shortError(rawError)
         val percent = obj.optInt("progressPercent", state.value.progressPercent)
@@ -194,10 +194,10 @@ class VmSessionService : Service() {
             running = running,
             debianStarting = running && !guest,
             kdeInstalled = desktop,
-            kdeInstalling = (!desktop && running && phase.startsWith("desktop")) || phase == "vnc_start",
+            kdeInstalling = (!desktop && running && phase.startsWith("desktop")),
             kdeStage = when {
-                desktop -> "KDE Plasma live · VNC ${TermuxUmlController.VNC_PORT} · ${formatUptime(uptime)}"
-                running && (phase.startsWith("desktop") || phase == "vnc_start") -> detail
+                desktop -> "KDE Plasma live · VFRM2 native surface · ${formatUptime(uptime)}"
+                running && phase.startsWith("desktop") -> detail
                 running -> "desktop not started"
                 else -> "not started"
             },
@@ -219,7 +219,7 @@ class VmSessionService : Service() {
             },
             message = message,
             graphics = if (guest) "Mesa Venus 26.2.2 · virglrenderer/Turnip · shared umshm transport" else state.value.graphics,
-            capabilities = if (ok) "Rootless UML · Venus · VNC desktop · persistent ext4" else state.value.capabilities
+            capabilities = if (ok) "Rootless UML · Venus · VFRM2 native desktop · persistent ext4" else state.value.capabilities
         )
     }
 
@@ -241,11 +241,11 @@ class VmSessionService : Service() {
         }
     }
 
-    fun startVm() = startDebian(requestedWidth, requestedHeight, requestedDpi, 60)
+    fun startVm() = startDebian(requestedWidth, requestedHeight, requestedDpi, 120)
 
     fun startDebian(width: Int, height: Int, dpi: Int, refreshRate: Int) {
         requestedWidth = width.coerceIn(800, 3840)
-        requestedHeight = height.coerceIn(600, 2160)
+        requestedHeight = height.coerceIn(540, 2160)
         requestedDpi = dpi.coerceIn(96, 240)
         operation("Starting Debian") {
             state.value = state.value.copy(debianStarting = true, lastError = "", message = "Booting ARM64 UML…")
@@ -260,7 +260,7 @@ class VmSessionService : Service() {
         applyRuntime(uml.start(), "Debian diagnostic guest ready")
     }
 
-    fun installDebian() = startDebian(requestedWidth, requestedHeight, requestedDpi, 60)
+    fun installDebian() = startDebian(requestedWidth, requestedHeight, requestedDpi, 120)
 
     fun installKde() = operation("Starting KDE Plasma") {
         state.value = state.value.copy(kdeInstalling = true, lastError = "", kdeStage = "Preparing Plasma", message = "Preparing Plasma desktop…")
@@ -292,6 +292,7 @@ class VmSessionService : Service() {
             append(" · Termux=").append(if (uml.isTermuxInstalled()) "yes" else "no")
             append(" · command permission=").append(if (uml.hasRunCommandPermission()) "yes" else "no")
             append(" · protocol=").append(runtime.optInt("protocolVersion", 0))
+            append(" · display=").append(runtime.optString("displayTransport", "unknown"))
             if (runtime.optBoolean("guestReady")) append(" · Venus guest=ready")
             if (runtime.optBoolean("desktopReady")) append(" · Plasma=live")
         }
@@ -347,7 +348,6 @@ class VmSessionService : Service() {
                             .put("graphics", s.graphics)
                             .put("network", s.internetStage)
                             .put("uptimeMs", s.uptimeMs)
-                            .put("updatedElapsedMs", SystemClock.elapsedRealtime())
                             .toString(2)
                     )
                 }
