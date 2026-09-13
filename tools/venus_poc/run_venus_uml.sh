@@ -19,8 +19,9 @@ X11_LOG="${X11_LOG:-$HOME/venus-x11-proxy.log}"
 PORT="${VENUS_RELAY_PORT:-5002}"
 X11_DISPLAY_NUM="${X11_DISPLAY_NUM:-0}"
 X11_TCP_PORT="${X11_TCP_PORT:-6000}"
-ENABLE_X11="${ENABLE_X11:-1}"
+ENABLE_X11="${ENABLE_X11:-0}"
 VESSEL_VCPUS="${VESSEL_VCPUS:-6}"
+VESSEL_MEM_MB="${VESSEL_MEM_MB:-8192}"
 REQUIRE_THREAD_WORKER="${REQUIRE_THREAD_WORKER:-1}"
 THREAD_WORKER_MARKER="${THREAD_WORKER_MARKER:-$PREFIX/opt/virglrenderer-android/.venus-thread-worker}"
 
@@ -29,6 +30,13 @@ case "$VESSEL_VCPUS" in
 esac
 if [ "$VESSEL_VCPUS" -lt 1 ] || [ "$VESSEL_VCPUS" -gt 8 ]; then
   echo "[venus-run] VESSEL_VCPUS must be between 1 and CONFIG_NR_CPUS=8" >&2
+  exit 1
+fi
+case "$VESSEL_MEM_MB" in
+  ''|*[!0-9]*) echo "[venus-run] VESSEL_MEM_MB must be an integer" >&2; exit 1 ;;
+esac
+if [ "$VESSEL_MEM_MB" -lt 1024 ] || [ "$VESSEL_MEM_MB" -gt 16384 ]; then
+  echo "[venus-run] VESSEL_MEM_MB must be between 1024 and 16384" >&2
   exit 1
 fi
 
@@ -123,8 +131,6 @@ for f in \
   fi
 done
 
-# Do not silently fall back to the old UP kernel. The rebuilt Vessel kernel is
-# CONFIG_SMP=y / CONFIG_NR_CPUS=8 and must advertise the ncpus= boot switch.
 if ! "$UML_DIR/linux-umshm" --help 2>&1 | grep -q 'ncpus='; then
   echo "[venus-run] linux-umshm is the old uniprocessor build." >&2
   echo "[venus-run] rebuild/install the Vessel SMP kernel before booting." >&2
@@ -156,10 +162,6 @@ if [ "$ENABLE_X11" = "1" ]; then
   pkill -f '[t]ermux-x11' 2>/dev/null || true
   pkill -f "socat TCP-LISTEN:${X11_TCP_PORT}.*X${X11_DISPLAY_NUM}" 2>/dev/null || true
   rm -f "$X11_UNIX"
-
-  # Some Android devices render a black surface/cursor with the default
-  # Termux:X11 drawing path. Legacy drawing is slower but much more compatible
-  # and makes this direct-X11 validation path visibly reliable.
   termux-x11 ":$X11_DISPLAY_NUM" -legacy-drawing >"$HOME/termux-x11.log" 2>&1 &
   TERMUX_X11_PID=$!
   for _ in $(seq 1 50); do
@@ -238,12 +240,12 @@ if [ "$ENABLE_X11" = "1" ]; then
   echo "[venus-run] X11 guest display: 10.0.2.2:${X11_DISPLAY_NUM}"
   echo "[venus-run] X11 proxy log: $X11_LOG"
 fi
-echo "[venus-run] booting Debian UML with $VESSEL_VCPUS vCPUs..."
+echo "[venus-run] booting Debian UML with $VESSEL_VCPUS vCPUs and ${VESSEL_MEM_MB} MiB RAM..."
 
 cd "$UML_DIR"
 ./umnet --passt ./passt --dns 1.1.1.1 -- \
   ./linux-umshm \
-    mem=2048M \
+    mem="${VESSEL_MEM_MB}M" \
     ncpus="$VESSEL_VCPUS" \
     seccomp=on \
     ubd0=debian-docker.ext4 \
