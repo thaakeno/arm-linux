@@ -8,7 +8,6 @@ RFB/VNC, and it never injects input.
 from __future__ import annotations
 
 import json
-import os
 import socket
 import struct
 import sys
@@ -76,7 +75,15 @@ def parse_xwd(path: str):
     }
 
 
-def normalize_bgra(raw: bytes, meta: dict) -> bytes:
+def normalize_rgba(raw: bytes, meta: dict) -> bytes:
+    """Convert Xvfb's XWD pixels to the byte order Android Bitmap expects.
+
+    Xvfb's common little-endian 0x00RRGGBB visual is stored as B,G,R,X bytes.
+    The previous bridge labelled those bytes BGRA but fed them directly into an
+    Android ARGB_8888 bitmap, visibly swapping red and blue. Emit explicit RGBA
+    bytes instead. Extended-slice copies keep the hot path in C rather than a
+    Python per-pixel loop.
+    """
     width = meta["width"]
     height = meta["height"]
     stride = meta["stride"]
@@ -90,21 +97,28 @@ def normalize_bgra(raw: bytes, meta: dict) -> bytes:
 
     packed = bytearray(width * height * 4)
     dst = 0
+    row_bytes = width * 4
+    common = byte_order == 0 and red == 0x00FF0000 and green == 0x0000FF00 and blue == 0x000000FF
     for y in range(height):
-        row = raw[y * stride:y * stride + width * 4]
-        if byte_order == 0 and red == 0x00FF0000 and green == 0x0000FF00 and blue == 0x000000FF:
-            packed[dst:dst + width * 4] = row
-            packed[dst + 3:dst + width * 4:4] = b"\xff" * width
-            dst += width * 4
+        row = raw[y * stride:y * stride + row_bytes]
+        out = memoryview(packed)[dst:dst + row_bytes]
+        if common:
+            out[0::4] = row[2::4]  # R
+            out[1::4] = row[1::4]  # G
+            out[2::4] = row[0::4]  # B
+            out[3::4] = b"\xff" * width
+            dst += row_bytes
             continue
-        # Generic 32-bit XWD conversion. XWD byte_order 0 is LSBFirst.
         order = "little" if byte_order == 0 else "big"
         for x in range(width):
             p = int.from_bytes(row[x * 4:x * 4 + 4], order)
-            rv = (p & red) >> ((red & -red).bit_length() - 1 if red else 0)
-            gv = (p & green) >> ((green & -green).bit_length() - 1 if green else 0)
-            bv = (p & blue) >> ((blue & -blue).bit_length() - 1 if blue else 0)
-            packed[dst:dst + 4] = bytes((bv & 255, gv & 255, rv & 255, 255))
+            rs = ((red & -red).bit_length() - 1) if red else 0
+            gs = ((green & -green).bit_length() - 1) if green else 0
+            bs = ((blue & -blue).bit_length() - 1) if blue else 0
+            rv = (p & red) >> rs
+            gv = (p & green) >> gs
+            bv = (p & blue) >> bs
+            packed[dst:dst + 4] = bytes((rv & 255, gv & 255, bv & 255, 255))
             dst += 4
     return bytes(packed)
 
@@ -117,7 +131,7 @@ def connect(host: str, port: int):
     return s
 
 
-def run(path: str, host: str, port: int, fps: int = 30):
+def run(path: str, host: str, port: int, fps: int = 60):
     frame_file, meta = parse_xwd(path)
     width, height = meta["width"], meta["height"]
     raw_size = meta["stride"] * height
@@ -126,11 +140,13 @@ def run(path: str, host: str, port: int, fps: int = 30):
         "width": width,
         "height": height,
         "stride": width * 4,
-        "format": "BGRA8888",
+        "format": "RGBA8888",
+        "fps": max(5, min(int(fps), 120)),
     }
     seq = 0
     previous_crc = -1
-    period = 1.0 / max(5, min(int(fps), 60))
+    target_fps = max(5, min(int(fps), 120))
+    period = 1.0 / target_fps
     sock = None
     try:
         while True:
@@ -143,7 +159,7 @@ def run(path: str, host: str, port: int, fps: int = 30):
                         try: sock.close()
                         except OSError: pass
                     sock = None
-                    time.sleep(0.15)
+                    time.sleep(0.05)
                     continue
             started = time.monotonic()
             frame_file.seek(meta["offset"])
@@ -151,10 +167,12 @@ def run(path: str, host: str, port: int, fps: int = 30):
             crc = zlib.crc32(raw)
             if crc != previous_crc:
                 previous_crc = crc
-                bgra = normalize_bgra(raw, meta)
-                payload = zlib.compress(bgra, 1)
+                rgba = normalize_rgba(raw, meta)
+                # Level 1 is deliberately used: on a local UML link latency is
+                # more important than squeezing the last bytes out of a frame.
+                payload = zlib.compress(rgba, 1)
                 seq += 1
-                packet = struct.pack("!QII", seq, len(payload), len(bgra)) + payload
+                packet = struct.pack("!QII", seq, len(payload), len(rgba)) + payload
                 try:
                     sock.sendall(packet)
                 except OSError:
@@ -175,5 +193,5 @@ if __name__ == "__main__":
     path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/vessel-fb/Xvfb_screen0"
     host = sys.argv[2] if len(sys.argv) > 2 else "10.0.2.2"
     port = int(sys.argv[3]) if len(sys.argv) > 3 else 47637
-    fps = int(sys.argv[4]) if len(sys.argv) > 4 else 30
+    fps = int(sys.argv[4]) if len(sys.argv) > 4 else 60
     run(path, host, port, fps)
