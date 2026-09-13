@@ -13,24 +13,18 @@ include(KDECompilerSettings NO_POLICY_SCOPE)
 include(KDEClangFormat)
 include(ECMSetupQtPluginMacroNames)
 
-# KWin's effect factory macros carry their plugin JSON metadata in macro
-# arguments. Standalone effect builds must teach CMake AUTOGEN about those
-# macros exactly like KWin's own build does, otherwise Qt5 moc parses the
-# expanded Q_PLUGIN_METADATA(... FILE ...) incorrectly and dies at "FILE".
+# Debian 12 ships KWin 5.27. Its effect factory macros take the metadata JSON
+# as argument 2. Teach Qt5 AutoMoc exactly that, matching kwineffects.h.
 ecm_setup_qtplugin_macro_names(
     JSON_ARG2
         "KWIN_EFFECT_FACTORY"
-    JSON_ARG3
         "KWIN_EFFECT_FACTORY_ENABLED"
         "KWIN_EFFECT_FACTORY_SUPPORTED"
-    JSON_ARG4
         "KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED"
 )
 
 find_package(Qt5 5.15 REQUIRED COMPONENTS Core)
 find_package(KF5 REQUIRED COMPONENTS CoreAddons)
-# KWinEffects' imported targets expose XCB::XCB and epoxy::epoxy in their
-# Debian/KWin 5.x link interfaces. Resolve those imported targets first.
 find_package(XCB REQUIRED COMPONENTS XCB)
 find_package(epoxy REQUIRED)
 find_package(KWinEffects REQUIRED)
