@@ -62,10 +62,9 @@ old = 'void setLightHaze(float v){std::lock_guard<std::mutex>lock(bodyMutex_);v=
 new = 'void setLightHaze(float v){std::lock_guard<std::mutex>lock(bodyMutex_);v=std::clamp(v,0.0f,1.0f);lightHaze_=v;logV7Unlocked("light haze -> "+std::to_string(v));}'
 if old in text: text = text.replace(old, new)
 text = text.replace('bodies_[2].r=.255f+.075f*lightHaze_.load();', 'bodies_[2].r=.285f;')
+text = text.replace('deformDir_[2]={1.0f,.62f,.31f}*lightIntensity_.load();', 'deformDir_[2]=Vec3{1.0f,.62f,.31f}*lightIntensity_.load();')
 p.write_text(text)
 
-# The v13 first pass also used a nested-brace regex for screenRayV7 and could
-# leave the tail of the orbit-only implementation behind. Replace the whole span.
 screen_ray = '''    void screenRayV7(float nx,float ny,Vec3&ro,Vec3&rd)const{
         float yaw=yaw_.load(),pitch=pitch_.load(),cp=std::cos(pitch);Vec3 f;
         if(firstPerson_.load()){
@@ -89,4 +88,4 @@ new = 'JobSystemThreadPool jobs{cMaxPhysicsJobs, cMaxPhysicsBarriers, static_cas
 if old not in text: raise SystemExit("Jolt worker marker missing")
 p.write_text(text.replace(old,new))
 
-print("v13 post-fix applied: RT boxes + Jolt authority + light setter + FPS ray + Android Jolt workers")
+print("v13 post-fix applied: RT boxes + Jolt authority + light setter + FPS ray + reset vector + Android Jolt workers")
