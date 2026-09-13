@@ -193,7 +193,7 @@ class DirectXRuntime(base.Runtime):
         args = [
             "/system/bin/app_process", "-Xnoimage-dex2oat", "/",
             "com.termux.x11.CmdEntryPoint", f":{DISPLAY_NUMBER}",
-            "-ac", "-listen", "tcp", "-terminate",
+            "-ac", "-listen", "tcp", "-noreset",
         ]
         self.append("LORIE_XSERVER_LAUNCHED\n")
         self.xserver_proc = subprocess.Popen(
@@ -214,8 +214,16 @@ class DirectXRuntime(base.Runtime):
                 raise RuntimeError("Embedded Lorie X server exited during startup: " + tail)
             try:
                 with socket.create_connection(("127.0.0.1", X11_PORT), timeout=.25):
-                    self.append("LORIE_XSERVER_READY\n")
-                    return
+                    pass
+                time.sleep(0.15)
+                if self.xserver_proc.poll() is not None:
+                    try:
+                        tail = log_path.read_text(errors="replace")[-5000:]
+                    except Exception:
+                        tail = ""
+                    raise RuntimeError("Embedded Lorie X server died after readiness probe: " + tail)
+                self.append("LORIE_XSERVER_READY\n")
+                return
             except OSError:
                 time.sleep(.1)
         raise RuntimeError(f"Embedded Lorie X server did not open TCP {X11_PORT}")
@@ -244,11 +252,18 @@ class DirectXRuntime(base.Runtime):
 
         self.set_progress("desktop_config", 78, "Connecting KDE directly to Android X server")
         probe = self.guest(
-            f"DISPLAY={shlex.quote(DISPLAY)} xdpyinfo >/dev/null 2>&1 && echo DIRECT_X_READY || true",
+            f"out=$(DISPLAY={shlex.quote(DISPLAY)} xdpyinfo 2>&1); rc=$?; printf 'XDPYINFO_RC=%s\\n%s\\n' \"$rc\" \"$out\"; true",
             8,
         )
-        if "DIRECT_X_READY" not in probe:
-            raise RuntimeError(f"Guest cannot reach embedded X server at {DISPLAY}")
+        if "XDPYINFO_RC=0" not in probe:
+            try:
+                tail = (base.RUNTIME / "vessel-lorie-xserver.log").read_text(errors="replace")[-4000:]
+            except Exception:
+                tail = ""
+            raise RuntimeError(
+                f"Guest cannot reach embedded X server at {DISPLAY}. "
+                f"Guest probe: {probe[-3000:]} | Lorie log: {tail}"
+            )
 
         cleanup = r'''pkill -x plasmashell 2>/dev/null || true
 pkill -x kwin_x11 2>/dev/null || true
