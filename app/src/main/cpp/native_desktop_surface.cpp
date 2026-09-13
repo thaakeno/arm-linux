@@ -1,14 +1,12 @@
 #include <jni.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
-#include <android/log.h>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -17,21 +15,15 @@
 #include <vector>
 #include <algorithm>
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "VesselSurface", __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "VesselSurface", __VA_ARGS__)
-
 namespace {
 constexpr int kPort = 47636;
 std::mutex gMutex;
-std::condition_variable gCv;
 ANativeWindow* gWindow = nullptr;
 std::vector<uint8_t> gFrame;
 int gFrameW = 0, gFrameH = 0;
 float gCursorX = .5f, gCursorY = .5f;
 bool gCursorVisible = false;
-bool gDirty = false;
 std::atomic<bool> gRunning{false};
-std::thread gThread;
 
 bool recvAll(int fd, void* dst, size_t len) {
     auto* p = static_cast<uint8_t*>(dst);
@@ -121,7 +113,7 @@ void streamLoop() {
         if (w<320||h<240||w>7680||h>4320) { close(fd); continue; }
         {
             std::lock_guard<std::mutex> lk(gMutex);
-            gFrameW=w; gFrameH=h; gFrame.assign(static_cast<size_t>(w)*h*4,0); gDirty=true;
+            gFrameW=w; gFrameH=h; gFrame.assign(static_cast<size_t>(w)*h*4,0);
         }
         while (gRunning.load()) {
             uint8_t head[13]; if(!recvAll(fd,head,sizeof(head))) break;
@@ -130,7 +122,7 @@ void streamLoop() {
             if (kind=='F') {
                 if (value != static_cast<uint32_t>(w*h*4)) break;
                 std::vector<uint8_t> tmp(value); if(!recvAll(fd,tmp.data(),tmp.size())) break;
-                std::lock_guard<std::mutex> lk(gMutex); gFrame.swap(tmp); gDirty=true; postFrameLocked();
+                std::lock_guard<std::mutex> lk(gMutex); gFrame.swap(tmp); postFrameLocked();
             } else if (kind=='D') {
                 if (value>8192) break;
                 bool bad=false;
@@ -145,7 +137,7 @@ void streamLoop() {
                     for(uint16_t yy=0;yy<thh;yy++) std::memcpy(gFrame.data()+((static_cast<size_t>(y+yy)*w+x)*4),tile.data()+static_cast<size_t>(yy)*tw*4,static_cast<size_t>(tw)*4);
                 }
                 if(bad) break;
-                gDirty=true; postFrameLocked();
+                postFrameLocked();
             } else break;
         }
         close(fd);
@@ -154,7 +146,7 @@ void streamLoop() {
 
 void ensureThread() {
     bool expected=false;
-    if (gRunning.compare_exchange_strong(expected,true)) gThread=std::thread(streamLoop);
+    if (gRunning.compare_exchange_strong(expected,true)) std::thread(streamLoop).detach();
 }
 }
 
