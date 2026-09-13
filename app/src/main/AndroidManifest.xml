@@ -5,29 +5,24 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
-
-    <!-- Legacy AVF compatibility only. UML + Venus is the default and does not require AVF/root. -->
     <uses-permission android:name="android.permission.MANAGE_VIRTUAL_MACHINE" />
     <uses-permission android:name="android.permission.USE_CUSTOM_VIRTUAL_MACHINE" />
     <uses-feature android:name="android.software.virtualization_framework" android:required="false" />
 
     <queries>
         <package android:name="com.termux" />
-        <intent>
-            <action android:name="com.termux.RUN_COMMAND" />
-        </intent>
+        <intent><action android:name="com.termux.RUN_COMMAND" /></intent>
     </queries>
 
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="${appLabel}"
+        android:label="Bounce Quest"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:windowSoftInputMode="adjustResize"
         android:theme="@style/Theme.DreamLinux">
 
-        <!-- Kept for the optional legacy backend; primary UML operation does not bind Shizuku. -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
@@ -38,20 +33,13 @@
             android:name=".VmSessionService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-started local ARM64 Linux session" />
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-started local ARM64 Linux session" />
         </service>
 
         <activity
-            android:name=".NativeCubeActivity"
+            android:name=".BounceQuestActivity"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
             android:screenOrientation="sensorLandscape"
-            android:exported="true" />
-
-        <activity
-            android:name=".VesselActivity"
-            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -59,8 +47,7 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".MainActivity"
-            android:exported="false" />
+        <activity android:name=".VesselActivity" android:exported="false" />
+        <activity android:name=".MainActivity" android:exported="false" />
     </application>
 </manifest>
