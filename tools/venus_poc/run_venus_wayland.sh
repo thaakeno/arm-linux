@@ -10,6 +10,7 @@ VENUS_SOCK="${VENUS_SOCK:-$PREFIX/tmp/venus.sock}"
 UMSHM_SOCK="${UMSHM_SOCK:-$PREFIX/tmp/umshm.sock}"
 HOST_LOG="${HOST_LOG:-$UML_DIR/vessel-renderer.log}"
 RELAY_LOG="${RELAY_LOG:-$UML_DIR/vessel-relay.log}"
+INPUT_LOG="${INPUT_LOG:-$UML_DIR/vessel-input-bridge.log}"
 PORT="${VENUS_RELAY_PORT:-5002}"
 VESSEL_VCPUS="${VESSEL_VCPUS:-6}"
 VESSEL_MEM_MB="${VESSEL_MEM_MB:-8192}"
@@ -63,8 +64,10 @@ cleanup() {
   trap - EXIT INT TERM
   [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
   [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null || true
+  [ -n "${INPUT_PID:-}" ] && kill "$INPUT_PID" 2>/dev/null || true
   [ -n "${VIRGL_PID:-}" ] && kill "$VIRGL_PID" 2>/dev/null || true
   pkill -f '[h]ost_relay_wayland.py' 2>/dev/null || true
+  pkill -f '[h]ost_input_bridge.py' 2>/dev/null || true
   pkill -f '[v]irgl_test_server_android' 2>/dev/null || true
   rm -f "$VENUS_SOCK" "$UMSHM_SOCK"
   exit "$rc"
@@ -73,6 +76,7 @@ trap cleanup EXIT INT TERM
 
 for f in \
   "$POC_DIR/tools/venus_poc/host_relay_wayland.py" \
+  "$POC_DIR/tools/venus_poc/host_input_bridge.py" \
   "$UML_DIR/linux-umshm" \
   "$UML_DIR/stub_exe-umshm" \
   "$UML_DIR/umnet" \
@@ -103,9 +107,11 @@ for proc in /proc/[0-9]*; do
 done
 sleep .4
 pkill -f '[h]ost_relay_wayland.py' 2>/dev/null || true
+pkill -f '[h]ost_input_bridge.py' 2>/dev/null || true
 pkill -f '[v]irgl_test_server_android' 2>/dev/null || true
 rm -f "$VENUS_SOCK" "$UMSHM_SOCK"
 : >"$HOST_LOG"
+: >"$INPUT_LOG"
 
 start_virgl
 venus_watchdog "$VIRGL_PID" &
@@ -125,9 +131,22 @@ for _ in $(seq 1 80); do
 done
 [ -S "$UMSHM_SOCK" ] || { echo "[venus-wayland] umshm socket missing" >&2; exit 1; }
 
+python3 "$POC_DIR/tools/venus_poc/host_input_bridge.py" \
+  --android-port 47634 --guest-port 47633 \
+  >"$INPUT_LOG" 2>&1 &
+INPUT_PID=$!
+sleep .1
+kill -0 "$INPUT_PID" 2>/dev/null || {
+  echo "[venus-wayland] native input bridge died" >&2
+  cat "$INPUT_LOG" >&2 || true
+  exit 1
+}
+
 echo "[venus-wayland] Venus host + dma-buf/AHardwareBuffer relay ready"
+echo "[venus-wayland] native evdev input bridge ready"
 echo "[venus-wayland] host log:  $HOST_LOG"
 echo "[venus-wayland] relay log: $RELAY_LOG"
+echo "[venus-wayland] input log: $INPUT_LOG"
 echo "[venus-wayland] booting Debian UML with $VESSEL_VCPUS vCPUs and ${VESSEL_MEM_MB} MiB RAM..."
 
 cd "$UML_DIR"
