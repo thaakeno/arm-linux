@@ -14,9 +14,6 @@ def patch_between(path: str, start: str, end: str, replacement: str) -> None:
         raise SystemExit(f"missing end marker in {path}: {end}")
     p.write_text(text[:a] + replacement + text[b:])
 
-# apply_v13_jolt_playground.py originally used a non-greedy regex on a one-line
-# GLSL function containing many nested braces. It stopped after the first branch
-# and left v12 branches behind. Replace the complete span up to boxNormal.
 box = '''void boxInfo(int id,out vec3 c,out vec3 s,out int mat){
     int b=id-2;mat=12;c=vec3(0);s=vec3(1);
     if(b==0){c=vec3(-9,-.69,-7);s=vec3(2.8,.32,2.4);}
@@ -39,35 +36,34 @@ box = '''void boxInfo(int id,out vec3 c,out vec3 s,out int mat){
     else{c=vec3(-14,-.55,-3);s=vec3(2.8,.47,2.2);}
 }
 '''
-patch_between(
-    "app/src/main/cpp/shaders/native_studio_v7_rt.frag",
-    "void boxInfo(int id,out vec3 c,out vec3 s,out int mat)",
-    "vec3 boxNormal",
-    box,
-)
+patch_between("app/src/main/cpp/shaders/native_studio_v7_rt.frag", "void boxInfo(int id,out vec3 c,out vec3 s,out int mat)", "vec3 boxNormal", box)
 
-# v13 has four authoritative Jolt bodies. Do not expose legacy stress bodies that
-# would still be governed by the old render-only Body array.
 p = ROOT / "app/src/main/cpp/native_vulkan_studio_v7_part2.inc"
 text = p.read_text()
 start = text.find("    int activeBodiesV7()const{")
 if start >= 0:
     end = text.find("    void configureBodiesV7()", start)
-    if end < 0:
-        raise SystemExit("activeBodiesV7 end marker missing")
+    if end < 0: raise SystemExit("activeBodiesV7 end marker missing")
     text = text[:start] + "    int activeBodiesV7()const{return int(kV7QualityBodies);}\n" + text[end:]
 p.write_text(text)
 
-# Haze is a visual parameter. It must not silently change the Jolt collision
-# radius; that was a render/physics mismatch in v12.
-p = ROOT / "app/src/main/cpp/native_vulkan_studio_v7_part1.inc"
+p1 = "app/src/main/cpp/native_vulkan_studio_v7_part1.inc"
+# The first v13 pass used a nested-brace regex and could leave half the old setter.
+# Replace the entire method span up to setLightHaze.
+light_setter = '''    void setLightIntensity(float v){
+        std::lock_guard<std::mutex>lock(bodyMutex_);v=std::clamp(v,.10f,3.50f);lightIntensity_=v;
+        Vec3 c=deformDir_[2];float m=std::max(c.x,std::max(c.y,c.z));if(m<1e-4f)c={1,.62f,.31f};else c=c/m;
+        bodies_[2].deform=v;deformDir_[2]=c*v;logV7Unlocked("light intensity -> "+std::to_string(v));
+    }
+    '''
+patch_between(p1, "    void setLightIntensity(float v)", "void setLightHaze", light_setter)
+
+p = ROOT / p1
 text = p.read_text()
 old = 'void setLightHaze(float v){std::lock_guard<std::mutex>lock(bodyMutex_);v=std::clamp(v,0.0f,1.0f);bodies_[2].r=.255f+.075f*v;lightHaze_=v;logV7Unlocked("light haze -> "+std::to_string(v));}'
 new = 'void setLightHaze(float v){std::lock_guard<std::mutex>lock(bodyMutex_);v=std::clamp(v,0.0f,1.0f);lightHaze_=v;logV7Unlocked("light haze -> "+std::to_string(v));}'
-if old in text:
-    text = text.replace(old, new)
-# Reset must also keep the physical orb radius stable.
+if old in text: text = text.replace(old, new)
 text = text.replace('bodies_[2].r=.255f+.075f*lightHaze_.load();', 'bodies_[2].r=.285f;')
 p.write_text(text)
 
-print("v13 post-fix applied: complete RT boxInfo + four-body Jolt authority + stable orb radius")
+print("v13 post-fix applied: RT box chain + Jolt authority + light setter + stable orb radius")
