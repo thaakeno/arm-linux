@@ -46,10 +46,10 @@ jobs:
           test ! -e tools/venus_poc/guest_frame_streamer_v2.c
           test ! -e tools/venus_poc/guest_frame_streamer.py
           ! grep -E 'VFRM2|FRAME_STREAMER|ANativeWindow_lock|Xtigervnc|vncserver' tools/venus_poc/vessel_runtime_daemon_v29.py app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt app/src/main/cpp/CMakeLists.txt
-      - name: Build, test and lint
+      - name: Build, test and lint app
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
+          ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon --no-configuration-cache
       - name: Upload Vessel APK
         uses: actions/upload-artifact@v4
         with:
