@@ -40,19 +40,27 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) hard-switching to protocol 25 native runtime"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) switching to protocol 25 native runtime"
               set -e
 
-              # Kill every old Vessel daemon, not just the first PID. Protocol 23
-              # must never survive and keep owning 47631 after an APK upgrade.
-              pkill -TERM -f '[v]essel_runtime_daemon' 2>/dev/null || true
-              for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-                pgrep -f '[v]essel_runtime_daemon' >/dev/null 2>&1 || break
-                sleep 0.1
-              done
-              pkill -KILL -f '[v]essel_runtime_daemon' 2>/dev/null || true
-              sleep 0.15
+              # Match only an actual Python Vessel daemon process. Do not use a
+              # broad `pkill -f vessel_runtime_daemon` here: the launcher shell's
+              # own `bash -lc` argv contains this script text and would match it.
+              DAEMON_RE='^([^ ]*/)?python(3)?[[:space:]]+[^ ]*/vessel_runtime_daemon(_v[0-9]+)?\.py([[:space:]].*)?${'$'}'
+              OLD_PIDS="${'$'}(pgrep -f "${'$'}DAEMON_RE" 2>/dev/null || true)"
+              if [ -n "${'$'}OLD_PIDS" ]; then
+                echo "[vessel-launch] stopping old daemon pid(s): ${'$'}OLD_PIDS"
+                kill -TERM ${'$'}OLD_PIDS 2>/dev/null || true
+                for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                  REMAINING="${'$'}(pgrep -f "${'$'}DAEMON_RE" 2>/dev/null || true)"
+                  [ -z "${'$'}REMAINING" ] && break
+                  sleep 0.1
+                done
+                REMAINING="${'$'}(pgrep -f "${'$'}DAEMON_RE" 2>/dev/null || true)"
+                [ -z "${'$'}REMAINING" ] || kill -KILL ${'$'}REMAINING 2>/dev/null || true
+              fi
 
+              echo "[vessel-launch] refreshing app/vessel-final runtime worktree"
               cd ~/venus-poc
               git fetch origin app/vessel-final
               if [ ! -e ~/vessel-poc-runtime/.git ]; then
@@ -67,6 +75,7 @@ class TermuxUmlController(private val context: Context) {
               export VESSEL_POC_DIR=~/vessel-poc-runtime
               export VESSEL_MEM_MB=8192
               export ENABLE_X11=0
+              echo "[vessel-launch] exec protocol 25 daemon"
               exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v25.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
@@ -114,9 +123,9 @@ class TermuxUmlController(private val context: Context) {
         val existing = runCatching { requestBlocking(JSONObject().put("action", "status"), 900) }.getOrNull()
         if (existing != null && isNativeProtocol(existing)) return@withContext existing
 
-        // Ask an old daemon to stop its UML guest, then hard-replace the daemon
-        // through Termux. This prevents protocol-23/TigerVNC sessions surviving
-        // across APK updates.
+        // Ask an old daemon to stop its UML guest, then replace only the actual
+        // Python daemon process through Termux. The launcher shell is never part
+        // of the daemon PID match.
         if (existing != null) {
             runCatching { requestBlocking(JSONObject().put("action", "stop"), 15_000) }
             delay(250)
