@@ -7,12 +7,10 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
 import kotlin.math.truncate
 
 /** Persistent low-latency Android -> guest native input channel. */
 object VesselInputClient {
-    // 47632 is reserved for the long-lived UML guest command agent.
     private const val PORT = 47634
     private val running = AtomicBoolean(true)
     private val queue = LinkedBlockingDeque<String>(1024)
@@ -27,8 +25,6 @@ object VesselInputClient {
     private fun send(obj: JSONObject, motion: Boolean = false) {
         val line = obj.toString()
         if (motion && queue.remainingCapacity() < 64) {
-            // Never let stale pointer motion build up behind the finger. Buttons
-            // and keys remain lossless; only superseded motion may be dropped.
             while (queue.size > 768) queue.pollFirst()
         }
         if (!queue.offerLast(line)) {
@@ -45,7 +41,8 @@ object VesselInputClient {
         motion = true,
     )
 
-    fun relative(dx: Float, dy: Float) {
+    /** Returns the exact integer delta sent to Linux so the local cursor stays bit-for-bit in sync. */
+    fun relative(dx: Float, dy: Float): Pair<Int, Int> {
         val ix: Int
         val iy: Int
         synchronized(fractionLock) {
@@ -56,8 +53,10 @@ object VesselInputClient {
             fracX -= ix
             fracY -= iy
         }
-        if (ix == 0 && iy == 0) return
-        send(JSONObject().put("t", "rel").put("dx", ix).put("dy", iy), motion = true)
+        if (ix != 0 || iy != 0) {
+            send(JSONObject().put("t", "rel").put("dx", ix).put("dy", iy), motion = true)
+        }
+        return ix to iy
     }
 
     fun button(code: Int, down: Boolean) =
@@ -86,8 +85,6 @@ object VesselInputClient {
                         val first = queue.takeFirst()
                         out.write(first)
                         out.newLine()
-                        // Drain everything already queued in one socket write. This
-                        // avoids one flush/syscall per high-rate pointer sample.
                         var drained = 0
                         while (drained < 64) {
                             val next = queue.pollFirst() ?: break
