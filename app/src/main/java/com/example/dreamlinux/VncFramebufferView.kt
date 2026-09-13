@@ -1,6 +1,10 @@
 package com.example.dreamlinux
 
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import android.os.SystemClock
 import android.text.InputType
 import android.view.InputDevice
@@ -9,23 +13,25 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.View
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import android.widget.FrameLayout
 import kotlin.math.abs
 import kotlin.math.hypot
 
 /**
- * Vessel desktop surface.
+ * Native Vessel desktop host.
  *
- * The historical class name is kept so the Compose UI does not need a second
- * display widget, but this is no longer a VNC/GLSurfaceView implementation.
- * Frames are decoded and posted by a native ANativeWindow presenter. Android
- * input is forwarded independently, so pointer latency is not tied to frame
- * delivery.
+ * The historical name remains for source compatibility, but there is no VNC
+ * and no GLSurfaceView here. A child SurfaceView is owned by the C++
+ * ANativeWindow presenter. The cursor is a tiny Android hardware-accelerated
+ * overlay whose coordinates use the exact integer deltas sent to Linux, so it
+ * remains responsive even if the guest has not produced a new desktop frame.
  */
-class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
+class VncFramebufferView(context: Context) : FrameLayout(context) {
     enum class PointerMode { DIRECT, TRACKPAD }
 
     companion object {
@@ -34,15 +40,18 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
         private const val BTN_LEFT = 0x110
         private const val BTN_RIGHT = 0x111
         private const val BTN_MIDDLE = 0x112
+        private const val GUEST_W = 1600f
+        private const val GUEST_H = 720f
     }
 
     private external fun nativeAttach(surface: Surface)
     private external fun nativeDetach()
-    private external fun nativeSetCursorVisible(visible: Boolean)
-    private external fun nativeCursorAbsolute(x: Float, y: Float)
-    private external fun nativeCursorRelative(dx: Float, dy: Float)
 
+    private val desktopSurface = SurfaceView(context)
+    private val cursor = CursorView(context)
     @Volatile private var pointerMode = PointerMode.DIRECT
+    private var cursorX = GUEST_W * .5f
+    private var cursorY = GUEST_H * .5f
     private var lastX = 0f
     private var lastY = 0f
     private var downX = 0f
@@ -60,16 +69,34 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
     private var mouseMiddleDown = false
 
     init {
-        holder.addCallback(this)
         isFocusable = true
         isFocusableInTouchMode = true
+        isClickable = true
         keepScreenOn = true
+        clipChildren = true
+        addView(desktopSurface, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        val cw = (24 * resources.displayMetrics.density).toInt().coerceAtLeast(18)
+        val ch = (30 * resources.displayMetrics.density).toInt().coerceAtLeast(22)
+        addView(cursor, LayoutParams(cw, ch))
+        cursor.visibility = View.GONE
+        desktopSurface.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                nativeAttach(holder.surface)
+            }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                nativeAttach(holder.surface)
+            }
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                nativeDetach()
+            }
+        })
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         active = this
         requestFocus()
+        updateCursorOverlay()
     }
 
     override fun onDetachedFromWindow() {
@@ -79,23 +106,26 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
         super.onDetachedFromWindow()
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
-        requestFocus()
-        nativeAttach(holder.surface)
-        nativeSetCursorVisible(pointerMode == PointerMode.TRACKPAD)
-    }
-
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        nativeAttach(holder.surface)
-    }
-
-    override fun surfaceDestroyed(holder: SurfaceHolder) = nativeDetach()
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean = true
 
     fun setPointerMode(mode: PointerMode) {
         if (pointerMode == mode) return
         releaseButtons()
         pointerMode = mode
-        nativeSetCursorVisible(mode == PointerMode.TRACKPAD)
+        cursor.visibility = if (mode == PointerMode.TRACKPAD) View.VISIBLE else View.GONE
+        updateCursorOverlay()
+    }
+
+    private fun updateCursorOverlay() {
+        if (cursor.visibility != View.VISIBLE || width <= 0 || height <= 0) return
+        cursor.translationX = (cursorX / GUEST_W * width).coerceIn(0f, (width - cursor.measuredWidth).coerceAtLeast(0).toFloat())
+        cursor.translationY = (cursorY / GUEST_H * height).coerceIn(0f, (height - cursor.measuredHeight).coerceAtLeast(0).toFloat())
+    }
+
+    private fun moveLocalCursor(ix: Int, iy: Int) {
+        cursorX = (cursorX + ix).coerceIn(0f, GUEST_W - 1f)
+        cursorY = (cursorY + iy).coerceIn(0f, GUEST_H - 1f)
+        updateCursorOverlay()
     }
 
     fun showKeyboard() {
@@ -125,8 +155,8 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
     private fun moveTrackpad(dx: Float, dy: Float) {
         if (abs(dx) + abs(dy) < 0.05f) return
         val (sx, sy) = accelerated(dx, dy)
-        VesselInputClient.relative(sx, sy)
-        nativeCursorRelative(sx, sy)
+        val (ix, iy) = VesselInputClient.relative(sx, sy)
+        if (ix != 0 || iy != 0) moveLocalCursor(ix, iy)
     }
 
     private fun updatePhysicalButtons(e: MotionEvent) {
@@ -151,6 +181,7 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
     override fun onTouchEvent(e: MotionEvent): Boolean {
         requestFocus()
         if ((e.source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
+            cursor.visibility = View.VISIBLE
             updatePhysicalButtons(e)
             val dx = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
             val dy = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
@@ -160,10 +191,10 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
 
         when (pointerMode) {
             PointerMode.DIRECT -> {
+                cursor.visibility = View.GONE
                 val nx = (e.x / width.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
                 val ny = (e.y / height.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
-                nativeSetCursorVisible(false)
-                nativeCursorAbsolute(nx, ny)
+                cursorX = nx * (GUEST_W - 1f); cursorY = ny * (GUEST_H - 1f)
                 when (e.actionMasked) {
                     MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> VesselInputClient.absolute(nx, ny, true)
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> VesselInputClient.absolute(nx, ny, false)
@@ -171,7 +202,8 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
             }
             PointerMode.TRACKPAD -> when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    nativeSetCursorVisible(true)
+                    cursor.visibility = View.VISIBLE
+                    updateCursorOverlay()
                     lastX = e.x; lastY = e.y; downX = e.x; downY = e.y
                     downAt = SystemClock.uptimeMillis(); moved = false; twoFingerMoved = false
                     if (downAt - lastTapAt in 1..320) {
@@ -232,7 +264,7 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
 
     override fun onGenericMotionEvent(e: MotionEvent): Boolean {
         if ((e.source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
-            nativeSetCursorVisible(true)
+            cursor.visibility = View.VISIBLE
             updatePhysicalButtons(e)
             if (e.action == MotionEvent.ACTION_HOVER_MOVE || e.action == MotionEvent.ACTION_MOVE) {
                 val dx = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
@@ -292,5 +324,18 @@ class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder
         KeyEvent.KEYCODE_ALT_LEFT -> 56; KeyEvent.KEYCODE_SPACE -> 57; KeyEvent.KEYCODE_F1 -> 59; KeyEvent.KEYCODE_F2 -> 60; KeyEvent.KEYCODE_F3 -> 61; KeyEvent.KEYCODE_F4 -> 62; KeyEvent.KEYCODE_F5 -> 63; KeyEvent.KEYCODE_F6 -> 64; KeyEvent.KEYCODE_F7 -> 65; KeyEvent.KEYCODE_F8 -> 66; KeyEvent.KEYCODE_F9 -> 67; KeyEvent.KEYCODE_F10 -> 68; KeyEvent.KEYCODE_F11 -> 87; KeyEvent.KEYCODE_F12 -> 88
         KeyEvent.KEYCODE_HOME -> 102; KeyEvent.KEYCODE_DPAD_UP -> 103; KeyEvent.KEYCODE_PAGE_UP -> 104; KeyEvent.KEYCODE_DPAD_LEFT -> 105; KeyEvent.KEYCODE_DPAD_RIGHT -> 106; KeyEvent.KEYCODE_MOVE_END -> 107; KeyEvent.KEYCODE_DPAD_DOWN -> 108; KeyEvent.KEYCODE_PAGE_DOWN -> 109; KeyEvent.KEYCODE_INSERT -> 110; KeyEvent.KEYCODE_FORWARD_DEL -> 111; KeyEvent.KEYCODE_CTRL_RIGHT -> 97; KeyEvent.KEYCODE_ALT_RIGHT -> 100; KeyEvent.KEYCODE_META_LEFT -> 125; KeyEvent.KEYCODE_META_RIGHT -> 126
         else -> 0
+    }
+
+    private class CursorView(context: Context) : View(context) {
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.FILL }
+        private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(24,24,24); style = Paint.Style.STROKE; strokeWidth = resources.displayMetrics.density * 1.8f }
+        private val path = Path()
+        init { setLayerType(LAYER_TYPE_HARDWARE, null) }
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val w = width.toFloat(); val h = height.toFloat()
+            path.reset(); path.moveTo(w*.08f,h*.04f); path.lineTo(w*.08f,h*.78f); path.lineTo(w*.30f,h*.59f); path.lineTo(w*.46f,h*.94f); path.lineTo(w*.62f,h*.85f); path.lineTo(w*.47f,h*.53f); path.lineTo(w*.79f,h*.52f); path.close()
+            canvas.drawPath(path, fill); canvas.drawPath(path, stroke)
+        }
     }
 }
