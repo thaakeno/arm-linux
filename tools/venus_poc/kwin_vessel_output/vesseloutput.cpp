@@ -63,11 +63,10 @@ class VesselOutputEffect final : public Effect
 public:
     VesselOutputEffect()
     {
-        // Do not touch EGL here. KWin can construct effects before the compositor
-        // has a current EGL context. With Zink/Venus that early query can force
-        // Vulkan object creation during compositor bring-up and race teardown.
-        // Initialize the export path lazily from postPaintScreen(), where KWin's
-        // OpenGL context is guaranteed to be current.
+        // Do not touch EGL here. KWin can construct/check effects before the
+        // compositor has made its OpenGL context current. Querying EGL in that
+        // phase is unsafe on the Zink/Venus stack. Prime one repaint only; the
+        // first postPaintScreen() is the first point where we probe EGL.
         effects->addRepaintFull();
     }
 
@@ -81,7 +80,9 @@ public:
 
     static bool supported()
     {
-        // Extension probing is deferred until a current EGL context exists.
+        // Keep capability detection side-effect free. In particular, do not call
+        // eglGetCurrentDisplay()/eglQueryString() here: KWin invokes supported()
+        // while effects are being loaded, which may precede a current context.
         return effects->isOpenGLCompositing();
     }
 
@@ -89,6 +90,9 @@ public:
     {
         effects->postPaintScreen();
         if (!ensureExport()) {
+            // Startup can race both compositor context creation and the relay
+            // socket. Retry until the first export succeeds, then become entirely
+            // damage-driven.
             effects->addRepaintFull();
             return;
         }
@@ -96,6 +100,9 @@ public:
         glBindTexture(GL_TEXTURE_2D, m_texture);
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, m_width, m_height);
         glBindTexture(GL_TEXTURE_2D, 0);
+
+        // Correctness-first producer completion. Pixels stay on the GPU. The
+        // expensive wait now only happens for frames KWin actually paints.
         glFinish();
 
         FrameMessage msg{};
@@ -116,7 +123,6 @@ public:
 
 private:
     EGLDisplay m_display = EGL_NO_DISPLAY;
-    bool m_eglReady = false;
     PFNEGLCREATEIMAGEKHRPROC m_createImage = nullptr;
     PFNEGLDESTROYIMAGEKHRPROC m_destroyImage = nullptr;
     PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC m_exportQuery = nullptr;
@@ -132,31 +138,39 @@ private:
     uint64_t m_modifier = 0;
     uint64_t m_serial = 0;
 
-    bool ensureEglReady()
+    bool initEglExport()
     {
-        if (m_eglReady) {
-            return true;
-        }
         if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
             return false;
         }
-        m_display = eglGetCurrentDisplay();
-        if (m_display == EGL_NO_DISPLAY) {
+
+        const EGLDisplay display = eglGetCurrentDisplay();
+        if (display == EGL_NO_DISPLAY) {
             return false;
         }
+
+        if (m_display != EGL_NO_DISPLAY && m_display != display) {
+            destroyExport();
+            m_createImage = nullptr;
+            m_destroyImage = nullptr;
+            m_exportQuery = nullptr;
+            m_export = nullptr;
+        }
+        m_display = display;
+
         const char *extensions = eglQueryString(m_display, EGL_EXTENSIONS);
         if (!extensions || std::strstr(extensions, "EGL_MESA_image_dma_buf_export") == nullptr) {
             return false;
         }
-        m_createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
-        m_destroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
-        m_exportQuery = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC>(eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
-        m_export = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(eglGetProcAddress("eglExportDMABUFImageMESA"));
-        if (!m_createImage || !m_destroyImage || !m_exportQuery || !m_export) {
-            return false;
+
+        if (!m_createImage) {
+            m_createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
+            m_destroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
+            m_exportQuery = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC>(eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
+            m_export = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(eglGetProcAddress("eglExportDMABUFImageMESA"));
         }
-        m_eglReady = true;
-        return true;
+
+        return m_createImage && m_destroyImage && m_exportQuery && m_export;
     }
 
     bool connectSocket()
@@ -214,15 +228,13 @@ private:
     void destroyExport()
     {
         if (m_image != EGL_NO_IMAGE_KHR) {
-            if (m_destroyImage && m_display != EGL_NO_DISPLAY && eglGetCurrentContext() != EGL_NO_CONTEXT) {
+            if (m_destroyImage && m_display != EGL_NO_DISPLAY) {
                 m_destroyImage(m_display, m_image);
             }
             m_image = EGL_NO_IMAGE_KHR;
         }
         if (m_texture) {
-            if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
-                glDeleteTextures(1, &m_texture);
-            }
+            glDeleteTextures(1, &m_texture);
             m_texture = 0;
         }
         m_width = m_height = 0;
@@ -230,9 +242,10 @@ private:
 
     bool ensureExport()
     {
-        if (!ensureEglReady()) {
+        if (!initEglExport()) {
             return false;
         }
+
         const QSize size = effects->virtualScreenSize();
         if (size.isEmpty()) {
             return false;
@@ -303,6 +316,8 @@ private:
     }
 };
 
+// Debian 12 ships KWin 5.27, where this macro takes four arguments:
+// effect class, metadata JSON, supported body, enabled-by-default body.
 KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED(VesselOutputEffect,
                                       "vesseloutput.json",
                                       return VesselOutputEffect::supported();,
