@@ -17,7 +17,7 @@
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="Bounce Quest"
+        android:label="Vessel"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:windowSoftInputMode="adjustResize"
@@ -40,6 +40,17 @@
             android:name=".BounceQuestActivity"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
             android:screenOrientation="sensorLandscape"
+            android:exported="false" />
+
+        <activity
+            android:name=".NativeCubeActivity"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
+            android:screenOrientation="sensorLandscape"
+            android:exported="false" />
+
+        <activity
+            android:name=".VesselActivity"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -47,7 +58,6 @@
             </intent-filter>
         </activity>
 
-        <activity android:name=".VesselActivity" android:exported="false" />
         <activity android:name=".MainActivity" android:exported="false" />
     </application>
 </manifest>
