@@ -66,7 +66,7 @@ jobs:
           python3 -m py_compile tools/venus_poc/apply_vessel_playground.py
           python3 tools/venus_poc/apply_vessel_playground.py
 
-      - name: Validate playground renderer
+      - name: Validate playground patch
         run: |
           set -euxo pipefail
           grep -F 'VESSEL PLAYGROUND  //  v1.0' app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
@@ -76,9 +76,8 @@ jobs:
           grep -F 'const int LEAVES=0' app/src/main/cpp/shaders/native_studio_v7.vert
           test -s app/src/main/res/raw/impact_metal.ogg
           test -s app/src/main/res/raw/impact_soft.ogg
-          GLSLC="$ANDROID_HOME/ndk/29.0.14206865/shader-tools/linux-x86_64/glslc"
-          "$GLSLC" --target-env=vulkan1.2 -fshader-stage=frag app/src/main/cpp/shaders/native_studio_v7_rt.frag -o /tmp/playground-rt.spv
-          "$GLSLC" --target-env=vulkan1.2 -fshader-stage=vert app/src/main/cpp/shaders/native_studio_v7.vert -o /tmp/playground.vert.spv
+          # Shader fragments are assembled by the project's native build; they are
+          # not standalone GLSL translation units, so let Gradle/CMake validate them.
 
       - name: Build APK
         run: bash ./gradlew assembleDebug testDebugUnitTest lintDebug --no-daemon --no-configuration-cache
