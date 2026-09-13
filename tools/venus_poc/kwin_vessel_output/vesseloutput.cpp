@@ -273,8 +273,9 @@ private:
     }
 };
 
-KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED(VesselOutputFactory,
-                                      VesselOutputEffect,
+// Debian 12 ships KWin 5.27, where this macro takes four arguments:
+// effect class, metadata JSON, supported body, enabled-by-default body.
+KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED(VesselOutputEffect,
                                       "vesseloutput.json",
                                       return VesselOutputEffect::supported();,
                                       return true;)
