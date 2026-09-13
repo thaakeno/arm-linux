@@ -20,7 +20,7 @@ class TermuxUmlController(private val context: Context) {
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = -1
-        const val REQUIRED_PROTOCOL = 28
+        const val REQUIRED_PROTOCOL = 29
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
         private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
@@ -40,7 +40,7 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) switching to protocol 28 Android Surface runtime"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) switching to protocol 29 direct Lorie X11 runtime"
               set -e
 
               DAEMON_RE='^([^ ]*/)?python(3)?[[:space:]]+[^ ]*/vessel_runtime_daemon(_v[0-9]+)?\.py([[:space:]].*)?${'$'}'
@@ -57,6 +57,7 @@ class TermuxUmlController(private val context: Context) {
                 [ -z "${'$'}REMAINING" ] || kill -KILL ${'$'}REMAINING 2>/dev/null || true
               fi
 
+              pkill -f 'com\.termux\.x11\.CmdEntryPoint' 2>/dev/null || true
               echo "[vessel-launch] refreshing app/vessel-final runtime worktree"
               cd ~/venus-poc
               git fetch origin app/vessel-final
@@ -68,12 +69,13 @@ class TermuxUmlController(private val context: Context) {
                 git -C ~/vessel-poc-runtime clean -ffd
               fi
 
-              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v28.py
+              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v29.py
               export VESSEL_POC_DIR=~/vessel-poc-runtime
               export VESSEL_MEM_MB=8192
               export ENABLE_X11=0
-              echo "[vessel-launch] exec protocol 28 daemon"
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v28.py
+              export VESSEL_ANDROID_PACKAGE=${'$'}(if [ "${BuildConfig.LOCAL_TEST}" = "true" ]; then echo com.example.dreamlinux.localvessel; else echo com.example.dreamlinux; fi)
+              echo "[vessel-launch] exec protocol 29 daemon"
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v29.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
@@ -102,7 +104,7 @@ class TermuxUmlController(private val context: Context) {
 
     private fun isNativeProtocol(obj: JSONObject): Boolean =
         obj.optInt("protocolVersion", 0) == REQUIRED_PROTOCOL &&
-            obj.optString("displayTransport") == "android-surface-v1" &&
+            obj.optString("displayTransport") == "lorie-direct-x11-v1" &&
             obj.optInt("vncPort", -1) == -1
 
     private fun requireOk(action: String, obj: JSONObject): JSONObject {
@@ -111,7 +113,7 @@ class TermuxUmlController(private val context: Context) {
             throw IllegalStateException(reason)
         }
         if (!isNativeProtocol(obj)) {
-            throw IllegalStateException("$action returned a stale/non-native Vessel runtime")
+            throw IllegalStateException("$action returned a stale/non-direct Vessel runtime")
         }
         return obj
     }
@@ -132,7 +134,7 @@ class TermuxUmlController(private val context: Context) {
                 if (isNativeProtocol(status)) return@withContext status
             } catch (t: Throwable) { last = t }
         }
-        throw IllegalStateException("Vessel protocol 28 native runtime did not start. In Termux run: cat ~/vessel-daemon.log", last)
+        throw IllegalStateException("Vessel protocol 29 direct-X runtime did not start. In Termux run: cat ~/vessel-daemon.log", last)
     }
 
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
@@ -141,7 +143,7 @@ class TermuxUmlController(private val context: Context) {
         status
     }
     suspend fun start(): JSONObject = withContext(Dispatchers.IO) { ensureDaemon(); requireOk("Start Debian", requestBlocking(JSONObject().put("action", "start").put("timeout", 80), 95_000)) }
-    suspend fun stop(): JSONObject = withContext(Dispatchers.IO) { runCatching { requestBlocking(JSONObject().put("action", "stop"), 12_000) }.getOrElse { JSONObject().put("ok", true).put("protocolVersion", REQUIRED_PROTOCOL).put("displayTransport", "android-surface-v1").put("vncPort", -1).put("running", false).put("guestReady", false).put("desktopReady", false) } }
+    suspend fun stop(): JSONObject = withContext(Dispatchers.IO) { runCatching { requestBlocking(JSONObject().put("action", "stop"), 12_000) }.getOrElse { JSONObject().put("ok", true).put("protocolVersion", REQUIRED_PROTOCOL).put("displayTransport", "lorie-direct-x11-v1").put("vncPort", -1).put("running", false).put("guestReady", false).put("desktopReady", false) } }
     suspend fun startDesktop(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) { ensureDaemon(); requireOk("Start Plasma", requestBlocking(JSONObject().put("action", "desktop").put("width", width).put("height", height).put("dpi", dpi), 22 * 60 * 1_000)) }
     suspend fun guest(command: String, timeoutSeconds: Int = 45): JSONObject = withContext(Dispatchers.IO) { ensureDaemon(); requireOk("Guest command", requestBlocking(JSONObject().put("action", "guest").put("command", command).put("timeout", timeoutSeconds), (timeoutSeconds + 10) * 1_000)) }
     suspend fun desktopAction(name: String): JSONObject = withContext(Dispatchers.IO) { ensureDaemon(); requireOk("Desktop action", requestBlocking(JSONObject().put("action", "desktopAction").put("name", name), 12_000)) }

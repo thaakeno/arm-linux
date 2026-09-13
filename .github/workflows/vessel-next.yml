@@ -15,10 +15,12 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          submodules: recursive
       - uses: actions/setup-java@v5
         with:
           java-version: '17'
@@ -28,32 +30,22 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
-      - name: Verify Linux-only native desktop tree
+      - name: Verify direct X11 desktop architecture
         run: |
           set -euxo pipefail
           test ! -e app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
           ! find app/src/main -type f | grep -E 'BounceQuest|native_vulkan_studio|native_cube\.(vert|frag)'
-          ! find tools/venus_poc -maxdepth 1 -type f | grep -E 'apply_v1[123].*(showcase|playground|postfix)'
-          python3 -m py_compile \
-            tools/venus_poc/vessel_runtime_daemon_v24.py \
-            tools/venus_poc/vessel_runtime_daemon_v25.py \
-            tools/venus_poc/vessel_runtime_daemon_v26.py \
-            tools/venus_poc/vessel_runtime_daemon_v27.py \
-            tools/venus_poc/vessel_runtime_daemon_v28.py \
-            tools/venus_poc/guest_frame_streamer.py \
-            tools/venus_poc/guest_input_agent_v25.py
-          gcc -O2 -Wall -Wextra -std=gnu11 -o /tmp/vessel-frame-streamer-test tools/venus_poc/guest_frame_streamer_v2.c
+          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v29.py
           bash -n tools/venus_poc/run_venus_uml.sh
-          grep -F 'REQUIRED_PROTOCOL = 28' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v28.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'android-surface-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'VESSEL_MEM_MB="${VESSEL_MEM_MB:-8192}"' tools/venus_poc/run_venus_uml.sh
-          grep -F 'mem="${VESSEL_MEM_MB}M"' tools/venus_poc/run_venus_uml.sh
-          ! grep -F '5901' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          ! grep -F 'GLSurfaceView' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -F 'SurfaceView' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -F 'ANativeWindow' app/src/main/cpp/native_desktop_surface.cpp
-          grep -F '_ensure_input_agent()' tools/venus_poc/vessel_runtime_daemon_v28.py
+          grep -F 'REQUIRED_PROTOCOL = 29' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v29.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'lorie-direct-x11-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'implementation(project(":lorie"))' app/build.gradle.kts
+          grep -F 'third_party/termux-x11' .gitmodules
+          test ! -e app/src/main/cpp/native_desktop_surface.cpp
+          test ! -e tools/venus_poc/guest_frame_streamer_v2.c
+          test ! -e tools/venus_poc/guest_frame_streamer.py
+          ! grep -R -E 'VFRM2|FRAME_STREAMER|ANativeWindow_lock|Xtigervnc|vncserver' app/src/main tools/venus_poc/vessel_runtime_daemon_v29.py
       - name: Build, test and lint
         run: |
           chmod +x gradlew

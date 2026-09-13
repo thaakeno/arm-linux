@@ -31,3 +31,9 @@ plugins {
 
 rootProject.name = "Dream Linux"
 include(":app")
+include(":lorie")
+include(":shell-loader")
+include(":shell-loader:stub")
+project(":lorie").projectDir = file("third_party/termux-x11/lorie")
+project(":shell-loader").projectDir = file("third_party/empty-shell-loader")
+project(":shell-loader:stub").projectDir = file("third_party/termux-x11/shell-loader/stub")
