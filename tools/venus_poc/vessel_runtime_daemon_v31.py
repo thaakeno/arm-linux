@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""Protocol 31: Plasma/KWin -> Zink(OpenGL-on-Vulkan) -> Venus -> dma-buf -> Android Vulkan/AHB.
+"""Protocol 31: Plasma/KWin -> Zink(OpenGL-on-Vulkan) -> Venus -> dma-buf -> Android Vulkan.
 
-This keeps the mature KWin/Plasma desktop semantics but removes the software
-llvmpipe compositor path. KWin's OpenGL compositor is translated by Mesa Zink
-into Vulkan, Venus serializes Vulkan to the Android host, and the existing
-zero-pixel-copy dma-buf/AHardwareBuffer bridge presents through SurfaceFlinger.
-
-The runtime deliberately has no software-renderer fallback: if Zink/Venus is not
-active, startup fails with a stage-specific diagnostic instead of silently
-burning CPU and battery in llvmpipe.
+The runtime deliberately has no software-renderer or screenshot fallback. KWin
+renders through Zink/Venus, vesseloutput exports the composited image as dma-buf,
+and Android imports that object directly into the Vulkan presenter.
 """
 from __future__ import annotations
 
@@ -88,11 +83,15 @@ class WaylandRuntime(base.Runtime):
                     self.rpc_file = f
                     self.rpc_condition.notify_all()
                 if old_file is not None:
-                    try: old_file.close()
-                    except Exception: pass
+                    try:
+                        old_file.close()
+                    except Exception:
+                        pass
                 if old is not None:
-                    try: old.close()
-                    except Exception: pass
+                    try:
+                        old.close()
+                    except Exception:
+                        pass
                 self.append(f"GUEST_COMMAND_AGENT_READY pid={obj.get('pid', '?')}\n")
             except Exception as exc:
                 self.append(f"GUEST_COMMAND_AGENT_ACCEPT_ERROR {exc}\n")
@@ -104,11 +103,15 @@ class WaylandRuntime(base.Runtime):
             self.rpc_socket = None
             self.rpc_file = None
         if f is not None:
-            try: f.close()
-            except Exception: pass
+            try:
+                f.close()
+            except Exception:
+                pass
         if sock is not None:
-            try: sock.close()
-            except Exception: pass
+            try:
+                sock.close()
+            except Exception:
+                pass
 
     def _wait_rpc(self, timeout: float = 15.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -210,12 +213,12 @@ class WaylandRuntime(base.Runtime):
         self.set_progress("venus", 45, "Starting bidirectional Venus dma-buf relay")
         self._rpc_upload(relay, "/root/guest_relay_wayland.py")
         check = self.guest(
-            "test -s /opt/mesa-venus-26.2.2/lib/aarch64-linux-gnu/libvulkan_virtio.so && "
-            "test -f /root/virtio-wsi-test.json && test -e /dev/umshm && echo VENUS_READY",
+            "test -f /root/virtio-wsi-test.json && test -e /dev/umshm && "
+            "test -e /usr/lib/aarch64-linux-gnu/libvulkan_virtio.so && echo VENUS_READY",
             20,
         )
         if "VENUS_READY" not in check:
-            raise RuntimeError("Mesa Venus 26.2.2 or /dev/umshm is unavailable")
+            raise RuntimeError("matched system Mesa Venus or /dev/umshm is unavailable")
 
         self.guest("pkill -f '^python3 /root/guest_relay_wayland.py( |$)' 2>/dev/null || true", 10)
         self.guest("rm -f /tmp/.venus_test /tmp/vessel-frame-export.sock /tmp/vessel-guest-wayland.log", 10)
@@ -279,11 +282,13 @@ class WaylandRuntime(base.Runtime):
             "cmake -S /root/vessel-kwin-output -B /root/vessel-kwin-output/build -G Ninja "
             "-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr && "
             "cmake --build /root/vessel-kwin-output/build -j4 && "
-            "cmake --install /root/vessel-kwin-output/build && ldconfig && echo VESSEL_EFFECT_INSTALLED",
+            "cmake --install /root/vessel-kwin-output/build && ldconfig && "
+            "find /usr -type f -name 'vesseloutput.so' -print -quit | grep -q vesseloutput.so && "
+            "echo VESSEL_EFFECT_INSTALLED",
             900,
         )
         if "VESSEL_EFFECT_INSTALLED" not in build:
-            raise RuntimeError("Vessel dma-buf output bridge build did not complete")
+            raise RuntimeError("Vessel dma-buf output bridge build/install did not complete")
 
     @staticmethod
     def _gpu_env() -> str:
@@ -312,7 +317,7 @@ chmod 700 /tmp/vessel-runtime
 {env}
 mkdir -p /root/.config
 kwriteconfig5 --file /root/.config/kwinrc --group Plugins --key vesseloutputEnabled true
-rm -f /tmp/vessel-kwin.log /tmp/vessel-effect-session.log /tmp/vessel-effect-loaded /tmp/vessel-kwin.pid
+rm -f /tmp/vessel-kwin.log /tmp/vessel-output-effect.log /tmp/vessel-effect-loaded /tmp/vessel-kwin.pid
 kwin_wayland --virtual --width {width} --height {height} --scale 1 --socket wayland-0 >/tmp/vessel-kwin.log 2>&1 &
 KWIN_PID=$!
 echo "$KWIN_PID" >/tmp/vessel-kwin.pid
@@ -323,56 +328,34 @@ for i in $(seq 1 200); do
 done
 [ -S /tmp/vessel-runtime/wayland-0 ] || exit 42
 
-# Do the first effect load from inside the exact dbus-run-session that owns
-# KWin. This avoids guessing a session bus address from /proc and fixes the
-# repeated ServiceUnknown loop seen on physical devices.
-KWIN_DBUS_READY=0
-for i in $(seq 1 200); do
-  kill -0 "$KWIN_PID" 2>/dev/null || {{ wait "$KWIN_PID" || true; exit 43; }}
-  if dbus-send --session --print-reply --reply-timeout=500 \
-      --dest=org.freedesktop.DBus /org/freedesktop/DBus \
-      org.freedesktop.DBus.NameHasOwner string:org.kde.KWin 2>/dev/null \
-      | grep -q 'boolean true'; then
-    KWIN_DBUS_READY=1
-    break
-  fi
-  sleep .1
-done
-if [ "$KWIN_DBUS_READY" != 1 ]; then
-  echo 'KWin Wayland socket exists but org.kde.KWin never appeared on its session bus' >>/tmp/vessel-effect-session.log
-  exit 44
-fi
+# KWin 5.27's virtual backend can run without exporting org.kde.KWin on DBus.
+# Do not gate compositor startup on that optional control service. The effect is
+# enabled before KWin starts and is verified from its own constructor log.
+export WAYLAND_DISPLAY=wayland-0
+kded5 >/tmp/vessel-kded.log 2>&1 &
+plasmashell >/tmp/vessel-plasmashell.log 2>&1 &
 
 EFFECT_READY=0
-for i in $(seq 1 120); do
+for i in $(seq 1 150); do
   kill -0 "$KWIN_PID" 2>/dev/null || {{ wait "$KWIN_PID" || true; exit 43; }}
-  dbus-send --session --print-reply --reply-timeout=700 \
-    --dest=org.kde.KWin /Effects org.kde.kwin.Effects.loadEffect string:vesseloutput \
-    >>/tmp/vessel-effect-session.log 2>&1 || true
-  if dbus-send --session --print-reply --reply-timeout=700 \
-      --dest=org.kde.KWin /Effects org.kde.kwin.Effects.isEffectLoaded string:vesseloutput \
-      2>>/tmp/vessel-effect-session.log | grep -q 'boolean true'; then
+  if grep -q '^effect-constructed$' /tmp/vessel-output-effect.log 2>/dev/null; then
     EFFECT_READY=1
     touch /tmp/vessel-effect-loaded
-    echo 'vesseloutput ACTIVE on KWin session bus' >>/tmp/vessel-effect-session.log
     break
   fi
   sleep .1
 done
 if [ "$EFFECT_READY" != 1 ]; then
-  echo 'KWin DBus is alive but vesseloutput could not be loaded' >>/tmp/vessel-effect-session.log
+  echo 'vesseloutput did not auto-load from [Plugins] vesseloutputEnabled=true' >>/tmp/vessel-kwin.log
+  find /usr -type f -name 'vesseloutput.so' -print >>/tmp/vessel-kwin.log 2>&1 || true
   exit 45
 fi
-
-export WAYLAND_DISPLAY=wayland-0
-kded5 >/tmp/vessel-kded.log 2>&1 &
-plasmashell >/tmp/vessel-plasmashell.log 2>&1 &
 wait "$KWIN_PID"
 '''
         encoded = base64.b64encode(wrapper.encode()).decode()
         launch = (
             "rm -rf /tmp/vessel-runtime; mkdir -p /tmp/vessel-runtime; chmod 700 /tmp/vessel-runtime; "
-            "rm -f /tmp/vessel-wayland.log /tmp/vessel-kwin.log /tmp/vessel-effect-session.log "
+            "rm -f /tmp/vessel-wayland.log /tmp/vessel-kwin.log /tmp/vessel-output-effect.log "
             "/tmp/vessel-effect-loaded /tmp/vessel-kded.log /tmp/vessel-plasmashell.log "
             "/tmp/vessel-wayland.pid /tmp/vessel-kwin.pid; "
             f"printf '%s' {shlex.quote(encoded)} | base64 -d > /root/vessel-wayland-session.sh; "
@@ -385,26 +368,31 @@ wait "$KWIN_PID"
         self.guest(launch, 30)
 
         self.set_progress("wayland_present", 92, "Connecting KWin GPU output to Android display")
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + 35
         startup_grace = time.monotonic() + 8.0
         relay_log = base.RUNTIME / "vessel-relay.log"
         software_checked = False
+        effect_seen = False
         while time.monotonic() < deadline:
             out = self.guest(
                 "pgrep -x kwin_wayland >/dev/null && pgrep -x plasmashell >/dev/null && "
-                "test -S /tmp/vessel-runtime/wayland-0 && test -S /tmp/vessel-frame-export.sock && "
+                "test -S /tmp/vessel-runtime/wayland-0 && "
                 "test -f /tmp/vessel-effect-loaded && echo WAYLAND_SESSION_READY || true; "
+                "tail -40 /tmp/vessel-output-effect.log 2>/dev/null || true; "
                 "grep -m1 -E 'OpenGL renderer string:|Driver:' /tmp/vessel-kwin.log /tmp/vessel-wayland.log 2>/dev/null || true",
                 12,
             )
             low = out.lower()
             if "llvmpipe" in low or "softpipe" in low:
                 raise RuntimeError(
-                    "GPU compositor rejected: KWin fell back to software rendering. "
-                    "Protocol 31 has no llvmpipe fallback.\n" + out[-3000:]
+                    "GPU compositor rejected: KWin fell back to software rendering. Protocol 31 has no software fallback.\n" + out[-4000:]
                 )
             if "zink" in low:
                 software_checked = True
+            if "effect-constructed" in out:
+                effect_seen = True
+                if "dmabuf-export-ready" not in out:
+                    self.set_progress("wayland_present", 94, "KWin is live; exporting GPU surface to Android")
 
             relay = ""
             try:
@@ -421,6 +409,21 @@ wait "$KWIN_PID"
                 self.set_progress("desktop_ready", 100, detail)
                 return self.state()
 
+            # The effect logs stable, stage-specific export failures. Once the
+            # compositor/effect is up, do not waste 90 seconds on an impossible
+            # EGL export path; surface the exact reason quickly.
+            persistent = (
+                "egl_mesa_image_dma_buf_export-missing",
+                "egl-dmabuf-export-entrypoint-missing",
+                "multi-plane-export-unsupported",
+                "eglcreateimagekhr-failed",
+                "eglexportdmabufimagequerymesa-failed",
+                "eglexportdmabufimagemesa-failed",
+            )
+            if effect_seen and any(reason in low for reason in persistent):
+                if time.monotonic() >= startup_grace:
+                    break
+
             health = self.guest(
                 "if [ -s /tmp/vessel-kwin.pid ]; then "
                 "KP=$(cat /tmp/vessel-kwin.pid); "
@@ -433,20 +436,20 @@ wait "$KWIN_PID"
             )
             if time.monotonic() >= startup_grace and ("SESSION_DEAD" in health or "KWIN_DEAD" in health):
                 break
-            time.sleep(.30)
+            time.sleep(.25)
 
         guest_tail = self.guest(
             "echo '=== session ==='; "
             "if [ -s /tmp/vessel-wayland.pid ]; then echo session_pid=$(cat /tmp/vessel-wayland.pid); fi; "
             "if [ -s /tmp/vessel-kwin.pid ]; then echo kwin_pid=$(cat /tmp/vessel-kwin.pid); "
             "cat /proc/$(cat /tmp/vessel-kwin.pid)/status 2>/dev/null | grep -E '^(Name|State|Pid|PPid):' || true; fi; "
+            "echo '=== vesseloutput effect ==='; tail -220 /tmp/vessel-output-effect.log 2>/dev/null || true; "
             "echo '=== kwin ==='; tail -260 /tmp/vessel-kwin.log 2>/dev/null || true; "
             "echo '=== session log ==='; tail -160 /tmp/vessel-wayland.log 2>/dev/null || true; "
-            "echo '=== in-session effect load ==='; tail -160 /tmp/vessel-effect-session.log 2>/dev/null || true; "
-            "echo '=== supervisor effect loader ==='; tail -80 /tmp/vessel-effect-loader.log 2>/dev/null || true; "
             "echo '=== kded ==='; tail -100 /tmp/vessel-kded.log 2>/dev/null || true; "
             "echo '=== plasmashell ==='; tail -120 /tmp/vessel-plasmashell.log 2>/dev/null || true; "
             "echo '=== relay ==='; tail -160 /tmp/vessel-guest-wayland.log 2>/dev/null || true; "
+            "echo '=== plugin ==='; find /usr -type f -name 'vesseloutput.so' -print 2>/dev/null || true; "
             "echo '=== sockets ==='; ls -l /tmp/.venus_test /tmp/vessel-runtime/wayland-0 /tmp/vessel-frame-export.sock 2>&1 || true",
             15,
         )
@@ -456,8 +459,8 @@ wait "$KWIN_PID"
         except Exception:
             pass
         raise RuntimeError(
-            "Zink/Venus Wayland presentation did not become ready:\n" +
-            guest_tail[-18000:] + "\n=== host relay ===\n" + host_tail
+            "Native KWin GPU presentation did not become ready:\n" +
+            guest_tail[-20000:] + "\n=== host relay ===\n" + host_tail
         )
 
     def desktop_action(self, name: str) -> dict[str, Any]:
@@ -497,20 +500,30 @@ runtime = WaylandRuntime()
 def handle(req: dict[str, Any]) -> dict[str, Any]:
     action = str(req.get("action", "status"))
     try:
-        if action == "status": return runtime.state()
-        if action == "start": return runtime.start(float(req.get("timeout", 100)))
-        if action == "stop": return runtime.stop()
-        if action == "desktop": return runtime.ensure_desktop(int(req.get("width", 1600)), int(req.get("height", 720)), int(req.get("dpi", 120)))
-        if action == "desktopAction": return runtime.desktop_action(str(req.get("name", "")))
+        if action == "status":
+            return runtime.state()
+        if action == "start":
+            return runtime.start(float(req.get("timeout", 100)))
+        if action == "stop":
+            return runtime.stop()
+        if action == "desktop":
+            return runtime.ensure_desktop(int(req.get("width", 1600)), int(req.get("height", 720)), int(req.get("dpi", 120)))
+        if action == "desktopAction":
+            return runtime.desktop_action(str(req.get("name", "")))
         if action == "guest":
             output = runtime.guest(str(req.get("command", "")), float(req.get("timeout", 45)))
-            result = runtime.state(); result["output"] = output; return result
-        if action == "logs": return runtime.state()
+            result = runtime.state()
+            result["output"] = output
+            return result
+        if action == "logs":
+            return runtime.state()
         return {"ok": False, "error": f"unknown action: {action}"}
     except Exception as exc:
         runtime.last_error = f"{type(exc).__name__}: {exc}"
         runtime.set_progress("error", -1, runtime.last_error)
-        result = runtime.state(); result.update({"ok": False, "error": runtime.last_error}); return result
+        result = runtime.state()
+        result.update({"ok": False, "error": runtime.last_error})
+        return result
 
 
 def serve_connection(conn: socket.socket) -> None:
@@ -520,20 +533,24 @@ def serve_connection(conn: socket.socket) -> None:
             data = b""
             while b"\n" not in data and len(data) < 1_000_000:
                 chunk = conn.recv(65536)
-                if not chunk: break
+                if not chunk:
+                    break
                 data += chunk
             req = json.loads(data.split(b"\n", 1)[0].decode() or "{}")
             reply = handle(req)
         except Exception as exc:
             reply = {"ok": False, "error": f"protocol: {type(exc).__name__}: {exc}"}
-        try: conn.sendall((json.dumps(reply, separators=(",", ":")) + "\n").encode())
-        except OSError: pass
+        try:
+            conn.sendall((json.dumps(reply, separators=(",", ":")) + "\n").encode())
+        except OSError:
+            pass
 
 
 def serve() -> None:
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 47631)); srv.listen(16)
+    srv.bind(("127.0.0.1", 47631))
+    srv.listen(16)
     print(f"[vessel-daemon] protocol={PROTOCOL_VERSION} display={DISPLAY_TRANSPORT}", flush=True)
     while True:
         conn, _ = srv.accept()
@@ -541,5 +558,7 @@ def serve() -> None:
 
 
 if __name__ == "__main__":
-    try: serve()
-    finally: runtime.stop()
+    try:
+        serve()
+    finally:
+        runtime.stop()
