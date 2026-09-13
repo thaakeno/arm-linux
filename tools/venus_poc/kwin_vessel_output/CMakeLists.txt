@@ -14,9 +14,10 @@ include(KDEClangFormat)
 
 find_package(Qt5 5.15 REQUIRED COMPONENTS Core)
 find_package(KF5 REQUIRED COMPONENTS CoreAddons)
-# KWinEffects' imported targets expose XCB::XCB in their link interface on
-# Debian/KWin 5.x. Resolve that imported target before loading KWinEffects.
+# KWinEffects' imported targets expose XCB::XCB and epoxy::epoxy in their
+# Debian/KWin 5.x link interfaces. Resolve those imported targets first.
 find_package(XCB REQUIRED COMPONENTS XCB)
+find_package(epoxy REQUIRED)
 find_package(KWinEffects REQUIRED)
 find_package(OpenGL REQUIRED COMPONENTS EGL)
 
@@ -30,6 +31,7 @@ target_link_libraries(vesseloutput PRIVATE
     KWinEffects::kwineffects
     KWinEffects::kwinglutils
     XCB::XCB
+    epoxy::epoxy
     Qt5::Core
     OpenGL::EGL
 )
