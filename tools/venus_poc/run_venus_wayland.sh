@@ -18,10 +18,14 @@ PROCESS_WORKER_MARKER="${PROCESS_WORKER_MARKER:-$PREFIX/opt/virglrenderer-androi
 start_virgl() {
   rm -f "$VENUS_SOCK"
   cd "$POC_DIR"
+  # Vessel has exactly one active guest-side Venus connection. Keep vtest
+  # in-process and single-client; the render server itself uses process workers.
+  # This avoids the Android thread-worker/shared-teardown race that produced
+  # pthread_mutex_lock-on-destroyed-mutex during KWin context teardown.
   virgl_test_server_android \
     --angle-vulkan \
     --venus \
-    --multi-clients \
+    --no-fork \
     --socket-path "$VENUS_SOCK" \
     >>"$HOST_LOG" 2>&1 &
   VIRGL_PID=$!
@@ -40,15 +44,16 @@ start_virgl() {
 }
 
 venus_watchdog() {
+  local pid="$1"
   while :; do
     sleep .25
-    [ -n "${VIRGL_PID:-}" ] || continue
-    if ! kill -0 "$VIRGL_PID" 2>/dev/null || [ ! -S "$VENUS_SOCK" ]; then
+    if ! kill -0 "$pid" 2>/dev/null || [ ! -S "$VENUS_SOCK" ]; then
       echo "[venus-wayland] Venus listener disappeared; recycling virglrenderer" >>"$HOST_LOG"
-      kill "$VIRGL_PID" 2>/dev/null || true
-      wait "$VIRGL_PID" 2>/dev/null || true
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
       start_virgl || exit 1
-      echo "[venus-wayland] Venus listener restored pid=$VIRGL_PID" >>"$HOST_LOG"
+      pid="$VIRGL_PID"
+      echo "[venus-wayland] Venus listener restored pid=$pid" >>"$HOST_LOG"
     fi
   done
 }
@@ -103,7 +108,7 @@ rm -f "$VENUS_SOCK" "$UMSHM_SOCK"
 : >"$HOST_LOG"
 
 start_virgl
-venus_watchdog &
+venus_watchdog "$VIRGL_PID" &
 WATCHDOG_PID=$!
 
 python3 "$POC_DIR/tools/venus_poc/host_relay_wayland.py" \
