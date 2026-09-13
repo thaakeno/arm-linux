@@ -28,15 +28,22 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
-      - name: Verify Linux-only tree
+      - name: Verify Linux-only native desktop tree
         run: |
           set -euxo pipefail
           test ! -e app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
           ! find app/src/main -type f | grep -E 'BounceQuest|native_vulkan_studio|native_cube\.(vert|frag)'
           ! find tools/venus_poc -maxdepth 1 -type f | grep -E 'apply_v1[123].*(showcase|playground|postfix)'
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v23.py tools/venus_poc/guest_input_agent.py
+          python3 -m py_compile \
+            tools/venus_poc/vessel_runtime_daemon_v24.py \
+            tools/venus_poc/vessel_runtime_daemon_v25.py \
+            tools/venus_poc/guest_frame_streamer.py \
+            tools/venus_poc/guest_input_agent_v25.py
           bash -n tools/venus_poc/run_venus_uml.sh
-          grep -F 'REQUIRED_PROTOCOL = 23' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'REQUIRED_PROTOCOL = 25' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v25.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          ! grep -F 'Socket().use' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt | grep -F '5901'
+          grep -F 'FRAME_PORT = 47636' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
       - name: Build, test and lint
         run: |
           chmod +x gradlew
