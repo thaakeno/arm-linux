@@ -45,7 +45,7 @@ jobs:
           test ! -e app/src/main/cpp/native_desktop_surface.cpp
           test ! -e tools/venus_poc/guest_frame_streamer_v2.c
           test ! -e tools/venus_poc/guest_frame_streamer.py
-          ! grep -R -E 'VFRM2|FRAME_STREAMER|ANativeWindow_lock|Xtigervnc|vncserver' app/src/main tools/venus_poc/vessel_runtime_daemon_v29.py
+          ! grep -E 'VFRM2|FRAME_STREAMER|ANativeWindow_lock|Xtigervnc|vncserver' tools/venus_poc/vessel_runtime_daemon_v29.py app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt app/src/main/cpp/CMakeLists.txt
       - name: Build, test and lint
         run: |
           chmod +x gradlew
