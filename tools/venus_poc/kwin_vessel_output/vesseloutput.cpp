@@ -72,6 +72,9 @@ public:
             eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
         m_export = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(
             eglGetProcAddress("eglExportDMABUFImageMESA"));
+        // Prime a first frame. After that, KWin drives us from real scene damage.
+        // Never self-schedule a permanent full-screen repaint loop: that burns GPU
+        // time and battery while the desktop is idle.
         effects->addRepaintFull();
     }
 
@@ -94,6 +97,8 @@ public:
     {
         effects->postPaintScreen();
         if (!ensureExport()) {
+            // Startup can race the relay socket. Retry until the first export
+            // succeeds, then become entirely damage-driven.
             effects->addRepaintFull();
             return;
         }
@@ -102,8 +107,8 @@ public:
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, m_width, m_height);
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        // Correctness-first explicit producer completion. No pixels touch the CPU;
-        // this is replaced by sync_fd handoff once all deployed Mesa builds expose it.
+        // Correctness-first producer completion. Pixels stay on the GPU. The
+        // expensive wait now only happens for frames KWin actually paints.
         glFinish();
 
         FrameMessage msg{};
@@ -118,8 +123,8 @@ public:
         msg.serial = ++m_serial;
         if (!sendFrame(msg, -1)) {
             disconnectSocket();
+            effects->addRepaintFull();
         }
-        effects->addRepaintFull();
     }
 
 private:
