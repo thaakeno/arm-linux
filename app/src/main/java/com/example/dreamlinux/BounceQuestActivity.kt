@@ -52,7 +52,7 @@ class BounceQuestActivity : Activity() {
             val h=handle
             if(h!=0L){
                 nativeInput(h,moveX,moveZ)
-                coinText.text="✦  ${nativeCoins(h)} / 10"
+                coinText.text="●  ${nativeCoins(h)} / 10"
                 val sec=nativeElapsed(h).coerceAtLeast(0f)
                 val min=(sec/60).toInt(); val s=sec-min*60
                 timerText.text=String.format(Locale.US,"◴  %02d:%05.2f",min,s)
@@ -70,7 +70,7 @@ class BounceQuestActivity : Activity() {
         System.loadLibrary("bounce_quest")
         initAudio()
         surface=SurfaceView(this).apply{holder.setFormat(PixelFormat.OPAQUE)}
-        val root=FrameLayout(this).apply{setBackgroundColor(Color.rgb(80,150,220))}
+        val root=FrameLayout(this).apply{setBackgroundColor(Color.rgb(96,170,228))}
         root.addView(surface,FrameLayout.LayoutParams(-1,-1))
         buildHud(root)
         buildWinOverlay(root)
@@ -87,44 +87,63 @@ class BounceQuestActivity : Activity() {
     }
 
     private fun buildHud(root:FrameLayout){
-        val topPad=dp(14)
-        val logo=label("B●unce\nQuest",34f,true).apply{
-            gravity=Gravity.CENTER;setTextColor(Color.WHITE);setShadowLayer(8f,0f,3f,Color.BLACK);background=roundRect(0xB82B3440.toInt(),22)
+        val top=dp(7)
+        val logo=label("Bounce\nQuest\nROLL  ·  BOUNCE  ·  REACH",15f,true).apply{
+            gravity=Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setShadowLayer(4f,0f,2f,Color.BLACK)
+            background=roundRect(0xD725303A.toInt(),12)
+            setLineSpacing(0f,.86f)
         }
-        root.addView(logo,FrameLayout.LayoutParams(dp(300),dp(110),Gravity.TOP or Gravity.LEFT).apply{leftMargin=dp(20);topMargin=topPad})
-        coinText=pill("✦  0 / 10",25f);root.addView(coinText,FrameLayout.LayoutParams(dp(190),dp(72),Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply{topMargin=topPad;leftMargin=-dp(120)})
-        timerText=pill("◴  00:00.00",25f);root.addView(timerText,FrameLayout.LayoutParams(dp(235),dp(72),Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply{topMargin=topPad;leftMargin=dp(330)})
-        sfxText=pill("SFX ON",22f).apply{setOnClickListener{sfx=!sfx;text=if(sfx)"SFX ON" else "SFX OFF"}}
-        root.addView(sfxText,FrameLayout.LayoutParams(dp(185),dp(70),Gravity.TOP or Gravity.RIGHT).apply{rightMargin=dp(115);topMargin=topPad})
-        pauseText=pill("Ⅱ",30f).apply{setOnClickListener{paused=!paused;text=if(paused)"▶" else "Ⅱ";if(handle!=0L)nativePause(handle,paused)}}
-        root.addView(pauseText,FrameLayout.LayoutParams(dp(78),dp(70),Gravity.TOP or Gravity.RIGHT).apply{rightMargin=dp(22);topMargin=topPad})
+        root.addView(logo,FrameLayout.LayoutParams(dp(118),dp(64),Gravity.TOP or Gravity.LEFT).apply{leftMargin=dp(8);topMargin=top})
 
-        joyBase=FrameLayout(this).apply{background=circle(0x38FFFFFF,0x88FFFFFF.toInt(),4)}
-        joyKnob=View(this).apply{background=circle(0xDDEAF0F5.toInt(),Color.WHITE,3)}
-        joyBase.addView(joyKnob,FrameLayout.LayoutParams(dp(92),dp(92),Gravity.CENTER))
-        root.addView(joyBase,FrameLayout.LayoutParams(dp(220),dp(220),Gravity.BOTTOM or Gravity.LEFT).apply{leftMargin=dp(36);bottomMargin=dp(35)})
+        coinText=pill("●  0 / 10",14f)
+        root.addView(coinText,FrameLayout.LayoutParams(dp(82),dp(38),Gravity.TOP or Gravity.LEFT).apply{leftMargin=dp(135);topMargin=top})
+
+        timerText=pill("◴  00:00.00",14f)
+        root.addView(timerText,FrameLayout.LayoutParams(dp(102),dp(38),Gravity.TOP or Gravity.LEFT).apply{leftMargin=dp(225);topMargin=top})
+
+        sfxText=pill("◖  SFX ON",13f).apply{
+            setOnClickListener{sfx=!sfx;text=if(sfx)"◖  SFX ON" else "◖  SFX OFF"}
+        }
+        root.addView(sfxText,FrameLayout.LayoutParams(dp(88),dp(38),Gravity.TOP or Gravity.RIGHT).apply{rightMargin=dp(52);topMargin=top})
+
+        pauseText=pill("Ⅱ",18f).apply{
+            setOnClickListener{paused=!paused;text=if(paused)"▶" else "Ⅱ";if(handle!=0L)nativePause(handle,paused)}
+        }
+        root.addView(pauseText,FrameLayout.LayoutParams(dp(38),dp(38),Gravity.TOP or Gravity.RIGHT).apply{rightMargin=dp(8);topMargin=top})
+
+        joyBase=FrameLayout(this).apply{background=circle(0x20FFFFFF,0xA8FFFFFF.toInt(),2)}
+        joyKnob=View(this).apply{background=circle(0xE7EEF2F5.toInt(),Color.WHITE,2)}
+        joyBase.addView(joyKnob,FrameLayout.LayoutParams(dp(38),dp(38),Gravity.CENTER))
+        root.addView(joyBase,FrameLayout.LayoutParams(dp(94),dp(94),Gravity.BOTTOM or Gravity.LEFT).apply{leftMargin=dp(11);bottomMargin=dp(10)})
         joyBase.setOnTouchListener{_,e->joystick(e)}
 
-        val dash=roundButton("➤\nDASH",92,0xA62A3440.toInt()).apply{setOnTouchListener{_,e->if(e.action==MotionEvent.ACTION_DOWN){if(handle!=0L)nativeDash(handle);true}else true}}
-        root.addView(dash,FrameLayout.LayoutParams(dp(135),dp(135),Gravity.BOTTOM or Gravity.RIGHT).apply{rightMargin=dp(190);bottomMargin=dp(62)})
-        val jump=roundButton("⌃\nJUMP",115,0xE6E93732.toInt()).apply{setOnTouchListener{_,e->if(e.action==MotionEvent.ACTION_DOWN){if(handle!=0L)nativeJump(handle);true}else true}}
-        root.addView(jump,FrameLayout.LayoutParams(dp(180),dp(180),Gravity.BOTTOM or Gravity.RIGHT).apply{rightMargin=dp(28);bottomMargin=dp(35)})
+        val dash=roundButton("➤\nDASH",0xA827313B.toInt(),12f).apply{
+            setOnTouchListener{_,e->if(e.action==MotionEvent.ACTION_DOWN){if(handle!=0L)nativeDash(handle);true}else true}
+        }
+        root.addView(dash,FrameLayout.LayoutParams(dp(62),dp(62),Gravity.BOTTOM or Gravity.RIGHT).apply{rightMargin=dp(91);bottomMargin=dp(18)})
+
+        val jump=roundButton("⌃\nJUMP",0xEBE93D38.toInt(),15f).apply{
+            setOnTouchListener{_,e->if(e.action==MotionEvent.ACTION_DOWN){if(handle!=0L)nativeJump(handle);true}else true}
+        }
+        root.addView(jump,FrameLayout.LayoutParams(dp(82),dp(82),Gravity.BOTTOM or Gravity.RIGHT).apply{rightMargin=dp(9);bottomMargin=dp(9)})
     }
 
     private fun buildWinOverlay(root:FrameLayout){
         winOverlay=FrameLayout(this).apply{setBackgroundColor(0x9909131E.toInt());visibility=View.GONE}
         val card=LinearLayout(this).apply{
-            orientation=LinearLayout.VERTICAL;gravity=Gravity.CENTER;setPadding(dp(44),dp(34),dp(44),dp(34));background=roundRect(0xF2293542.toInt(),28)
+            orientation=LinearLayout.VERTICAL;gravity=Gravity.CENTER;setPadding(dp(24),dp(20),dp(24),dp(20));background=roundRect(0xF2293542.toInt(),18)
         }
-        val title=label("LEVEL COMPLETE",34f,true).apply{setTextColor(Color.WHITE);gravity=Gravity.CENTER}
-        winTime=label("00:00.00",24f,true).apply{setTextColor(0xFFFFD34E.toInt());gravity=Gravity.CENTER;setPadding(0,dp(12),0,dp(20))}
-        val restart=label("PLAY AGAIN",22f,true).apply{
-            gravity=Gravity.CENTER;setTextColor(Color.WHITE);background=roundRect(0xFFE53B35.toInt(),18);setPadding(dp(32),dp(14),dp(32),dp(14));setOnClickListener{if(handle!=0L)nativeReset(handle);winOverlay.visibility=View.GONE;paused=false;pauseText.text="Ⅱ";if(handle!=0L)nativePause(handle,false)}
+        val title=label("LEVEL COMPLETE",24f,true).apply{setTextColor(Color.WHITE);gravity=Gravity.CENTER}
+        winTime=label("00:00.00",18f,true).apply{setTextColor(0xFFFFD34E.toInt());gravity=Gravity.CENTER;setPadding(0,dp(8),0,dp(12))}
+        val restart=label("PLAY AGAIN",16f,true).apply{
+            gravity=Gravity.CENTER;setTextColor(Color.WHITE);background=roundRect(0xFFE53B35.toInt(),12);setPadding(dp(18),dp(10),dp(18),dp(10));setOnClickListener{if(handle!=0L)nativeReset(handle);winOverlay.visibility=View.GONE;paused=false;pauseText.text="Ⅱ";if(handle!=0L)nativePause(handle,false)}
         }
-        card.addView(title,LinearLayout.LayoutParams(dp(360),dp(60)))
-        card.addView(winTime,LinearLayout.LayoutParams(dp(360),dp(64)))
-        card.addView(restart,LinearLayout.LayoutParams(dp(260),dp(60)))
-        winOverlay.addView(card,FrameLayout.LayoutParams(dp(470),dp(260),Gravity.CENTER))
+        card.addView(title,LinearLayout.LayoutParams(dp(250),dp(42)))
+        card.addView(winTime,LinearLayout.LayoutParams(dp(250),dp(48)))
+        card.addView(restart,LinearLayout.LayoutParams(dp(170),dp(44)))
+        winOverlay.addView(card,FrameLayout.LayoutParams(dp(310),dp(190),Gravity.CENTER))
         root.addView(winOverlay,FrameLayout.LayoutParams(-1,-1))
     }
 
@@ -160,9 +179,9 @@ class BounceQuestActivity : Activity() {
     }
     private fun play(name:String,vol:Float,rate:Float){soundIds[name]?.let{sounds.play(it,vol,vol,2,0,rate.coerceIn(.5f,2f))}}
 
-    private fun pill(text:String,size:Float)=label(text,size,true).apply{gravity=Gravity.CENTER;background=roundRect(0xCC25303B.toInt(),18);setTextColor(Color.WHITE)}
+    private fun pill(text:String,size:Float)=label(text,size,true).apply{gravity=Gravity.CENTER;background=roundRect(0xD428343F.toInt(),11);setTextColor(Color.WHITE);setShadowLayer(2f,0f,1f,0x99000000.toInt())}
     private fun label(t:String,size:Float,bold:Boolean)=TextView(this).apply{text=t;textSize=size;typeface=if(bold)Typeface.DEFAULT_BOLD else Typeface.DEFAULT;includeFontPadding=false}
-    private fun roundButton(t:String,size:Int,bg:Int)=label(t,size/4f,true).apply{gravity=Gravity.CENTER;setTextColor(Color.WHITE);background=circle(bg,Color.WHITE,4);setShadowLayer(5f,0f,2f,Color.BLACK)}
+    private fun roundButton(t:String,bg:Int,size:Float)=label(t,size,true).apply{gravity=Gravity.CENTER;setTextColor(Color.WHITE);background=circle(bg,Color.WHITE,2);setShadowLayer(3f,0f,1f,Color.BLACK)}
     private fun roundRect(fill:Int,radius:Int)=GradientDrawable().apply{shape=GradientDrawable.RECTANGLE;setColor(fill);cornerRadius=dp(radius).toFloat()}
     private fun circle(fill:Int,stroke:Int,strokeWidth:Int)=GradientDrawable().apply{shape=GradientDrawable.OVAL;setColor(fill);setStroke(dp(strokeWidth),stroke)}
     private fun dp(v:Int)=(v*resources.displayMetrics.density+.5f).toInt()
