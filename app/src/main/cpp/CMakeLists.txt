@@ -15,5 +15,8 @@ target_link_libraries(dev1_payload PRIVATE dl)
 # then presents to the app Surface/SurfaceFlinger. No CPU framebuffer path.
 add_library(vessel_wayland_presenter SHARED vessel_wayland_presenter.cpp)
 target_compile_features(vessel_wayland_presenter PRIVATE cxx_std_17)
-target_compile_options(vessel_wayland_presenter PRIVATE -Wall -Wextra -Werror)
+# Android Vulkan declarations in vulkan.h are gated on VK_USE_PLATFORM_ANDROID_KHR.
+target_compile_definitions(vessel_wayland_presenter PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
+# Vulkan structs intentionally initialize sType and then fill only the fields used.
+target_compile_options(vessel_wayland_presenter PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
 target_link_libraries(vessel_wayland_presenter PRIVATE android log vulkan)
