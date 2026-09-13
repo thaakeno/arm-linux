@@ -58,7 +58,7 @@ class WaylandRuntime(base.Runtime):
         state.update({
             "protocolVersion": PROTOCOL_VERSION,
             "displayTransport": DISPLAY_TRANSPORT,
-            "presenter": "Android Vulkan + triple AHardwareBuffer + SurfaceFlinger",
+            "presenter": "Android Vulkan triple-flight + SurfaceFlinger",
             "inputMode": "direct-evdev",
             "vncPort": -1,
             "commandTransport": "reverse-json-rpc-v1" if rpc else "bootstrap-pty",
@@ -328,6 +328,7 @@ wait "$KWIN_PID"
         encoded = base64.b64encode(wrapper.encode()).decode()
         launch = (
             "rm -rf /tmp/vessel-runtime; mkdir -p /tmp/vessel-runtime; chmod 700 /tmp/vessel-runtime; "
+            "rm -f /tmp/vessel-wayland.log /tmp/vessel-kded.log /tmp/vessel-plasmashell.log /tmp/vessel-wayland.pid; "
             f"printf '%s' {shlex.quote(encoded)} | base64 -d > /root/vessel-wayland-session.sh; "
             "chmod +x /root/vessel-wayland-session.sh; "
             "pkill -x plasmashell 2>/dev/null || true; pkill -x kwin_wayland 2>/dev/null || true; "
@@ -339,6 +340,7 @@ wait "$KWIN_PID"
 
         self.set_progress("wayland_present", 92, "Waiting for first Adreno-backed shared frame")
         deadline = time.monotonic() + 90
+        startup_grace = time.monotonic() + 8.0
         relay_log = base.RUNTIME / "vessel-relay.log"
         software_checked = False
         while time.monotonic() < deadline:
@@ -366,23 +368,32 @@ wait "$KWIN_PID"
             if "WAYLAND_SESSION_READY" in out and "Android imported KWin object" in relay:
                 self.desktop_ready = True
                 self.last_error = ""
-                self.append("ZINK_VENUS_GPU_READY\nKWIN_WAYLAND_READY\nVENUS_DMABUF_TO_AHB_READY\n")
-                detail = "Plasma is live through Zink/Venus -> Vulkan/AHardwareBuffer"
+                self.append("ZINK_VENUS_GPU_READY\nKWIN_WAYLAND_READY\nVENUS_DMABUF_TO_ANDROID_READY\n")
+                detail = "Plasma is live through Zink/Venus -> Android Vulkan/SurfaceFlinger"
                 if not software_checked:
                     detail += " (GPU path verified by dma-buf import)"
                 self.set_progress("desktop_ready", 100, detail)
                 return self.state()
 
-            dead = self.guest("pgrep -x kwin_wayland >/dev/null || echo KWIN_DEAD", 8)
-            if "KWIN_DEAD" in dead:
+            health = self.guest(
+                "if pgrep -x kwin_wayland >/dev/null; then echo KWIN_ALIVE; "
+                "elif [ -s /tmp/vessel-wayland.pid ] && kill -0 $(cat /tmp/vessel-wayland.pid) 2>/dev/null; "
+                "then echo SESSION_STARTING; else echo SESSION_DEAD; fi",
+                8,
+            )
+            if time.monotonic() >= startup_grace and "SESSION_DEAD" in health:
                 break
             time.sleep(.30)
 
         guest_tail = self.guest(
-            "echo '=== kwin ==='; tail -220 /tmp/vessel-wayland.log 2>/dev/null || true; "
+            "echo '=== session ==='; "
+            "if [ -s /tmp/vessel-wayland.pid ]; then echo pid=$(cat /tmp/vessel-wayland.pid); ps -o pid,ppid,stat,comm,args -p $(cat /tmp/vessel-wayland.pid) 2>/dev/null || true; fi; "
+            "echo '=== kwin/session log ==='; tail -260 /tmp/vessel-wayland.log 2>/dev/null || true; "
+            "echo '=== effect loader ==='; tail -160 /tmp/vessel-effect-loader.log 2>/dev/null || true; "
             "echo '=== kded ==='; tail -100 /tmp/vessel-kded.log 2>/dev/null || true; "
             "echo '=== plasmashell ==='; tail -120 /tmp/vessel-plasmashell.log 2>/dev/null || true; "
             "echo '=== relay ==='; tail -160 /tmp/vessel-guest-wayland.log 2>/dev/null || true; "
+            "echo '=== processes ==='; ps -ef | grep -E 'kwin_wayland|plasmashell|dbus-run-session|dbus-daemon' | grep -v grep || true; "
             "echo '=== sockets ==='; ls -l /tmp/.venus_test /tmp/vessel-runtime/wayland-0 /tmp/vessel-frame-export.sock 2>&1 || true",
             15,
         )
@@ -393,7 +404,7 @@ wait "$KWIN_PID"
             pass
         raise RuntimeError(
             "Zink/Venus Wayland presentation did not become ready:\n" +
-            guest_tail[-13000:] + "\n=== host relay ===\n" + host_tail
+            guest_tail[-15000:] + "\n=== host relay ===\n" + host_tail
         )
 
     def desktop_action(self, name: str) -> dict[str, Any]:
