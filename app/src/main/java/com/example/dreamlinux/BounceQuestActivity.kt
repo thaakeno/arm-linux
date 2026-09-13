@@ -89,7 +89,7 @@ class BounceQuestActivity : Activity() {
     private fun buildHud(root:FrameLayout){
         val topPad=dp(14)
         val logo=label("B●unce\nQuest",34f,true).apply{
-            gravity=Gravity.CENTER;setTextColor(Color.WHITE);setShadowLayer(8f,0f,3f,Color.BLACK);background=roundRect(0xB82B3440.toInt(),22f)
+            gravity=Gravity.CENTER;setTextColor(Color.WHITE);setShadowLayer(8f,0f,3f,Color.BLACK);background=roundRect(0xB82B3440.toInt(),22)
         }
         root.addView(logo,FrameLayout.LayoutParams(dp(300),dp(110),Gravity.TOP or Gravity.LEFT).apply{leftMargin=dp(20);topMargin=topPad})
         coinText=pill("✦  0 / 10",25f);root.addView(coinText,FrameLayout.LayoutParams(dp(190),dp(72),Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply{topMargin=topPad;leftMargin=-dp(120)})
