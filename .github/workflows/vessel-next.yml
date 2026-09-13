@@ -39,18 +39,21 @@ jobs:
             tools/venus_poc/vessel_runtime_daemon_v25.py \
             tools/venus_poc/vessel_runtime_daemon_v26.py \
             tools/venus_poc/vessel_runtime_daemon_v27.py \
+            tools/venus_poc/vessel_runtime_daemon_v28.py \
             tools/venus_poc/guest_frame_streamer.py \
             tools/venus_poc/guest_input_agent_v25.py
           gcc -O2 -Wall -Wextra -std=gnu11 -o /tmp/vessel-frame-streamer-test tools/venus_poc/guest_frame_streamer_v2.c
           bash -n tools/venus_poc/run_venus_uml.sh
-          grep -F 'REQUIRED_PROTOCOL = 27' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v27.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'native-frame-v2' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'REQUIRED_PROTOCOL = 28' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v28.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'android-surface-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'VESSEL_MEM_MB="${VESSEL_MEM_MB:-8192}"' tools/venus_poc/run_venus_uml.sh
           grep -F 'mem="${VESSEL_MEM_MB}M"' tools/venus_poc/run_venus_uml.sh
           ! grep -F '5901' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -F 'FRAME_PORT = 47636' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -F 'GLSurfaceView' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          ! grep -F 'GLSurfaceView' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -F 'SurfaceView' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -F 'ANativeWindow' app/src/main/cpp/native_desktop_surface.cpp
+          grep -F '_ensure_input_agent()' tools/venus_poc/vessel_runtime_daemon_v28.py
       - name: Build, test and lint
         run: |
           chmod +x gradlew
