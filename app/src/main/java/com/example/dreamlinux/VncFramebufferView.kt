@@ -5,252 +5,370 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.RectF
+import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.SystemClock
 import android.text.InputType
-import android.view.HapticFeedbackConstants
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.View
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import org.json.JSONObject
 import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
-import java.io.DataInputStream
-import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.util.Arrays
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.Inflater
 import kotlin.math.abs
-import kotlin.math.hypot
-import kotlin.math.roundToInt
 
-/** Embedded RFB 3.8 display with phone-grade direct touch and precision trackpad input. */
-class VncFramebufferView(context: Context) : View(context) {
-    companion object { @Volatile var active: VncFramebufferView? = null }
+/**
+ * Compatibility class name retained so the existing Compose screen does not
+ * need a migration commit. This implementation contains no VNC/RFB code.
+ *
+ * Display: Vessel VFRM1 -> Android SurfaceView.
+ * Input: Android touch/trackpad/keyboard -> protocol-25 native input bridge.
+ */
+class VncFramebufferView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
     enum class PointerMode { DIRECT, TRACKPAD }
 
-    private val running = AtomicBoolean(false)
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val wireLock = Any()
-    private val density = resources.displayMetrics.density
-    private val slop = 7f * density
-    private val displayRect = RectF()
-
-    @Volatile private var bitmap: Bitmap? = null
-    @Volatile private var fbWidth = 0
-    @Volatile private var fbHeight = 0
-    @Volatile private var mode = PointerMode.DIRECT
-    @Volatile private var message = "Waiting for Plasma desktop"
-    private var socket: Socket? = null
-    private var output: DataOutputStream? = null
-    private var cursorX = 0
-    private var cursorY = 0
-    private var downX = 0f
-    private var downY = 0f
-    private var lastX = 0f
-    private var lastY = 0f
-    private var downAt = 0L
-    private var moved = false
-    private var dragging = false
-    private var maxPointers = 1
-    private var twoLastX = 0f
-    private var twoLastY = 0f
-    private var scrollX = 0f
-    private var scrollY = 0f
-    private var physicalMask = 0
-
-    init {
-        isFocusable = true; isFocusableInTouchMode = true; isClickable = true; keepScreenOn = true
-        setLayerType(LAYER_TYPE_HARDWARE, null)
-        active = this
-        start()
+    companion object {
+        @Volatile var active: VncFramebufferView? = null
+        private const val FRAME_PORT = 47636
     }
 
-    fun setPointerMode(value: PointerMode) {
-        if (mode == value) return
-        releaseButtons(); mode = value
-        performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+    private val running = AtomicBoolean(false)
+    private var readerThread: Thread? = null
+    private var bitmap: Bitmap? = null
+    private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+    private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+        setShadowLayer(5f, 0f, 1f, Color.BLACK)
+    }
+    private var pointerMode = PointerMode.DIRECT
+    private var lastX = 0f
+    private var lastY = 0f
+    private var downX = 0f
+    private var downY = 0f
+    private var downAt = 0L
+    private var moved = false
+    private var twoFingerY = 0f
+    private var mouseLeftDown = false
+    private var localCursorX = 0f
+    private var localCursorY = 0f
+    @Volatile private var lastFrameSeq = 0L
+
+    init {
+        holder.addCallback(this)
+        holder.setFormat(PixelFormat.RGBA_8888)
+        setZOrderOnTop(false)
+        isFocusable = true
+        isFocusableInTouchMode = true
+        keepScreenOn = true
+        setLayerType(LAYER_TYPE_HARDWARE, null)
+    }
+
+    fun setPointerMode(mode: PointerMode) {
+        pointerMode = mode
+        if (localCursorX == 0f && width > 0) {
+            localCursorX = width / 2f
+            localCursorY = height / 2f
+        }
+        drawLatest()
     }
 
     fun showKeyboard() {
         requestFocus()
-        post { (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(this, InputMethodManager.SHOW_IMPLICIT) }
+        (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
     }
 
-    fun tapKey(keysym: Int) { sendKey(true, keysym); sendKey(false, keysym) }
-
-    override fun onCheckIsTextEditor() = true
-    override fun onCreateInputConnection(attrs: EditorInfo): InputConnection {
-        attrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        attrs.imeOptions = EditorInfo.IME_ACTION_NONE
-        return object : BaseInputConnection(this, false) {
-            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                text?.forEach { ch -> val ks = if (ch.code < 0x100) ch.code else 0x01000000 or ch.code; sendKey(true, ks); sendKey(false, ks) }
-                return true
-            }
-            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-                repeat(beforeLength.coerceAtLeast(1)) { tapKey(0xff08) }
-                return true
-            }
+    fun tapKey(keysym: Int) {
+        val code = when (keysym) {
+            0xff1b -> 1      // Esc
+            0xff09 -> 15     // Tab
+            0xffe3 -> 29     // Ctrl
+            0xffe9 -> 56     // Alt
+            0xffeb -> 125    // Super
+            0xff51 -> 105    // Left
+            0xff52 -> 103    // Up
+            0xff53 -> 106    // Right
+            0xff54 -> 108    // Down
+            else -> 0
+        }
+        if (code != 0) {
+            VesselInputClient.key(code, true)
+            VesselInputClient.key(code, false)
         }
     }
 
-    override fun onDetachedFromWindow() { stop(); if (active === this) active = null; super.onDetachedFromWindow() }
-
-    private fun start() {
-        if (!running.compareAndSet(false, true)) return
-        Thread({ loop() }, "vessel-rfb").apply { isDaemon = true; start() }
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        active = this
+        requestFocus()
+        localCursorX = width / 2f
+        localCursorY = height / 2f
+        startFrameReader()
     }
-    private fun stop() { running.set(false); releaseButtons(); runCatching { socket?.close() }; socket = null }
 
-    private fun loop() {
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        if (localCursorX <= 0f || localCursorY <= 0f) {
+            localCursorX = width / 2f
+            localCursorY = height / 2f
+        }
+        drawLatest()
+    }
+
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        running.set(false)
+        readerThread?.interrupt()
+        readerThread = null
+        if (active === this) active = null
+    }
+
+    private fun startFrameReader() {
+        if (!running.compareAndSet(false, true)) return
+        readerThread = Thread({ frameLoop() }, "vessel-native-frame-client").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun frameLoop() {
         var backoff = 80L
         while (running.get()) {
             try {
-                Socket().use { s ->
-                    s.tcpNoDelay = true; s.keepAlive = true; s.receiveBufferSize = 2 * 1024 * 1024
-                    s.connect(InetSocketAddress("127.0.0.1", TermuxUmlController.VNC_PORT), 2200)
-                    socket = s; backoff = 80L; session(s)
+                Socket().use { socket ->
+                    socket.tcpNoDelay = true
+                    socket.keepAlive = true
+                    socket.connect(InetSocketAddress("127.0.0.1", FRAME_PORT), 1500)
+                    val input = BufferedInputStream(socket.getInputStream(), 256 * 1024)
+                    val headerLine = readLine(input, 4096)
+                    val header = JSONObject(headerLine)
+                    require(header.optString("magic") == "VFRM1") { "Unexpected Vessel frame protocol" }
+                    val frameWidth = header.getInt("width")
+                    val frameHeight = header.getInt("height")
+                    require(frameWidth in 320..7680 && frameHeight in 240..4320)
+                    require(header.optString("format") == "BGRA8888")
+                    backoff = 80L
+
+                    while (running.get()) {
+                        val prefix = readExact(input, 16)
+                        val meta = ByteBuffer.wrap(prefix).order(ByteOrder.BIG_ENDIAN)
+                        val seq = meta.long
+                        val compressed = meta.int
+                        val rawSize = meta.int
+                        require(compressed in 1..(32 * 1024 * 1024))
+                        require(rawSize == frameWidth * frameHeight * 4)
+                        val payload = readExact(input, compressed)
+                        val raw = inflate(payload, rawSize)
+                        val target = bitmap?.takeIf { it.width == frameWidth && it.height == frameHeight }
+                            ?: Bitmap.createBitmap(frameWidth, frameHeight, Bitmap.Config.ARGB_8888).also { bitmap = it }
+                        target.copyPixelsFromBuffer(ByteBuffer.wrap(raw))
+                        lastFrameSeq = seq
+                        drawLatest()
+                    }
                 }
-            } catch (t: Throwable) { message = t.message ?: t.javaClass.simpleName; postInvalidate() }
-            finally { socket = null; output = null }
-            if (running.get()) { Thread.sleep(backoff); backoff = (backoff * 2).coerceAtMost(900L) }
+            } catch (_: InterruptedException) {
+                break
+            } catch (_: Throwable) {
+                if (!running.get()) break
+                try { Thread.sleep(backoff) } catch (_: InterruptedException) { break }
+                backoff = (backoff * 2).coerceAtMost(1000L)
+            }
         }
     }
 
-    private fun session(s: Socket) {
-        val input = DataInputStream(BufferedInputStream(s.getInputStream(), 1024 * 1024))
-        val out = DataOutputStream(BufferedOutputStream(s.getOutputStream(), 64 * 1024)); output = out
-        val version = ByteArray(12); input.readFully(version); check(String(version, Charsets.US_ASCII).startsWith("RFB "))
-        synchronized(wireLock) { out.write("RFB 003.008\n".toByteArray()); out.flush() }
-        val n = input.readUnsignedByte(); check(n > 0); val sec = ByteArray(n); input.readFully(sec); check(sec.any { (it.toInt() and 255) == 1 })
-        synchronized(wireLock) { out.writeByte(1); out.flush() }; check(input.readInt() == 0)
-        synchronized(wireLock) { out.writeByte(1); out.flush() }
-        fbWidth = input.readUnsignedShort(); fbHeight = input.readUnsignedShort(); input.skipBytes(16)
-        val nameLen = input.readInt(); if (nameLen in 0..65535) { val name = ByteArray(nameLen); input.readFully(name); message = String(name) }
-        bitmap = Bitmap.createBitmap(fbWidth, fbHeight, Bitmap.Config.ARGB_8888); cursorX = fbWidth / 2; cursorY = fbHeight / 2
-        pixelFormat(out); encodings(out); update(out, false); sendPointer(0, cursorX, cursorY); postInvalidate()
-        while (running.get()) when (input.readUnsignedByte()) {
-            0 -> framebuffer(input, out)
-            2 -> Unit
-            3 -> { input.skipBytes(3); val len = input.readInt(); if (len in 0..1_048_576) input.skipBytes(len) else error("clipboard too large") }
-            else -> error("unsupported RFB server message")
+    private fun drawLatest() {
+        if (!holder.surface.isValid) return
+        val frame = bitmap ?: return
+        var canvas: Canvas? = null
+        try {
+            canvas = holder.lockCanvas()
+            canvas.drawColor(Color.BLACK)
+            // The native desktop is presented directly into the Android surface.
+            // Scale to the actual surface bounds so the old RFB letterbox bars are
+            // impossible; fullscreen landscape naturally remains aspect-correct.
+            canvas.drawBitmap(frame, null, Rect(0, 0, canvas.width, canvas.height), paint)
+            if (pointerMode == PointerMode.TRACKPAD) {
+                val x = localCursorX.coerceIn(0f, canvas.width.toFloat())
+                val y = localCursorY.coerceIn(0f, canvas.height.toFloat())
+                canvas.drawCircle(x, y, 7f, cursorPaint)
+                canvas.drawCircle(x, y, 2.5f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK })
+            }
+        } catch (_: Throwable) {
+        } finally {
+            if (canvas != null) runCatching { holder.unlockCanvasAndPost(canvas) }
         }
     }
 
-    private fun pixelFormat(out: DataOutputStream) = synchronized(wireLock) {
-        out.writeByte(0); out.write(byteArrayOf(0,0,0)); out.writeByte(32); out.writeByte(24); out.writeByte(0); out.writeByte(1)
-        out.writeShort(255); out.writeShort(255); out.writeShort(255); out.writeByte(16); out.writeByte(8); out.writeByte(0); out.write(byteArrayOf(0,0,0)); out.flush()
-    }
-    private fun encodings(out: DataOutputStream) = synchronized(wireLock) { out.writeByte(2); out.writeByte(0); out.writeShort(3); out.writeInt(5); out.writeInt(1); out.writeInt(0); out.flush() }
-    private fun update(out: DataOutputStream, incremental: Boolean) = synchronized(wireLock) { out.writeByte(3); out.writeByte(if (incremental) 1 else 0); out.writeShort(0); out.writeShort(0); out.writeShort(fbWidth); out.writeShort(fbHeight); out.flush() }
-
-    private fun readPixel(input: DataInputStream): Int { val b=input.readUnsignedByte(); val g=input.readUnsignedByte(); val r=input.readUnsignedByte(); input.readUnsignedByte(); return -0x1000000 or (r shl 16) or (g shl 8) or b }
-    private fun raw(input: DataInputStream, bmp: Bitmap, x: Int, y: Int, w: Int, h: Int) {
-        val bytes=ByteArray(w*4); val row=IntArray(w)
-        repeat(h) { yy -> input.readFully(bytes); var p=0; for (xx in 0 until w) { val b=bytes[p++].toInt() and 255; val g=bytes[p++].toInt() and 255; val r=bytes[p++].toInt() and 255; p++; row[xx]=-0x1000000 or (r shl 16) or (g shl 8) or b }; synchronized(bmp) { bmp.setPixels(row,0,w,x,y+yy,w,1) } }
-    }
-    private fun copyRect(input: DataInputStream, bmp: Bitmap, x: Int, y: Int, w: Int, h: Int) { val sx=input.readUnsignedShort(); val sy=input.readUnsignedShort(); val px=IntArray(w*h); synchronized(bmp) { bmp.getPixels(px,0,w,sx,sy,w,h); bmp.setPixels(px,0,w,x,y,w,h) } }
-    private fun hextile(input: DataInputStream, bmp: Bitmap, x: Int, y: Int, w: Int, h: Int) {
-        val tile=IntArray(256); var bg=0; var fg=0; var bgValid=false; var fgValid=false; var ty=0
-        while (ty<h) { val th=minOf(16,h-ty); var tx=0; while(tx<w) { val tw=minOf(16,w-tx); val sub=input.readUnsignedByte()
-            if ((sub and 1)!=0) { raw(input,bmp,x+tx,y+ty,tw,th); bgValid=false; fgValid=false; tx+=16; continue }
-            if ((sub and 2)!=0) { bg=readPixel(input); bgValid=true }; check(bgValid); Arrays.fill(tile,0,tw*th,bg)
-            if ((sub and 4)!=0) { fg=readPixel(input); fgValid=true }
-            if ((sub and 8)!=0) { val coloured=(sub and 16)!=0; repeat(input.readUnsignedByte()) { val c=if(coloured) readPixel(input) else { check(fgValid); fg }; val xy=input.readUnsignedByte(); val wh=input.readUnsignedByte(); val sx=xy ushr 4; val sy=xy and 15; val sw=(wh ushr 4)+1; val sh=(wh and 15)+1; for (yy in sy until sy+sh) Arrays.fill(tile,yy*tw+sx,yy*tw+sx+sw,c) } }
-            synchronized(bmp) { bmp.setPixels(tile,0,tw,x+tx,y+ty,tw,th) }; if ((sub and 16)!=0) fgValid=false; tx+=16
-        }; ty+=16 }
-    }
-    private fun framebuffer(input: DataInputStream, out: DataOutputStream) {
-        input.readUnsignedByte(); val count=input.readUnsignedShort(); val bmp=bitmap ?: return
-        repeat(count) { val x=input.readUnsignedShort(); val y=input.readUnsignedShort(); val w=input.readUnsignedShort(); val h=input.readUnsignedShort(); val enc=input.readInt(); check(x+w<=bmp.width && y+h<=bmp.height); when(enc) { 0->raw(input,bmp,x,y,w,h); 1->copyRect(input,bmp,x,y,w,h); 5->hextile(input,bmp,x,y,w,h); else->error("unexpected RFB encoding $enc") } }
-        postInvalidateOnAnimation(); update(out,true)
+    private fun readLine(input: BufferedInputStream, limit: Int): String {
+        val out = StringBuilder()
+        while (out.length < limit) {
+            val b = input.read()
+            if (b < 0) throw java.io.EOFException("frame stream closed")
+            if (b == '\n'.code) return out.toString()
+            out.append(b.toChar())
+        }
+        error("frame header too large")
     }
 
-    private fun layoutDisplay() {
-        if (fbWidth<=0 || fbHeight<=0 || width<=0 || height<=0) { displayRect.set(0f,0f,width.toFloat(),height.toFloat()); return }
-        val src=fbWidth.toFloat()/fbHeight; val dst=width.toFloat()/height
-        if (dst>src) { val w=height*src; val left=(width-w)/2; displayRect.set(left,0f,left+w,height.toFloat()) }
-        else { val h=width/src; val top=(height-h)/2; displayRect.set(0f,top,width.toFloat(),top+h) }
+    private fun readExact(input: BufferedInputStream, size: Int): ByteArray {
+        val out = ByteArray(size)
+        var offset = 0
+        while (offset < size) {
+            val n = input.read(out, offset, size - offset)
+            if (n < 0) throw java.io.EOFException("frame stream closed")
+            offset += n
+        }
+        return out
     }
-    private fun guestPoint(px: Float, py: Float): Pair<Int,Int> { layoutDisplay(); val x=(((px-displayRect.left)/displayRect.width())*fbWidth).roundToInt().coerceIn(0,(fbWidth-1).coerceAtLeast(0)); val y=(((py-displayRect.top)/displayRect.height())*fbHeight).roundToInt().coerceIn(0,(fbHeight-1).coerceAtLeast(0)); return x to y }
-    override fun onDraw(canvas: Canvas) { canvas.drawColor(Color.BLACK); layoutDisplay(); val bmp=bitmap; if (bmp!=null) synchronized(bmp) { canvas.drawBitmap(bmp,null,displayRect,paint) } else Paint(Paint.ANTI_ALIAS_FLAG).also { it.color=Color.LTGRAY; it.textAlign=Paint.Align.CENTER; it.textSize=14*density; canvas.drawText(message.take(72),width/2f,height/2f,it) } }
 
-    private fun relative(dx: Float, dy: Float, mask: Int) {
-        if (fbWidth<=0 || fbHeight<=0) return
-        val speed=hypot(dx.toDouble(),dy.toDouble()).toFloat(); val gain=1.05f+(speed/30f).coerceAtMost(1.25f)
-        cursorX=(cursorX+dx*gain*fbWidth/950f).roundToInt().coerceIn(0,fbWidth-1); cursorY=(cursorY+dy*gain*fbHeight/720f).roundToInt().coerceIn(0,fbHeight-1); sendPointer(mask,cursorX,cursorY)
+    private fun inflate(payload: ByteArray, rawSize: Int): ByteArray {
+        val inflater = Inflater()
+        return try {
+            inflater.setInput(payload)
+            val out = ByteArray(rawSize)
+            var offset = 0
+            while (!inflater.finished() && offset < rawSize) {
+                val n = inflater.inflate(out, offset, rawSize - offset)
+                if (n == 0) {
+                    if (inflater.needsInput() || inflater.needsDictionary()) break
+                } else offset += n
+            }
+            require(offset == rawSize) { "short Vessel frame: $offset/$rawSize" }
+            out
+        } finally {
+            inflater.end()
+        }
     }
-    private fun click(mask: Int) { sendPointer(mask,cursorX,cursorY); sendPointer(0,cursorX,cursorY); performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
-    private fun scroll(dx: Float, dy: Float) {
-        scrollX+=dx; scrollY+=dy; val step=18*density
-        while(abs(scrollY)>=step) { val mask=if(scrollY<0)8 else 16; sendPointer(mask,cursorX,cursorY); sendPointer(0,cursorX,cursorY); scrollY += if(scrollY<0) step else -step }
-        while(abs(scrollX)>=step) { val mask=if(scrollX<0)32 else 64; sendPointer(mask,cursorX,cursorY); sendPointer(0,cursorX,cursorY); scrollX += if(scrollX<0) step else -step }
-    }
-    private fun centroid(e: MotionEvent): Pair<Float,Float> { var x=0f; var y=0f; repeat(e.pointerCount) { x+=e.getX(it); y+=e.getY(it) }; return x/e.pointerCount to y/e.pointerCount }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        requestFocus(); if (fbWidth<=0 || fbHeight<=0) return true
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> { downX=e.x; downY=e.y; lastX=e.x; lastY=e.y; downAt=SystemClock.uptimeMillis(); moved=false; dragging=false; maxPointers=1; scrollX=0f; scrollY=0f; if(mode==PointerMode.DIRECT) { val p=guestPoint(e.x,e.y); cursorX=p.first; cursorY=p.second; sendPointer(0,cursorX,cursorY) } }
-            MotionEvent.ACTION_POINTER_DOWN -> { maxPointers=maxOf(maxPointers,e.pointerCount); if(e.pointerCount>=2) { val c=centroid(e); twoLastX=c.first; twoLastY=c.second } }
-            MotionEvent.ACTION_MOVE -> {
-                if (mode==PointerMode.DIRECT) {
-                    val p=guestPoint(e.x,e.y); val distance=hypot((e.x-downX).toDouble(),(e.y-downY).toDouble()).toFloat(); if(distance>slop) moved=true
-                    cursorX=p.first; cursorY=p.second
-                    if (moved && !dragging) { dragging=true; sendPointer(1,cursorX,cursorY) } else sendPointer(if(dragging)1 else 0,cursorX,cursorY)
-                } else if (e.pointerCount>=2) {
-                    val c=centroid(e); scroll(c.first-twoLastX,c.second-twoLastY); twoLastX=c.first; twoLastY=c.second; moved=true
-                } else {
-                    val dx=e.x-lastX; val dy=e.y-lastY; if(abs(e.x-downX)+abs(e.y-downY)>slop) moved=true
-                    if(!dragging && moved && SystemClock.uptimeMillis()-downAt>360) { dragging=true; sendPointer(1,cursorX,cursorY) }
-                    relative(dx,dy,if(dragging)1 else 0); lastX=e.x; lastY=e.y
+        requestFocus()
+        val w = width.coerceAtLeast(1).toFloat()
+        val h = height.coerceAtLeast(1).toFloat()
+        when (pointerMode) {
+            PointerMode.DIRECT -> when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> VesselInputClient.absolute(e.x / w, e.y / h, true)
+                MotionEvent.ACTION_MOVE -> VesselInputClient.absolute(e.x / w, e.y / h, true)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> VesselInputClient.absolute(e.x / w, e.y / h, false)
+            }
+            PointerMode.TRACKPAD -> when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    lastX = e.x; lastY = e.y; downX = e.x; downY = e.y
+                    downAt = SystemClock.uptimeMillis(); moved = false
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> if (e.pointerCount == 2) {
+                    twoFingerY = (e.getY(0) + e.getY(1)) * 0.5f
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (e.pointerCount >= 2) {
+                        val y = (e.getY(0) + e.getY(1)) * 0.5f
+                        val dy = y - twoFingerY
+                        if (abs(dy) > 5f) {
+                            VesselInputClient.scroll(0, if (dy < 0) 1 else -1)
+                            twoFingerY = y
+                        }
+                    } else {
+                        val dx = e.x - lastX
+                        val dy = e.y - lastY
+                        if (abs(dx) + abs(dy) > 0.8f) {
+                            val sx = dx * 1.35f
+                            val sy = dy * 1.35f
+                            VesselInputClient.relative(sx, sy)
+                            localCursorX = (localCursorX + sx).coerceIn(0f, w)
+                            localCursorY = (localCursorY + sy).coerceIn(0f, h)
+                            moved = moved || abs(e.x - downX) + abs(e.y - downY) > 8f
+                            drawLatest()
+                        }
+                        lastX = e.x; lastY = e.y
+                    }
+                }
+                MotionEvent.ACTION_UP -> if (!moved && SystemClock.uptimeMillis() - downAt < 280) {
+                    VesselInputClient.button(0x110, true)
+                    VesselInputClient.button(0x110, false)
                 }
             }
-            MotionEvent.ACTION_UP -> {
-                if(mode==PointerMode.DIRECT) { if(dragging) sendPointer(0,cursorX,cursorY) else click(1) }
-                else { if(dragging) sendPointer(0,cursorX,cursorY) else if(!moved && SystemClock.uptimeMillis()-downAt<320) click(if(maxPointers>=2)4 else 1) }
-                dragging=false
-            }
-            MotionEvent.ACTION_CANCEL -> releaseButtons()
         }
         return true
     }
 
     override fun onGenericMotionEvent(e: MotionEvent): Boolean {
-        if ((e.source and InputDevice.SOURCE_MOUSE)==InputDevice.SOURCE_MOUSE) {
-            if (e.action==MotionEvent.ACTION_HOVER_MOVE || e.action==MotionEvent.ACTION_MOVE) {
-                val rx=e.getAxisValue(MotionEvent.AXIS_RELATIVE_X); val ry=e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
-                if(rx!=0f || ry!=0f) relative(rx,ry,physicalMask) else { val p=guestPoint(e.x,e.y); cursorX=p.first; cursorY=p.second; sendPointer(physicalMask,cursorX,cursorY) }
+        if ((e.source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
+            if (e.action == MotionEvent.ACTION_HOVER_MOVE || e.action == MotionEvent.ACTION_MOVE) {
+                val dx = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
+                val dy = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
+                if (dx != 0f || dy != 0f) {
+                    VesselInputClient.relative(dx, dy)
+                    localCursorX = (localCursorX + dx).coerceIn(0f, width.toFloat())
+                    localCursorY = (localCursorY + dy).coerceIn(0f, height.toFloat())
+                    drawLatest()
+                }
             }
-            val v=e.getAxisValue(MotionEvent.AXIS_VSCROLL); val h=e.getAxisValue(MotionEvent.AXIS_HSCROLL); if(v!=0f || h!=0f) scroll(-h*20*density,-v*20*density)
-            val mask=(if((e.buttonState and MotionEvent.BUTTON_PRIMARY)!=0)1 else 0) or (if((e.buttonState and MotionEvent.BUTTON_TERTIARY)!=0)2 else 0) or (if((e.buttonState and MotionEvent.BUTTON_SECONDARY)!=0)4 else 0)
-            if(mask!=physicalMask) { physicalMask=mask; sendPointer(mask,cursorX,cursorY) }
+            val vy = e.getAxisValue(MotionEvent.AXIS_VSCROLL).toInt()
+            val hx = e.getAxisValue(MotionEvent.AXIS_HSCROLL).toInt()
+            if (vy != 0 || hx != 0) VesselInputClient.scroll(hx, vy)
+            val left = (e.buttonState and MotionEvent.BUTTON_PRIMARY) != 0
+            if (left != mouseLeftDown) {
+                mouseLeftDown = left
+                VesselInputClient.button(0x110, left)
+            }
             return true
         }
         return super.onGenericMotionEvent(e)
     }
 
-    override fun dispatchKeyEvent(e: KeyEvent): Boolean {
-        val ks=androidKeysym(e)
-        if(ks!=0) { sendKey(e.action==KeyEvent.ACTION_DOWN,ks); return true }
-        return super.dispatchKeyEvent(e)
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val code = androidToLinuxKey(event.keyCode)
+        if (code != 0) {
+            VesselInputClient.key(code, event.action == KeyEvent.ACTION_DOWN)
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
-    private fun androidKeysym(e: KeyEvent): Int = when(e.keyCode) {
-        KeyEvent.KEYCODE_DEL->0xff08; KeyEvent.KEYCODE_TAB->0xff09; KeyEvent.KEYCODE_ENTER->0xff0d; KeyEvent.KEYCODE_ESCAPE->0xff1b
-        KeyEvent.KEYCODE_DPAD_LEFT->0xff51; KeyEvent.KEYCODE_DPAD_UP->0xff52; KeyEvent.KEYCODE_DPAD_RIGHT->0xff53; KeyEvent.KEYCODE_DPAD_DOWN->0xff54
-        KeyEvent.KEYCODE_PAGE_UP->0xff55; KeyEvent.KEYCODE_PAGE_DOWN->0xff56; KeyEvent.KEYCODE_MOVE_HOME->0xff50; KeyEvent.KEYCODE_MOVE_END->0xff57; KeyEvent.KEYCODE_FORWARD_DEL->0xffff
-        KeyEvent.KEYCODE_SHIFT_LEFT,KeyEvent.KEYCODE_SHIFT_RIGHT->0xffe1; KeyEvent.KEYCODE_CTRL_LEFT,KeyEvent.KEYCODE_CTRL_RIGHT->0xffe3; KeyEvent.KEYCODE_ALT_LEFT,KeyEvent.KEYCODE_ALT_RIGHT->0xffe9; KeyEvent.KEYCODE_META_LEFT,KeyEvent.KEYCODE_META_RIGHT->0xffeb
-        else -> { val unicode=e.unicodeChar; if(unicode>0) unicode else 0 }
+    override fun onCheckIsTextEditor() = true
+
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        outAttrs.imeOptions = EditorInfo.IME_ACTION_NONE
+        return object : BaseInputConnection(this, false) {
+            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                text?.forEach { sendCharacter(it) }
+                return true
+            }
+            override fun sendKeyEvent(event: KeyEvent): Boolean = this@VncFramebufferView.dispatchKeyEvent(event)
+        }
     }
 
-    private fun sendPointer(mask: Int, x: Int, y: Int) { val out=output ?: return; synchronized(wireLock) { runCatching { out.writeByte(5); out.writeByte(mask); out.writeShort(x); out.writeShort(y); out.flush() } } }
-    private fun sendKey(down: Boolean, keysym: Int) { val out=output ?: return; synchronized(wireLock) { runCatching { out.writeByte(4); out.writeByte(if(down)1 else 0); out.writeShort(0); out.writeInt(keysym); out.flush() } } }
-    private fun releaseButtons() { if(dragging || physicalMask!=0) sendPointer(0,cursorX,cursorY); dragging=false; physicalMask=0 }
+    private fun sendCharacter(ch: Char) {
+        val lower = ch.lowercaseChar()
+        val code = when (lower) {
+            in 'a'..'z' -> intArrayOf(30,48,46,32,18,33,34,35,23,36,37,38,50,49,24,25,16,19,31,20,22,47,17,45,21,44)[lower - 'a']
+            '1' -> 2; '2' -> 3; '3' -> 4; '4' -> 5; '5' -> 6; '6' -> 7; '7' -> 8; '8' -> 9; '9' -> 10; '0' -> 11
+            ' ' -> 57; '\n' -> 28; '\t' -> 15
+            '.' -> 52; ',' -> 51; '-' -> 12; '=' -> 13; '/' -> 53; ';' -> 39; '\'' -> 40
+            else -> 0
+        }
+        if (code == 0) return
+        val shift = ch.isUpperCase()
+        if (shift) VesselInputClient.key(42, true)
+        VesselInputClient.key(code, true); VesselInputClient.key(code, false)
+        if (shift) VesselInputClient.key(42, false)
+    }
+
+    private fun androidToLinuxKey(k: Int): Int = when (k) {
+        KeyEvent.KEYCODE_ESCAPE -> 1; KeyEvent.KEYCODE_1 -> 2; KeyEvent.KEYCODE_2 -> 3; KeyEvent.KEYCODE_3 -> 4; KeyEvent.KEYCODE_4 -> 5; KeyEvent.KEYCODE_5 -> 6; KeyEvent.KEYCODE_6 -> 7; KeyEvent.KEYCODE_7 -> 8; KeyEvent.KEYCODE_8 -> 9; KeyEvent.KEYCODE_9 -> 10; KeyEvent.KEYCODE_0 -> 11
+        KeyEvent.KEYCODE_DEL -> 14; KeyEvent.KEYCODE_TAB -> 15; KeyEvent.KEYCODE_Q -> 16; KeyEvent.KEYCODE_W -> 17; KeyEvent.KEYCODE_E -> 18; KeyEvent.KEYCODE_R -> 19; KeyEvent.KEYCODE_T -> 20; KeyEvent.KEYCODE_Y -> 21; KeyEvent.KEYCODE_U -> 22; KeyEvent.KEYCODE_I -> 23; KeyEvent.KEYCODE_O -> 24; KeyEvent.KEYCODE_P -> 25; KeyEvent.KEYCODE_ENTER -> 28
+        KeyEvent.KEYCODE_CTRL_LEFT -> 29; KeyEvent.KEYCODE_A -> 30; KeyEvent.KEYCODE_S -> 31; KeyEvent.KEYCODE_D -> 32; KeyEvent.KEYCODE_F -> 33; KeyEvent.KEYCODE_G -> 34; KeyEvent.KEYCODE_H -> 35; KeyEvent.KEYCODE_J -> 36; KeyEvent.KEYCODE_K -> 37; KeyEvent.KEYCODE_L -> 38; KeyEvent.KEYCODE_SHIFT_LEFT -> 42; KeyEvent.KEYCODE_Z -> 44; KeyEvent.KEYCODE_X -> 45; KeyEvent.KEYCODE_C -> 46; KeyEvent.KEYCODE_V -> 47; KeyEvent.KEYCODE_B -> 48; KeyEvent.KEYCODE_N -> 49; KeyEvent.KEYCODE_M -> 50; KeyEvent.KEYCODE_SHIFT_RIGHT -> 54
+        KeyEvent.KEYCODE_ALT_LEFT -> 56; KeyEvent.KEYCODE_SPACE -> 57; KeyEvent.KEYCODE_F1 -> 59; KeyEvent.KEYCODE_F2 -> 60; KeyEvent.KEYCODE_F3 -> 61; KeyEvent.KEYCODE_F4 -> 62; KeyEvent.KEYCODE_F5 -> 63; KeyEvent.KEYCODE_F6 -> 64; KeyEvent.KEYCODE_F7 -> 65; KeyEvent.KEYCODE_F8 -> 66; KeyEvent.KEYCODE_F9 -> 67; KeyEvent.KEYCODE_F10 -> 68; KeyEvent.KEYCODE_F11 -> 87; KeyEvent.KEYCODE_F12 -> 88
+        KeyEvent.KEYCODE_HOME -> 102; KeyEvent.KEYCODE_DPAD_UP -> 103; KeyEvent.KEYCODE_PAGE_UP -> 104; KeyEvent.KEYCODE_DPAD_LEFT -> 105; KeyEvent.KEYCODE_DPAD_RIGHT -> 106; KeyEvent.KEYCODE_MOVE_END -> 107; KeyEvent.KEYCODE_DPAD_DOWN -> 108; KeyEvent.KEYCODE_PAGE_DOWN -> 109; KeyEvent.KEYCODE_INSERT -> 110; KeyEvent.KEYCODE_FORWARD_DEL -> 111; KeyEvent.KEYCODE_CTRL_RIGHT -> 97; KeyEvent.KEYCODE_ALT_RIGHT -> 100; KeyEvent.KEYCODE_META_LEFT -> 125; KeyEvent.KEYCODE_META_RIGHT -> 126
+        else -> 0
+    }
 }
