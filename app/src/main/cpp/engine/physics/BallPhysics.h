@@ -34,6 +34,7 @@ public:
 private:
     BallState state_{};
     float dashCooldown_=0.0f;
+    float worldTime_=0.0f;
     void collideAabb(const Aabb& box, PhysicsEvents& ev);
 };
 }
