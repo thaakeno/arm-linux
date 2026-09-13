@@ -88,7 +88,14 @@ class NativeRuntimeV27(v25.NativeRuntimeV25):
         state["commandTransport"] = "socket-v27"
         state["displayTransport"] = "native-frame-v2"
         state["vncPort"] = -1
+        state["targetFrameRate"] = 120
         return state
+
+    def ensure_desktop(self, width: int = 1600, height: int = 720, dpi: int = 120) -> dict[str, Any]:
+        # Protocol 25 still carries the legacy Python/VFRM1 desktop launcher.
+        # Call the protocol-24 VFRM2 implementation explicitly so protocol 27
+        # installs and launches the compiled damage-tile streamer.
+        return v25.v24.NativeRuntime.ensure_desktop(self, width, height, dpi)
 
     def _write(self, text: str) -> None:
         if self.master is None:
