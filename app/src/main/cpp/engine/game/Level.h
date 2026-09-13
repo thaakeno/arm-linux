@@ -5,29 +5,31 @@ namespace bounce {
 struct Vec3 { float x{}, y{}, z{}; };
 struct Aabb { Vec3 c; Vec3 h; int material; bool hazard=false; bool bounce=false; };
 
+// Compact connected course matching the showcase framing: broad start deck,
+// central climb, narrow bridge, hazard lane, elevated finish platform.
 inline constexpr std::array<Aabb, 14> kPlatforms{{
-    {{ 0.0f,-0.55f,  2.0f},{4.9f,.55f,3.6f},0,false,false},
-    {{ 0.0f,-0.20f, -3.2f},{3.4f,.42f,1.7f},0,false,false},
-    {{-3.2f, 0.05f, -6.2f},{1.7f,.45f,1.7f},1,false,false},
-    {{ 1.2f, 0.35f, -7.3f},{2.6f,.40f,1.3f},0,false,false},
-    {{ 4.4f, 0.65f, -9.2f},{1.6f,.38f,1.3f},1,false,false},
-    {{ 1.4f, 0.95f,-11.1f},{1.7f,.36f,1.0f},0,false,false},
-    {{-1.4f, 1.35f,-12.9f},{1.5f,.34f,1.0f},0,false,false},
-    {{-4.0f, 1.65f,-14.6f},{1.5f,.34f,1.0f},1,false,false},
-    {{-1.0f, 2.00f,-16.4f},{2.2f,.34f,1.0f},0,false,false},
-    {{ 2.7f, 2.35f,-18.2f},{1.8f,.34f,1.0f},0,false,false},
-    {{ 5.2f, 2.65f,-20.4f},{1.8f,.34f,1.2f},1,false,false},
-    {{ 2.1f, 2.95f,-22.6f},{2.5f,.34f,1.1f},0,false,false},
-    {{-1.9f, 3.25f,-24.6f},{2.2f,.34f,1.0f},0,false,false},
-    {{ 0.0f, 3.55f,-27.2f},{4.1f,.40f,1.8f},0,false,false}
+    {{ 0.0f,-0.45f,  1.8f},{5.8f,.45f,3.5f},0,false,false},
+    {{ 0.8f, 0.05f, -2.7f},{1.9f,.35f,1.7f},0,false,false},
+    {{ 0.6f, 0.55f, -5.2f},{3.6f,.42f,1.6f},0,false,false},
+    {{-3.5f, 0.78f, -6.8f},{1.7f,.40f,1.4f},1,false,false},
+    {{ 3.5f, 0.92f, -7.2f},{1.8f,.40f,1.4f},1,false,false},
+    {{ 0.0f, 1.18f, -8.9f},{3.0f,.34f,1.1f},0,false,false},
+    {{-1.9f, 1.48f,-10.9f},{1.4f,.34f,1.0f},0,false,false},
+    {{ 1.8f, 1.72f,-12.6f},{1.5f,.34f,1.0f},0,false,false},
+    {{ 4.2f, 1.98f,-14.6f},{1.45f,.34f,1.0f},1,false,false},
+    {{ 1.8f, 2.22f,-16.4f},{1.8f,.34f,.85f},0,false,false},
+    {{-1.0f, 2.48f,-18.1f},{1.7f,.34f,.85f},0,false,false},
+    {{-3.3f, 2.72f,-20.0f},{1.55f,.34f,.95f},1,false,false},
+    {{-0.5f, 3.02f,-21.9f},{2.0f,.34f,1.0f},0,false,false},
+    {{ 1.2f, 3.34f,-24.5f},{4.0f,.40f,1.8f},0,false,false}
 }};
 
 inline constexpr std::array<Vec3,10> kCoins{{
-    {-2.3f,.65f,1.0f},{1.8f,.65f,-.1f},{-.3f,.95f,-3.4f},{-3.3f,1.15f,-6.0f},{1.2f,1.45f,-7.3f},
-    {4.4f,1.75f,-9.1f},{1.4f,2.00f,-11.0f},{-3.9f,2.75f,-14.6f},{2.6f,3.45f,-18.2f},{0.0f,4.25f,-27.0f}
+    {-2.4f,.62f,1.1f},{2.2f,.62f,.1f},{.8f,1.0f,-2.8f},{.6f,1.45f,-5.2f},{-3.4f,1.65f,-6.8f},
+    {3.5f,1.78f,-7.2f},{0.0f,2.0f,-8.9f},{1.8f,2.58f,-12.6f},{1.8f,3.05f,-16.4f},{1.2f,4.02f,-24.4f}
 }};
 
-inline constexpr Vec3 kSpawn{0.0f,.85f,3.5f};
-inline constexpr Vec3 kBouncePad{2.15f,.18f,1.15f};
-inline constexpr Vec3 kGoal{0.0f,4.55f,-28.7f};
+inline constexpr Vec3 kSpawn{-1.2f,.72f,3.0f};
+inline constexpr Vec3 kBouncePad{2.15f,.08f,1.05f};
+inline constexpr Vec3 kGoal{1.2f,4.45f,-25.5f};
 }
