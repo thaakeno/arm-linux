@@ -30,22 +30,24 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
-      - name: Verify direct X11 desktop architecture
+      - name: Verify Wayland Venus AHardwareBuffer architecture
         run: |
           set -euxo pipefail
           test ! -e app/src/main/java/com/example/dreamlinux/NativeCubeActivity.kt
           ! find app/src/main -type f | grep -E 'BounceQuest|native_vulkan_studio|native_cube\.(vert|frag)'
-          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v29.py
-          bash -n tools/venus_poc/run_venus_uml.sh
-          grep -F 'REQUIRED_PROTOCOL = 29' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v29.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'lorie-direct-x11-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'implementation(project(":lorie"))' app/build.gradle.kts
-          grep -F 'third_party/termux-x11' .gitmodules
+          python3 -m py_compile tools/venus_poc/vessel_runtime_daemon_v30.py tools/venus_poc/guest_command_agent.py tools/venus_poc/guest_relay_wayland.py
+          bash -n tools/venus_poc/run_venus_wayland.sh
+          grep -F 'REQUIRED_PROTOCOL = 30' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v30.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'wayland-venus-ahb-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'VesselWaylandPresenter.attach' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -F 'vessel_wayland_presenter' app/src/main/cpp/CMakeLists.txt
+          ! grep -F 'implementation(project(":lorie"))' app/build.gradle.kts
+          ! grep -F 'com.termux.x11.MainActivity' app/src/main/AndroidManifest.xml app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           test ! -e app/src/main/cpp/native_desktop_surface.cpp
           test ! -e tools/venus_poc/guest_frame_streamer_v2.c
           test ! -e tools/venus_poc/guest_frame_streamer.py
-          ! grep -E 'VFRM2|FRAME_STREAMER|ANativeWindow_lock|Xtigervnc|vncserver' tools/venus_poc/vessel_runtime_daemon_v29.py app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt app/src/main/cpp/CMakeLists.txt
+          ! grep -E 'VFRM2|FRAME_STREAMER|ANativeWindow_lock|Xtigervnc|vncserver|lorie-direct-x11-v1' tools/venus_poc/vessel_runtime_daemon_v30.py app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt app/src/main/cpp/CMakeLists.txt
       - name: Build, test and lint app
         run: |
           chmod +x gradlew
