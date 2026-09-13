@@ -63,18 +63,11 @@ class VesselOutputEffect final : public Effect
 public:
     VesselOutputEffect()
     {
-        m_display = eglGetCurrentDisplay();
-        m_createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(
-            eglGetProcAddress("eglCreateImageKHR"));
-        m_destroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
-            eglGetProcAddress("eglDestroyImageKHR"));
-        m_exportQuery = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC>(
-            eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
-        m_export = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(
-            eglGetProcAddress("eglExportDMABUFImageMESA"));
-        // Prime a first frame. After that, KWin drives us from real scene damage.
-        // Never self-schedule a permanent full-screen repaint loop: that burns GPU
-        // time and battery while the desktop is idle.
+        // Do not touch EGL here. KWin can construct effects before the compositor
+        // has a current EGL context. With Zink/Venus that early query can force
+        // Vulkan object creation during compositor bring-up and race teardown.
+        // Initialize the export path lazily from postPaintScreen(), where KWin's
+        // OpenGL context is guaranteed to be current.
         effects->addRepaintFull();
     }
 
@@ -88,17 +81,14 @@ public:
 
     static bool supported()
     {
-        const char *extensions = eglQueryString(eglGetCurrentDisplay(), EGL_EXTENSIONS);
-        return effects->isOpenGLCompositing() && extensions &&
-            std::strstr(extensions, "EGL_MESA_image_dma_buf_export") != nullptr;
+        // Extension probing is deferred until a current EGL context exists.
+        return effects->isOpenGLCompositing();
     }
 
     void postPaintScreen() override
     {
         effects->postPaintScreen();
         if (!ensureExport()) {
-            // Startup can race the relay socket. Retry until the first export
-            // succeeds, then become entirely damage-driven.
             effects->addRepaintFull();
             return;
         }
@@ -106,9 +96,6 @@ public:
         glBindTexture(GL_TEXTURE_2D, m_texture);
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, m_width, m_height);
         glBindTexture(GL_TEXTURE_2D, 0);
-
-        // Correctness-first producer completion. Pixels stay on the GPU. The
-        // expensive wait now only happens for frames KWin actually paints.
         glFinish();
 
         FrameMessage msg{};
@@ -129,6 +116,7 @@ public:
 
 private:
     EGLDisplay m_display = EGL_NO_DISPLAY;
+    bool m_eglReady = false;
     PFNEGLCREATEIMAGEKHRPROC m_createImage = nullptr;
     PFNEGLDESTROYIMAGEKHRPROC m_destroyImage = nullptr;
     PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC m_exportQuery = nullptr;
@@ -143,6 +131,33 @@ private:
     uint32_t m_fourcc = 0;
     uint64_t m_modifier = 0;
     uint64_t m_serial = 0;
+
+    bool ensureEglReady()
+    {
+        if (m_eglReady) {
+            return true;
+        }
+        if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
+            return false;
+        }
+        m_display = eglGetCurrentDisplay();
+        if (m_display == EGL_NO_DISPLAY) {
+            return false;
+        }
+        const char *extensions = eglQueryString(m_display, EGL_EXTENSIONS);
+        if (!extensions || std::strstr(extensions, "EGL_MESA_image_dma_buf_export") == nullptr) {
+            return false;
+        }
+        m_createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
+        m_destroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
+        m_exportQuery = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC>(eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
+        m_export = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(eglGetProcAddress("eglExportDMABUFImageMESA"));
+        if (!m_createImage || !m_destroyImage || !m_exportQuery || !m_export) {
+            return false;
+        }
+        m_eglReady = true;
+        return true;
+    }
 
     bool connectSocket()
     {
@@ -199,13 +214,15 @@ private:
     void destroyExport()
     {
         if (m_image != EGL_NO_IMAGE_KHR) {
-            if (m_destroyImage) {
+            if (m_destroyImage && m_display != EGL_NO_DISPLAY && eglGetCurrentContext() != EGL_NO_CONTEXT) {
                 m_destroyImage(m_display, m_image);
             }
             m_image = EGL_NO_IMAGE_KHR;
         }
         if (m_texture) {
-            glDeleteTextures(1, &m_texture);
+            if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
+                glDeleteTextures(1, &m_texture);
+            }
             m_texture = 0;
         }
         m_width = m_height = 0;
@@ -213,7 +230,7 @@ private:
 
     bool ensureExport()
     {
-        if (!m_createImage || !m_destroyImage || !m_exportQuery || !m_export || m_display == EGL_NO_DISPLAY) {
+        if (!ensureEglReady()) {
             return false;
         }
         const QSize size = effects->virtualScreenSize();
@@ -286,8 +303,6 @@ private:
     }
 };
 
-// Debian 12 ships KWin 5.27, where this macro takes four arguments:
-// effect class, metadata JSON, supported body, enabled-by-default body.
 KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED(VesselOutputEffect,
                                       "vesseloutput.json",
                                       return VesselOutputEffect::supported();,
