@@ -11,6 +11,21 @@ include(KDEInstallDirs)
 include(KDECMakeSettings)
 include(KDECompilerSettings NO_POLICY_SCOPE)
 include(KDEClangFormat)
+include(ECMSetupQtPluginMacroNames)
+
+# KWin's effect factory macros carry their plugin JSON metadata in macro
+# arguments. Standalone effect builds must teach CMake AUTOGEN about those
+# macros exactly like KWin's own build does, otherwise Qt5 moc parses the
+# expanded Q_PLUGIN_METADATA(... FILE ...) incorrectly and dies at "FILE".
+ecm_setup_qtplugin_macro_names(
+    JSON_ARG2
+        "KWIN_EFFECT_FACTORY"
+    JSON_ARG3
+        "KWIN_EFFECT_FACTORY_ENABLED"
+        "KWIN_EFFECT_FACTORY_SUPPORTED"
+    JSON_ARG4
+        "KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED"
+)
 
 find_package(Qt5 5.15 REQUIRED COMPONENTS Core)
 find_package(KF5 REQUIRED COMPONENTS CoreAddons)
