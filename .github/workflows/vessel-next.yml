@@ -37,11 +37,14 @@ jobs:
           python3 -m py_compile \
             tools/venus_poc/vessel_runtime_daemon_v24.py \
             tools/venus_poc/vessel_runtime_daemon_v25.py \
+            tools/venus_poc/vessel_runtime_daemon_v26.py \
             tools/venus_poc/guest_frame_streamer.py \
             tools/venus_poc/guest_input_agent_v25.py
           bash -n tools/venus_poc/run_venus_uml.sh
-          grep -F 'REQUIRED_PROTOCOL = 25' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v25.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'REQUIRED_PROTOCOL = 26' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v26.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'VESSEL_MEM_MB="${VESSEL_MEM_MB:-8192}"' tools/venus_poc/run_venus_uml.sh
+          grep -F 'mem="${VESSEL_MEM_MB}M"' tools/venus_poc/run_venus_uml.sh
           ! grep -F 'Socket().use' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt | grep -F '5901'
           grep -F 'FRAME_PORT = 47636' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
       - name: Build, test and lint
