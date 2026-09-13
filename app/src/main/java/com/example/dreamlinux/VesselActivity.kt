@@ -1,5 +1,8 @@
 package com.example.dreamlinux
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
@@ -24,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -363,8 +367,18 @@ class VesselActivity : ComponentActivity() {
     @Composable
     private fun ProgressBlock(state: SessionState) {
         Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(state.progressDetail.ifBlank { state.message }, style = MaterialTheme.typography.bodySmall)
-            if (state.progressPercent in 0..100) LinearProgressIndicator(progress = { state.progressPercent / 100f }, modifier = Modifier.fillMaxWidth()) else LinearProgressIndicator(Modifier.fillMaxWidth())
+            val detail = state.progressDetail.ifBlank { state.message }
+            if (state.progressPercent in 0..100) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(detail, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    Spacer(Modifier.width(10.dp))
+                    Text("${state.progressPercent}%", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                }
+                LinearProgressIndicator(progress = { state.progressPercent / 100f }, modifier = Modifier.fillMaxWidth())
+            } else {
+                Text(detail, style = MaterialTheme.typography.bodySmall)
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
         }
     }
 
@@ -377,9 +391,24 @@ class VesselActivity : ComponentActivity() {
 
     @Composable
     private fun LogCard(state: SessionState) {
+        val context = LocalContext.current
         ElevatedCard(shape = RoundedCornerShape(18.dp)) {
             Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                Text("Runtime log", fontWeight = FontWeight.SemiBold)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Runtime log", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    TextButton(
+                        enabled = state.console.isNotBlank(),
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Vessel runtime log", state.console))
+                            Toast.makeText(context, "Full runtime log copied", Toast.LENGTH_SHORT).show()
+                        }
+                    ) {
+                        Icon(Icons.Default.ContentCopy, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Copy logs")
+                    }
+                }
                 SelectionContainer {
                     Text(state.console.takeLast(5000).ifBlank { "No runtime output yet." }, Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(rememberScrollState()).padding(top = 7.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
