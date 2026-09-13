@@ -64,8 +64,24 @@ if old in text: text = text.replace(old, new)
 text = text.replace('bodies_[2].r=.255f+.075f*lightHaze_.load();', 'bodies_[2].r=.285f;')
 p.write_text(text)
 
-# Android clang treats the uint -> int worker count list initialization as a
-# narrowing error. Make the Jolt worker count explicit and keep it capped at 3.
+# The v13 first pass also used a nested-brace regex for screenRayV7 and could
+# leave the tail of the orbit-only implementation behind. Replace the whole span.
+screen_ray = '''    void screenRayV7(float nx,float ny,Vec3&ro,Vec3&rd)const{
+        float yaw=yaw_.load(),pitch=pitch_.load(),cp=std::cos(pitch);Vec3 f;
+        if(firstPerson_.load()){
+            ro={fpX_.load(),fpY_.load(),fpZ_.load()};
+            f=norm(Vec3{-cp*std::sin(yaw),std::sin(pitch),-cp*std::cos(yaw)});
+        }else{
+            ro=cameraDistance_.load()*Vec3{cp*std::sin(yaw),std::sin(pitch),cp*std::cos(yaw)}+Vec3{0,.38f,1.70f};
+            Vec3 target{0,-.15f,-.15f};f=norm(target-ro);
+        }
+        Vec3 r=norm(cross(f,{0,1,0})),u=norm(cross(r,f));float x=nx*2-1,y=1-ny*2;
+        float aspect=float(std::max(1,visibleW_.load()))/float(std::max(1,visibleH_.load()));
+        float tanHalf=std::tan(34.0f*kPi/360.0f);rd=norm(f+r*(x*aspect*tanHalf)+u*(y*tanHalf));
+    }
+    '''
+patch_between("app/src/main/cpp/native_vulkan_studio_v7_part3.inc", "    void screenRayV7(float nx,float ny,Vec3&ro,Vec3&rd)const", "    void grabStartImpl", screen_ray)
+
 p = ROOT / "app/src/main/cpp/vessel_jolt_world.cpp"
 text = p.read_text()
 old = 'JobSystemThreadPool jobs{cMaxPhysicsJobs, cMaxPhysicsBarriers, std::max(1u, std::min(3u, std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u))};'
@@ -73,4 +89,4 @@ new = 'JobSystemThreadPool jobs{cMaxPhysicsJobs, cMaxPhysicsBarriers, static_cas
 if old not in text: raise SystemExit("Jolt worker marker missing")
 p.write_text(text.replace(old,new))
 
-print("v13 post-fix applied: RT boxes + Jolt authority + light setter + Android Jolt workers")
+print("v13 post-fix applied: RT boxes + Jolt authority + light setter + FPS ray + Android Jolt workers")
