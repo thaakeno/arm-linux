@@ -24,10 +24,8 @@ mat4 lookAtRH(vec3 eye, vec3 target){
         vec4(-dot(r,eye),-dot(u,eye),dot(f,eye),1.0)
     );
 }
-
 mat4 perspectiveVk(float fovy,float aspect,float zn,float zf){
     float f=1.0/tan(fovy*0.5);
-    // Vulkan's framebuffer Y axis is opposite OpenGL's clip-space convention.
     return mat4(
         vec4(f/max(aspect,.2),0,0,0),
         vec4(0,-f,0,0),
@@ -35,39 +33,26 @@ mat4 perspectiveVk(float fovy,float aspect,float zn,float zf){
         vec4(0,0,(zn*zf)/(zn-zf),0)
     );
 }
-
 void main(){
     int obj=int(inObject+.5), mat=int(inMat+.5);
     vec3 P=inPos, N=normalize(inNormal);
-
     if(obj==1){
         float s=clamp(pc.motion.x,-.18,.38);
         vec3 rr=vec3(pc.ball.w*inversesqrt(max(.45,1.0-s)),pc.ball.w*(1.0-s),pc.ball.w*inversesqrt(max(.45,1.0-s)));
         P=pc.ball.xyz+inPos*rr;
         N=normalize(inNormal/max(rr,vec3(.001)));
     }
-
     if(obj>=100 && obj<110){
         int bit=obj-100, mask=int(pc.motion.w+.5);
         if((mask&(1<<bit))!=0){gl_Position=vec4(2,2,2,1);return;}
-        float pulse=.045*sin(pc.motion.y*3.15+float(bit));
-        P+=N*pulse;
+        float pulse=.045*sin(pc.motion.y*3.15+float(bit));P+=N*pulse;
     }
+    if(obj==400)P.x+=sin(pc.motion.y*1.10)*.90;
+    if(obj==900)P+=vec3(pc.ball.x,0.0,pc.ball.z);
 
-    // Keep the environment shell centered on the player while leaving the course static.
-    if(obj==900) P+=vec3(pc.ball.x,0.0,pc.ball.z);
-
-    // Target composition: large hero ball in the lower-left/center, obstacle lane and portal ahead.
     vec3 eye=pc.ball.xyz+vec3(4.55,2.85,6.75);
     vec3 target=pc.ball.xyz+vec3(.10,.58,-4.20);
-    float aspect=max(pc.motion.z,.25);
-    mat4 vp=perspectiveVk(radians(55.0),aspect,.055,145.0)*lookAtRH(eye,target);
+    mat4 vp=perspectiveVk(radians(55.0),max(pc.motion.z,.25),.055,145.0)*lookAtRH(eye,target);
     gl_Position=vp*vec4(P,1.0);
-
-    vWorld=P;
-    vNormal=N;
-    vUv=inUv;
-    vMat=mat;
-    vView=eye-P;
-    vObject=obj;
+    vWorld=P;vNormal=N;vUv=inUv;vMat=mat;vView=eye-P;vObject=obj;
 }
