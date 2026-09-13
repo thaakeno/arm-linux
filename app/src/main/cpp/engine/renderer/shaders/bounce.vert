@@ -5,9 +5,9 @@ layout(location=2) out vec2 vUv;
 layout(location=3) flat out int vMat;
 layout(location=4) out vec3 vView;
 layout(push_constant) uniform Push {
-    vec4 ball;      // xyz + radius
-    vec4 motion;    // squash, time, aspect, coinMask-as-float
-    vec4 misc;      // win, quality, unused, unused
+    vec4 ball;
+    vec4 motion;
+    vec4 misc;
 } pc;
 
 const float PI=3.141592653589793;
@@ -25,7 +25,6 @@ const int BASE_BALL=BASE_CRATE+3*BOX_VERTS;
 const int BASE_COINS=BASE_BALL+BALL_VERTS;
 const int BASE_SPIKES=BASE_COINS+COINS*COIN_VERTS;
 const int BASE_PORTAL=BASE_SPIKES+SPIKES*SPIKE_VERTS;
-const int TOTAL_VERTS=BASE_PORTAL+PORTAL_VERTS;
 
 vec2 tri(int c){if(c==0)return vec2(0,0);if(c==1)return vec2(1,0);if(c==2)return vec2(1,1);if(c==3)return vec2(0,0);if(c==4)return vec2(1,1);return vec2(0,1);}
 vec3 boxPos(int face,vec2 q){if(face==0)return vec3(q.x,q.y,1);if(face==1)return vec3(-q.x,q.y,-1);if(face==2)return vec3(1,q.y,-q.x);if(face==3)return vec3(-1,q.y,q.x);if(face==4)return vec3(q.x,1,-q.y);return vec3(q.x,-1,q.y);}
@@ -34,13 +33,13 @@ void boxGeom(int local,vec3 c,vec3 h,out vec3 p,out vec3 n,out vec2 uv){int f=lo
 
 void platformInfo(int i,out vec3 c,out vec3 h,out int mat){
  mat=0;
- if(i==0){c=vec3(0,-.55,2);h=vec3(4.9,.55,3.6);} else if(i==1){c=vec3(0,-.20,-3.2);h=vec3(3.4,.42,1.7);} 
- else if(i==2){c=vec3(-3.2,.05,-6.2);h=vec3(1.7,.45,1.7);mat=1;} else if(i==3){c=vec3(1.2,.35,-7.3);h=vec3(2.6,.40,1.3);} 
- else if(i==4){c=vec3(4.4,.65,-9.2);h=vec3(1.6,.38,1.3);mat=1;} else if(i==5){c=vec3(1.4,.95,-11.1);h=vec3(1.7,.36,1.0);} 
- else if(i==6){c=vec3(-1.4,1.35,-12.9);h=vec3(1.5,.34,1.0);} else if(i==7){c=vec3(-4.0,1.65,-14.6);h=vec3(1.5,.34,1.0);mat=1;} 
- else if(i==8){c=vec3(-1.0,2.0,-16.4);h=vec3(2.2,.34,1.0);} else if(i==9){c=vec3(2.7,2.35,-18.2);h=vec3(1.8,.34,1.0);} 
- else if(i==10){c=vec3(5.2,2.65,-20.4);h=vec3(1.8,.34,1.2);mat=1;} else if(i==11){c=vec3(2.1,2.95,-22.6);h=vec3(2.5,.34,1.1);} 
- else if(i==12){c=vec3(-1.9,3.25,-24.6);h=vec3(2.2,.34,1.0);} else {c=vec3(0,3.55,-27.2);h=vec3(4.1,.40,1.8);} 
+ if(i==0){c=vec3(0,-.55,2);h=vec3(4.9,.55,3.6);} else if(i==1){c=vec3(0,-.20,-3.2);h=vec3(3.4,.42,1.7);}
+ else if(i==2){c=vec3(-3.2,.05,-6.2);h=vec3(1.7,.45,1.7);mat=1;} else if(i==3){c=vec3(1.2,.35,-7.3);h=vec3(2.6,.40,1.3);}
+ else if(i==4){c=vec3(4.4,.65,-9.2);h=vec3(1.6,.38,1.3);mat=1;} else if(i==5){c=vec3(1.4,.95,-11.1);h=vec3(1.7,.36,1.0);}
+ else if(i==6){c=vec3(-1.4,1.35,-12.9);h=vec3(1.5,.34,1.0);} else if(i==7){c=vec3(-4.0,1.65,-14.6);h=vec3(1.5,.34,1.0);mat=1;}
+ else if(i==8){c=vec3(-1.0,2.0,-16.4);h=vec3(2.2,.34,1.0);} else if(i==9){c=vec3(2.7,2.35,-18.2);h=vec3(1.8,.34,1.0);}
+ else if(i==10){c=vec3(5.2,2.65,-20.4);h=vec3(1.8,.34,1.2);mat=1;} else if(i==11){c=vec3(2.1,2.95,-22.6);h=vec3(2.5,.34,1.1);}
+ else if(i==12){c=vec3(-1.9,3.25,-24.6);h=vec3(2.2,.34,1.0);} else {c=vec3(0,3.55,-27.2);h=vec3(4.1,.40,1.8);}
 }
 vec3 coinPos(int i){
  if(i==0)return vec3(-2.3,.65,1);if(i==1)return vec3(1.8,.65,-.1);if(i==2)return vec3(-.3,.95,-3.4);if(i==3)return vec3(-3.3,1.15,-6);
@@ -59,10 +58,10 @@ void main(){
  int id=gl_VertexIndex;vec3 P=vec3(0),N=vec3(0,1,0);vec2 uv=vec2(0);int M=0;
  if(id<BASE_PAD){int bi=id/BOX_VERTS,l=id-bi*BOX_VERTS;vec3 c,h;int mat;platformInfo(bi,c,h,mat);boxGeom(l,c,h,P,N,uv);M=mat;}
  else if(id<BASE_CRATE){boxGeom(id-BASE_PAD,vec3(2.15,.03,1.15),vec3(1.05,.10,1.05),P,N,uv);M=4;}
- else if(id<BASE_BALL){int q=(id-BASE_CRATE)/BOX_VERTS,l=(id-BASE_CRATE)-q*BOX_VERTS;vec3 cc=q==0?vec3(-3.1,.35,-.5):(q==1?vec3(-2.0,.35,-.5):vec3(3.2,.45,-2.7));boxGeom(l,cc,vec3(.48,.48,.48),P,N,uv);M=3;}
+ else if(id<BASE_BALL){int q=(id-BASE_CRATE)/BOX_VERTS,l=(id-BASE_CRATE)-q*BOX_VERTS;vec3 cc=q==0?vec3(-3.1,.35,-.5):(q==1?vec3(-2.0,.35,-.5):vec3(3.2+sin(pc.motion.y*1.1)*1.25,.45,-2.7));boxGeom(l,cc,vec3(.48,.48,.48),P,N,uv);M=3;}
  else if(id<BASE_COINS){float s=clamp(pc.motion.x,-.18,.38);vec3 rr=vec3(pc.ball.w*inversesqrt(max(.45,1.0-s)),pc.ball.w*(1.0-s),pc.ball.w*inversesqrt(max(.45,1.0-s)));sphereGeom(id-BASE_BALL,BALL_U,BALL_V,pc.ball.xyz,rr,P,N,uv);M=2;}
  else if(id<BASE_SPIKES){int rel=id-BASE_COINS,ci=rel/COIN_VERTS,l=rel-ci*COIN_VERTS;int mask=int(pc.motion.w+.5);if((mask&(1<<ci))!=0){gl_Position=vec4(2,2,2,1);return;}sphereGeom(l,COIN_U,COIN_V,coinPos(ci),vec3(.25),P,N,uv);M=5;}
  else if(id<BASE_PORTAL){int rel=id-BASE_SPIKES,si=rel/SPIKE_VERTS,l=rel-si*SPIKE_VERTS,seg=l/3,co=l-seg*3;float a0=2.0*PI*float(seg)/float(SPIKE_SEG),a1=2.0*PI*float(seg+1)/float(SPIKE_SEG);vec3 base=vec3(-2.05+float(si)*.68,-.02,-4.95);vec3 p0=base+vec3(cos(a0)*.28,0,sin(a0)*.28),p1=base+vec3(cos(a1)*.28,0,sin(a1)*.28),tip=base+vec3(0,1.0,0);P=co==0?p0:(co==1?p1:tip);N=normalize(vec3(P.x-base.x,.35,P.z-base.z));uv=vec2(float(seg)/float(SPIKE_SEG),co==2?1:0);M=6;}
  else {int rel=id-BASE_PORTAL,cell=rel/6,co=rel-cell*6,iu=cell%PORTAL_U,iv=cell/PORTAL_U;vec2 tc=tri(co);float u=(float(iu)+tc.x)/float(PORTAL_U)*2.0*PI,v=(float(iv)+tc.y)/float(PORTAL_V)*2.0*PI;float R=1.15,r=.12;vec3 c=vec3(0,4.62,-28.55);vec3 q=vec3((R+r*cos(v))*cos(u),r*sin(v),(R+r*cos(v))*sin(u));P=c+vec3(q.x,q.z,q.y);N=normalize(vec3(cos(v)*cos(u),sin(v),cos(v)*sin(u)).xzy);uv=vec2(u/(2.0*PI),v/(2.0*PI));M=7;}
- vec3 target=pc.ball.xyz+vec3(0,.65,-2.0);vec3 eye=pc.ball.xyz+vec3(5.7,5.1,8.9);mat4 vp=viewProj(eye,target,max(pc.motion.z,.2));gl_Position=vp*vec4(P,1);vWorld=P;vNormal=N;vUv=uv;vMat=M;vView=eye-P;
+ vec3 target=pc.ball.xyz+vec3(0,.55,-2.1);vec3 eye=pc.ball.xyz+vec3(5.5,4.7,8.6);mat4 vp=viewProj(eye,target,max(pc.motion.z,.2));gl_Position=vp*vec4(P,1);vWorld=P;vNormal=N;vUv=uv;vMat=M;vView=eye-P;
 }
