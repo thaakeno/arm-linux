@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Venus + KWin dma-buf relay for Vessel protocol 30.
+"""Venus + KWin dma-buf relay for Vessel protocol 31.
 
 Host Venus external objects are mapped into UML through /dev/umshm. If Mesa or
 KWin later sends one of those file descriptions back over SCM_RIGHTS, kcmp()
 identifies the original object and we send only its object id to the Android
 host. Pixel data never crosses the TCP control transport.
+
+AF_UNIX SOCK_STREAM ancillary data is a barrier rather than a message record.
+When recvmsg() receives SCM_RIGHTS it can also return ordinary stream bytes that
+precede the one-byte descriptor carrier.  Prefix bytes must remain plain stream
+data or the receiving vtest side can consume and discard the descriptor before
+its dedicated recvmsg() call.
 """
 from __future__ import annotations
 
 import argparse
 import array
 import ctypes
-import json
 import os
 import platform
-import select
 import socket
 import struct
 import threading
@@ -34,7 +38,6 @@ FRAME_MAGIC = 0x31574656
 FRAME_IMPORT = 1
 FRAME_FRAME = 2
 KCMP_FILE = 0
-# Linux generic arm64 syscall table. Debian arm64 uses __NR_kcmp=272.
 SYS_KCMP = 272
 libc = ctypes.CDLL(None, use_errno=True)
 
@@ -100,8 +103,6 @@ class Relay:
             return True
         if rc < 0:
             err = ctypes.get_errno()
-            # Some hardened kernels deny kcmp. There is no safe fallback that
-            # distinguishes multiple /dev/umshm open descriptions, so fail loud.
             if err in (1, 13):
                 raise RuntimeError(f"kcmp(KCMP_FILE) blocked by guest kernel errno={err}")
         return False
@@ -122,10 +123,18 @@ class Relay:
                 os.close(old)
             self.object_fds[obj_id] = retained
 
+    @staticmethod
+    def _split_fd_carrier(data: bytes) -> tuple[bytes, bytes]:
+        if not data:
+            raise RuntimeError("SCM_RIGHTS message missing carrier byte")
+        return data[:-1], data[-1:]
+
     def local_to_host(self) -> None:
         ancbuf = socket.CMSG_SPACE(16 * struct.calcsize("i"))
         while not self.stop.is_set():
-            data, anc, _flags, _ = self.local.recvmsg(65536, ancbuf)
+            data, anc, flags, _ = self.local.recvmsg(65536, ancbuf)
+            if flags & getattr(socket, "MSG_CTRUNC", 0):
+                raise RuntimeError("guest SCM_RIGHTS control message truncated")
             if not data and not anc:
                 raise EOFError("Mesa client closed")
             fds: list[int] = []
@@ -143,11 +152,19 @@ class Relay:
                 for fd in fds:
                     os.close(fd)
                 raise RuntimeError(f"expected one guest external fd, got {len(fds)}")
+
+            prefix, carrier = self._split_fd_carrier(data)
+            if prefix:
+                self.writer.send(DATA_G2H, prefix)
+
             fd = fds[0]
             try:
                 obj_id = self.resolve_object(fd)
-                self.writer.send(FD_REF_G2H, struct.pack("!II", obj_id, len(data)) + data)
-                print(f"[guest-wayland] returned external fd as object id={obj_id}", flush=True)
+                self.writer.send(FD_REF_G2H, struct.pack("!II", obj_id, len(carrier)) + carrier)
+                print(
+                    f"[guest-wayland] returned external fd as object id={obj_id} with exact 1-byte carrier",
+                    flush=True,
+                )
             finally:
                 os.close(fd)
 
@@ -164,6 +181,8 @@ class Relay:
             raise
 
     def pass_fd_to_mesa(self, fd: int, data: bytes, label: str) -> None:
+        if len(data) != 1:
+            raise RuntimeError(f"{label}: SCM_RIGHTS carrier must be exactly one byte, got {len(data)}")
         anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]).tobytes())]
         sent = self.local.sendmsg([data], anc)
         if sent != len(data):
@@ -211,16 +230,16 @@ class Relay:
                     raise RuntimeError("short FD_SIGNAL_H2G")
                 sync_id, data_len = struct.unpack("!II", payload[:8])
                 data = payload[8:8 + data_len]
-                if len(data) != data_len or not data:
-                    raise RuntimeError("sync fd missing carrier")
+                if len(data) != data_len or len(data) != 1:
+                    raise RuntimeError("sync fd missing one-byte carrier")
                 self.make_sync_pipe(sync_id, data)
             elif t == FD_DIRECT_H2G:
                 if len(payload) < 16:
                     raise RuntimeError("short FD_DIRECT_H2G")
                 obj_id, size, data_len = struct.unpack("!IQI", payload[:16])
                 data = payload[16:16 + data_len]
-                if len(data) != data_len or not data:
-                    raise RuntimeError("external fd missing carrier")
+                if len(data) != data_len or len(data) != 1:
+                    raise RuntimeError("external fd missing one-byte carrier")
                 fd = self.make_umshm_fd(obj_id)
                 try:
                     self.pass_fd_to_mesa(fd, data, f"umshm id={obj_id}")
