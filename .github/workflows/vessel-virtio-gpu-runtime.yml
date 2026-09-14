@@ -61,6 +61,7 @@ jobs:
           import importlib.util
           import socket
           import struct
+          import sys
           import tempfile
           import threading
           from pathlib import Path
@@ -68,6 +69,7 @@ jobs:
           path = Path('tools/venus_poc/vhost_gpu_display_frontend.py')
           spec = importlib.util.spec_from_file_location('vugpu', path)
           m = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = m
           spec.loader.exec_module(m)
 
           with tempfile.TemporaryDirectory() as td:
