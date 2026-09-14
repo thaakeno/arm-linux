@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
-"""Vessel protocol 33: Linux apps -> labwc/wlroots -> dma-buf -> Android Surface.
+"""Vessel protocol 33: Linux apps -> sway/wlroots -> dma-buf -> Android Surface.
 
-The Android app, UML guest, persistent Debian rootfs, Venus GPU relay, networking,
-input bridge, controls and Vessel UI are unchanged. KWin and the vesseloutput
-plugin are not part of this runtime. labwc is the only Linux compositor.
-
-Because Vessel intentionally keeps Linux inside UML, AHardwareBuffer objects
-cannot be allocated directly inside the guest process. The wlroots compositor
-therefore renders GPU buffers through Zink/Venus; the existing zero-CPU-copy
-fd relay imports the compositor dma-buf on Android and presents it to Vessel's
-Surface. This preserves the proven wlroots compositor architecture without
-replacing Vessel with another frontend or distro manager.
+Vessel's Android UI, UML guest, persistent Debian rootfs, Venus GPU relay,
+networking, controls and input bridge stay intact. KWin, the vesseloutput effect,
+VNC and screenshot/framebuffer streaming are not part of this runtime.
 """
 from __future__ import annotations
 
@@ -24,7 +17,7 @@ from typing import Any
 import vessel_runtime_daemon_v31 as v31
 
 PROTOCOL_VERSION = 33
-DISPLAY_TRANSPORT = "wlroots-labwc-dmabuf-venus-android-surface-v1"
+DISPLAY_TRANSPORT = "wlroots-sway-dmabuf-venus-android-surface-v1"
 POC = pathlib.Path(os.environ.get("VESSEL_POC_DIR", str(pathlib.Path.home() / "vessel-poc-runtime")))
 
 
@@ -34,35 +27,34 @@ class WlrootsRuntime(v31.WaylandRuntime):
         state.update({
             "protocolVersion": PROTOCOL_VERSION,
             "displayTransport": DISPLAY_TRANSPORT,
-            "presenter": "labwc/wlroots -> dma-buf -> Android native Surface",
+            "presenter": "sway/wlroots -> dma-buf -> Android native Surface",
             "renderer": "wlroots GLES2 -> Zink -> Venus -> host Adreno GPU",
-            "compositor": "labwc (wlroots)",
+            "compositor": "sway (wlroots)",
             "framePolicy": "Wayland commit/frame-callback driven",
             "softwareFallback": False,
             "vncPort": -1,
         })
         return state
 
-    def _prepare_bridge(self) -> None:
+    def _prepare_runtime(self) -> None:
         source = POC / "tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c"
         if not source.exists():
             raise RuntimeError(f"native Wayland bridge source missing: {source}")
-        self.set_progress("wayland_bridge", 61, "Preparing Vessel native Wayland output")
+        self.set_progress("wayland_bridge", 61, "Preparing native wlroots output")
         self._rpc_upload(source, "/root/vessel_wayland_bridge.c")
 
         have = self.guest(
-            "command -v labwc >/dev/null && command -v wayland-scanner >/dev/null && "
-            "pkg-config --exists wayland-server && "
-            "test -f /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml && "
-            "test -f /usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml && "
+            "command -v sway >/dev/null && command -v wayland-scanner >/dev/null && "
+            "pkg-config --exists wayland-server && command -v foot >/dev/null && "
             "test -e /usr/lib/aarch64-linux-gnu/dri/zink_dri.so && echo WLROOTS_DEPS_READY || true",
             20,
         )
         if "WLROOTS_DEPS_READY" not in have:
-            self.set_progress("wayland_deps", 64, "Installing wlroots compositor runtime")
+            self.set_progress("wayland_deps", 64, "Installing wlroots desktop runtime")
             self.guest(
-                "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y --no-install-recommends "
-                "labwc waybar swaybg foot xwayland dbus-x11 "
+                "export DEBIAN_FRONTEND=noninteractive; apt-get update && "
+                "apt-get install -y --no-install-recommends "
+                "sway swaybg sway-backgrounds foot seatd dbus-x11 xwayland "
                 "libgl1-mesa-dri mesa-utils vulkan-tools "
                 "build-essential pkg-config libwayland-dev wayland-protocols",
                 1200,
@@ -87,48 +79,40 @@ echo VESSEL_WAYLAND_PARENT_READY
         if "VESSEL_WAYLAND_PARENT_READY" not in out:
             raise RuntimeError("Vessel native Wayland parent did not build")
 
-    def _configure_labwc(self) -> None:
-        config = r'''mkdir -p /root/.config/labwc /root/.config/waybar
-cat > /root/.config/labwc/environment <<'EOF'
-MESA_LOADER_DRIVER_OVERRIDE=zink
-GALLIUM_DRIVER=zink
-LIBGL_ALWAYS_SOFTWARE=0
-WLR_RENDERER=gles2
-WLR_BACKENDS=wayland,libinput
-WLR_DRM_NO_ATOMIC=1
-EOF
-cat > /root/.config/labwc/autostart <<'EOF'
-(swaybg -c '#101010' >/tmp/vessel-swaybg.log 2>&1 &) 
-(waybar >/tmp/vessel-waybar.log 2>&1 &)
-(foot --server >/tmp/vessel-foot.log 2>&1 &)
-EOF
-chmod +x /root/.config/labwc/autostart
-cat > /root/.config/waybar/config <<'EOF'
-{
-  "layer": "top",
-  "position": "top",
-  "height": 30,
-  "modules-left": ["custom/vessel"],
-  "modules-right": ["cpu", "memory", "clock"],
-  "custom/vessel": {"format": "Vessel Debian"},
-  "clock": {"format": "{:%H:%M}"}
+    def _configure_sway(self) -> None:
+        cfg = r'''mkdir -p /root/.config/sway
+cat > /root/.config/sway/config <<'EOF'
+set $mod Mod4
+font pango:sans 10
+floating_modifier $mod normal
+focus_follows_mouse no
+output * bg #101010 solid_color
+bindsym $mod+Return exec foot
+bindsym $mod+d exec foot
+bindsym $mod+Shift+q kill
+bindsym $mod+Shift+e exec swaymsg exit
+bar {
+    position top
+    status_command while date '+Vessel Debian   %H:%M:%S'; do sleep 1; done
+    colors {
+        background #151515
+        statusline #f0f0f0
+        focused_workspace #355f56 #355f56 #ffffff
+        inactive_workspace #222222 #222222 #aaaaaa
+    }
 }
-EOF
-cat > /root/.config/waybar/style.css <<'EOF'
-* { font-family: sans-serif; font-size: 13px; }
-window#waybar { background: rgba(20,20,20,0.96); color: #f2f2f2; }
-#custom-vessel, #cpu, #memory, #clock { padding: 0 12px; }
+exec foot --server
 EOF
 '''
-        self.guest(config, 30)
+        self.guest(cfg, 20)
 
     def ensure_desktop(self, width: int = 1600, height: int = 720, dpi: int = 120) -> dict[str, Any]:
         del dpi
         self.start()
         width = max(800, min(width, 3840))
         height = max(540, min(height, 2160))
-        self._prepare_bridge()
-        self._configure_labwc()
+        self._prepare_runtime()
+        self._configure_sway()
 
         self.set_progress("wayland_start", 80, "Starting wlroots compositor")
         env = self._gpu_env()
@@ -141,13 +125,16 @@ chmod 700 /tmp/vessel-runtime
 {env}
 export XDG_RUNTIME_DIR=/tmp/vessel-runtime
 export XDG_SESSION_TYPE=wayland
-export XDG_CURRENT_DESKTOP=labwc
+export XDG_CURRENT_DESKTOP=sway
 export MESA_LOADER_DRIVER_OVERRIDE=zink
 export GALLIUM_DRIVER=zink
 export LIBGL_ALWAYS_SOFTWARE=0
 export WLR_RENDERER=gles2
 export WLR_BACKENDS=wayland,libinput
-rm -f /tmp/vessel-native-wayland.log /tmp/vessel-labwc.log /tmp/vessel-waybar.log
+export WLR_WL_OUTPUTS=1
+export WLR_LIBINPUT_NO_DEVICES=1
+export SEATD_VTBOUND=0
+rm -f /tmp/vessel-native-wayland.log /tmp/vessel-sway.log /tmp/vessel-child-wayland
 
 /usr/local/bin/vessel-wayland-bridge --socket vessel-host-0 --frame-socket /tmp/vessel-frame-export.sock --width {width} --height {height} --refresh 60 >/tmp/vessel-native-wayland.log 2>&1 &
 BRIDGE_PID=$!
@@ -159,32 +146,27 @@ for i in $(seq 1 120); do
 done
 [ -S /tmp/vessel-runtime/vessel-host-0 ] || exit 52
 
-# labwc is the actual desktop compositor. wlroots' Wayland backend creates one
-# nested output on Vessel's parent and renders it with GLES2/Zink/Venus.
 export WAYLAND_DISPLAY=vessel-host-0
-labwc >/tmp/vessel-labwc.log 2>&1 &
-LABWC_PID=$!
-echo "$LABWC_PID" >/tmp/vessel-labwc.pid
-
-# The nested compositor chooses its own server socket (normally wayland-0).
+seatd-launch -- sway --unsupported-gpu -c /root/.config/sway/config >/tmp/vessel-sway.log 2>&1 &
+SWAY_PID=$!
+echo "$SWAY_PID" >/tmp/vessel-sway.pid
 for i in $(seq 1 240); do
-  CHILD=$(find /tmp/vessel-runtime -maxdepth 1 -type s -name 'wayland-*' ! -name 'vessel-host-0' -printf '%f\n' 2>/dev/null | head -1)
+  CHILD=$(find /tmp/vessel-runtime -maxdepth 1 -type s -name 'wayland-*' -printf '%f\n' 2>/dev/null | head -1)
   [ -n "$CHILD" ] && break
-  kill -0 "$LABWC_PID" 2>/dev/null || {{ cat /tmp/vessel-labwc.log; exit 53; }}
+  kill -0 "$SWAY_PID" 2>/dev/null || {{ cat /tmp/vessel-sway.log; exit 53; }}
   sleep .1
 done
 [ -n "${{CHILD:-}}" ] || exit 54
 echo "$CHILD" >/tmp/vessel-child-wayland
-wait "$LABWC_PID"
+wait "$SWAY_PID"
 '''
         encoded = base64.b64encode(wrapper.encode()).decode()
         launch = (
-            "pkill -x labwc 2>/dev/null || true; pkill -x waybar 2>/dev/null || true; "
-            "pkill -x swaybg 2>/dev/null || true; pkill -f '[v]essel-wayland-bridge' 2>/dev/null || true; "
-            "rm -f /tmp/vessel-wayland-session.sh /tmp/vessel-native-wayland.pid /tmp/vessel-labwc.pid /tmp/vessel-child-wayland; "
+            "pkill -x sway 2>/dev/null || true; pkill -x swaybar 2>/dev/null || true; "
+            "pkill -x foot 2>/dev/null || true; pkill -f '[v]essel-wayland-bridge' 2>/dev/null || true; "
+            "rm -f /tmp/vessel-wayland-session.sh /tmp/vessel-native-wayland.pid /tmp/vessel-sway.pid /tmp/vessel-child-wayland; "
             f"printf '%s' {shlex.quote(encoded)} | base64 -d > /root/vessel-wayland-session.sh; "
             "chmod +x /root/vessel-wayland-session.sh; "
-            "export XDG_RUNTIME_DIR=/tmp/vessel-runtime; "
             "nohup dbus-run-session -- /root/vessel-wayland-session.sh >/tmp/vessel-wayland-session.log 2>&1 </dev/null & "
             "echo $! >/tmp/vessel-wayland-session.pid"
         )
@@ -192,61 +174,44 @@ wait "$LABWC_PID"
 
         self.set_progress("wayland_present", 91, "Waiting for wlroots GPU output on Android Surface")
         deadline = time.monotonic() + 60
-        relay_log = v31.base.RUNTIME / "vessel-relay.log"
         while time.monotonic() < deadline:
             status = self.guest(
                 "test -S /tmp/vessel-runtime/vessel-host-0 && echo PARENT_READY || true; "
                 "test -s /tmp/vessel-child-wayland && echo CHILD_READY || true; "
-                "pgrep -x labwc >/dev/null && echo LABWC_ALIVE || true; "
-                "tail -80 /tmp/vessel-labwc.log 2>/dev/null || true; "
-                "tail -50 /tmp/vessel-native-wayland.log 2>/dev/null || true",
+                "pgrep -x sway >/dev/null && echo SWAY_ALIVE || true; "
+                "grep -F 'imported wl_buffer' /tmp/vessel-native-wayland.log 2>/dev/null | tail -1 || true; "
+                "tail -60 /tmp/vessel-sway.log 2>/dev/null || true",
                 10,
             )
             low = status.lower()
-            if "llvmpipe" in low or "softpipe" in low or "pixman" in low:
+            if "llvmpipe" in low or "softpipe" in low or "pixman renderer" in low:
                 raise RuntimeError("wlroots fell back to software rendering:\n" + status[-7000:])
-            relay = ""
-            try:
-                relay = relay_log.read_text(errors="replace")[-20000:]
-            except Exception:
-                pass
             if (
                 "PARENT_READY" in status
                 and "CHILD_READY" in status
-                and "LABWC_ALIVE" in status
-                and "Android imported compositor object" in relay
+                and "SWAY_ALIVE" in status
+                and "imported wl_buffer" in status
             ):
                 self.desktop_ready = True
                 self.last_error = ""
-                self.append("WLROOTS_LABWC_READY\nVENUS_DMABUF_TO_ANDROID_READY\n")
+                self.append("WLROOTS_SWAY_READY\nVENUS_DMABUF_TO_ANDROID_READY\n")
                 self.set_progress("desktop_ready", 100, "Desktop live: wlroots -> GPU dma-buf -> Android Surface")
                 return self.state()
             time.sleep(.25)
 
         guest_tail = self.guest(
-            "echo '=== parent ==='; tail -240 /tmp/vessel-native-wayland.log 2>/dev/null || true; "
-            "echo '=== labwc ==='; tail -300 /tmp/vessel-labwc.log 2>/dev/null || true; "
-            "echo '=== session ==='; tail -160 /tmp/vessel-wayland-session.log 2>/dev/null || true; "
-            "echo '=== waybar ==='; tail -120 /tmp/vessel-waybar.log 2>/dev/null || true; "
+            "echo '=== parent ==='; tail -260 /tmp/vessel-native-wayland.log 2>/dev/null || true; "
+            "echo '=== sway ==='; tail -320 /tmp/vessel-sway.log 2>/dev/null || true; "
+            "echo '=== session ==='; tail -180 /tmp/vessel-wayland-session.log 2>/dev/null || true; "
             "echo '=== sockets ==='; ls -l /tmp/.venus_test /tmp/vessel-frame-export.sock /tmp/vessel-runtime 2>&1 || true",
             15,
         )
-        host_tail = ""
-        try:
-            host_tail = relay_log.read_text(errors="replace")[-16000:]
-        except Exception:
-            pass
-        raise RuntimeError(
-            "wlroots native presentation did not become ready:\n"
-            + guest_tail[-22000:]
-            + "\n=== host relay ===\n"
-            + host_tail
-        )
+        raise RuntimeError("wlroots native presentation did not become ready:\n" + guest_tail[-24000:])
 
     def desktop_action(self, name: str) -> dict[str, Any]:
         if name == "terminal":
             child = self.guest("cat /tmp/vessel-child-wayland 2>/dev/null || true", 5).strip().splitlines()
-            display = child[-1] if child else "wayland-0"
+            display = child[-1] if child else "wayland-1"
             self.guest(
                 f"export XDG_RUNTIME_DIR=/tmp/vessel-runtime WAYLAND_DISPLAY={shlex.quote(display)}; "
                 "nohup foot >/tmp/vessel-terminal.log 2>&1 </dev/null &",
@@ -259,9 +224,8 @@ wait "$LABWC_PID"
         if self.guest_ready and self._wait_rpc(.05):
             try:
                 self.guest(
-                    "pkill -x labwc 2>/dev/null || true; pkill -x waybar 2>/dev/null || true; "
-                    "pkill -x swaybg 2>/dev/null || true; pkill -x foot 2>/dev/null || true; "
-                    "pkill -f '[v]essel-wayland-bridge' 2>/dev/null || true",
+                    "pkill -x sway 2>/dev/null || true; pkill -x swaybar 2>/dev/null || true; "
+                    "pkill -x foot 2>/dev/null || true; pkill -f '[v]essel-wayland-bridge' 2>/dev/null || true",
                     10,
                 )
             except Exception:
@@ -275,34 +239,21 @@ runtime = WlrootsRuntime()
 def handle(req: dict[str, Any]) -> dict[str, Any]:
     action = str(req.get("action", "status"))
     try:
-        if action == "status":
-            return runtime.state()
-        if action == "start":
-            return runtime.start(float(req.get("timeout", 100)))
-        if action == "stop":
-            return runtime.stop()
+        if action == "status": return runtime.state()
+        if action == "start": return runtime.start(float(req.get("timeout", 100)))
+        if action == "stop": return runtime.stop()
         if action == "desktop":
-            return runtime.ensure_desktop(
-                int(req.get("width", 1600)),
-                int(req.get("height", 720)),
-                int(req.get("dpi", 120)),
-            )
-        if action == "desktopAction":
-            return runtime.desktop_action(str(req.get("name", "")))
+            return runtime.ensure_desktop(int(req.get("width", 1600)), int(req.get("height", 720)), int(req.get("dpi", 120)))
+        if action == "desktopAction": return runtime.desktop_action(str(req.get("name", "")))
         if action == "guest":
             output = runtime.guest(str(req.get("command", "")), float(req.get("timeout", 45)))
-            result = runtime.state()
-            result["output"] = output
-            return result
-        if action == "logs":
-            return runtime.state()
+            result = runtime.state(); result["output"] = output; return result
+        if action == "logs": return runtime.state()
         return {"ok": False, "error": f"unknown action: {action}"}
     except Exception as exc:
         runtime.last_error = f"{type(exc).__name__}: {exc}"
         runtime.set_progress("error", -1, runtime.last_error)
-        result = runtime.state()
-        result.update({"ok": False, "error": runtime.last_error})
-        return result
+        result = runtime.state(); result.update({"ok": False, "error": runtime.last_error}); return result
 
 
 if __name__ == "__main__":
@@ -312,26 +263,21 @@ if __name__ == "__main__":
     def serve_connection(conn: socket.socket) -> None:
         with conn:
             try:
-                conn.settimeout(5)
-                data = b""
+                conn.settimeout(5); data = b""
                 while b"\n" not in data and len(data) < 1_000_000:
                     chunk = conn.recv(65536)
-                    if not chunk:
-                        break
+                    if not chunk: break
                     data += chunk
                 req = json.loads(data.split(b"\n", 1)[0].decode() or "{}")
                 reply = handle(req)
             except Exception as exc:
                 reply = {"ok": False, "error": f"protocol: {type(exc).__name__}: {exc}"}
-            try:
-                conn.sendall((json.dumps(reply, separators=(",", ":")) + "\n").encode())
-            except OSError:
-                pass
+            try: conn.sendall((json.dumps(reply, separators=(",", ":")) + "\n").encode())
+            except OSError: pass
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 47631))
-    srv.listen(16)
+    srv.bind(("127.0.0.1", 47631)); srv.listen(16)
     while True:
         conn, _ = srv.accept()
         serve_connection(conn)
