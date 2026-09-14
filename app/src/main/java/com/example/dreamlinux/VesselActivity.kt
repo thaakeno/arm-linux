@@ -158,7 +158,7 @@ class VesselActivity : ComponentActivity() {
                 Spacer(Modifier.width(11.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Vessel", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("Rootless ARM64 Linux · Venus on Adreno", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Rootless ARM64 Linux · Weston 16 Vulkan · Venus on Adreno", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 StatusPill(when { state.kdeInstalled -> "DESKTOP"; state.running -> "RUNNING"; state.connected -> "READY"; else -> "SETUP" }, state.running)
             }
@@ -201,18 +201,16 @@ class VesselActivity : ComponentActivity() {
                     Metric(Icons.Default.Memory, "Memory", "8 GB UML guest")
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                     Metric(Icons.Default.Wifi, "Network", state.internetStage)
-                    Metric(Icons.Default.DesktopWindows, "Desktop", if (state.kdeInstalled) "KDE Plasma · embedded display" else state.kdeStage)
+                    Metric(Icons.Default.DesktopWindows, "Desktop", state.kdeStage)
                     Metric(Icons.Default.Storage, "Disk", "Persistent ext4")
                     Metric(Icons.Default.TouchApp, "Input", "Touch · trackpad · mouse · keyboard")
                 }
             }
 
             if (state.kdeInstalled) {
-                Text("Linux apps", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text("Desktop apps", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppButton(Icons.Default.Public, "Firefox") { VmSessionService.active?.launchFirefox() }
-                    AppButton(Icons.Default.Folder, "Files") { VmSessionService.active?.launchDesktopApp("dolphin") }
-                    AppButton(Icons.Default.Edit, "Kate") { VmSessionService.active?.launchDesktopApp("kate") }
+                    AppButton(Icons.Default.Terminal, "Foot terminal") { VmSessionService.active?.launchDesktopApp("terminal") }
                 }
             }
             LogCard(state)
@@ -226,7 +224,11 @@ class VesselActivity : ComponentActivity() {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Linux desktop", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text(if (state.kdeInstalled) "KDE Plasma · ${uptime(state.uptimeMs)}" else state.progressDetail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        if (state.kdeInstalled) "${state.desktopName} · native Vulkan · ${uptime(state.uptimeMs)}" else state.progressDetail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 if (state.kdeInstalled) StatusPill("LIVE", true)
             }
@@ -249,10 +251,10 @@ class VesselActivity : ComponentActivity() {
                     ElevatedCard(shape = RoundedCornerShape(24.dp)) {
                         Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Icon(Icons.Default.DesktopWindows, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary)
-                            Text(if (state.running) "Plasma isn't running yet" else "Linux is stopped")
+                            Text(if (state.running) "Weston 16 desktop isn't running yet" else "Linux is stopped")
                             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                             Button(onClick = { if (state.running) VmSessionService.active?.installKde() else startLinux() }, enabled = !state.busy) {
-                                Text(if (state.running) "Start Plasma" else "Start Linux + Plasma")
+                                Text(if (state.running) "Start Weston 16" else "Start Linux + Weston 16")
                             }
                         }
                     }
@@ -325,7 +327,9 @@ class VesselActivity : ComponentActivity() {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                     Metric(Icons.Default.Info, "Build", "${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_COMMIT}")
                     Metric(Icons.Default.Hub, "Backend", "ARM64 UML · protocol ${TermuxUmlController.REQUIRED_PROTOCOL}")
+                    Metric(Icons.Default.DesktopWindows, "Compositor", state.desktopName)
                     Metric(Icons.Default.Bolt, "GPU", state.graphics)
+                    Metric(Icons.Default.Memory, "Android presenter", state.presenterStatus)
                     Metric(Icons.Default.Wifi, "Network", state.internetStage)
                     Metric(Icons.Default.Storage, "Runtime", state.vmRoot.ifBlank { "Not connected" })
                 }
@@ -334,7 +338,7 @@ class VesselActivity : ComponentActivity() {
                 Icon(Icons.Default.HealthAndSafety, null); Spacer(Modifier.width(7.dp)); Text("Run runtime check")
             }
             OutlinedButton(onClick = { VmSessionService.active?.runGuestVulkanProbe() }, enabled = state.running && !state.busy, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Default.Memory, null); Spacer(Modifier.width(7.dp)); Text("Vulkan diagnostics")
+                Icon(Icons.Default.Memory, null); Spacer(Modifier.width(7.dp)); Text("Native Vulkan diagnostics")
             }
             LogCard(state)
         }
@@ -395,7 +399,10 @@ class VesselActivity : ComponentActivity() {
         ElevatedCard(shape = RoundedCornerShape(18.dp)) {
             Column(Modifier.fillMaxWidth().padding(12.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Runtime log", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Column(Modifier.weight(1f)) {
+                        Text("Detailed runtime log", fontWeight = FontWeight.SemiBold)
+                        Text("Weston · Vulkan · Venus · transport · Android presenter", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     TextButton(
                         enabled = state.console.isNotBlank(),
                         onClick = {
@@ -410,7 +417,13 @@ class VesselActivity : ComponentActivity() {
                     }
                 }
                 SelectionContainer {
-                    Text(state.console.takeLast(5000).ifBlank { "No runtime output yet." }, Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(rememberScrollState()).padding(top = 7.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        state.console.takeLast(12000).ifBlank { "No runtime output yet." },
+                        Modifier.fillMaxWidth().heightIn(max = 320.dp).verticalScroll(rememberScrollState()).padding(top = 7.dp),
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
