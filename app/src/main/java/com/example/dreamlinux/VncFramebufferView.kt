@@ -18,9 +18,10 @@ import kotlin.math.abs
 /**
  * Compatibility class name for the Compose desktop page.
  *
- * This is NOT a VNC/framebuffer/screenshot view. It owns a real Android Surface
- * consumed by VesselWaylandPresenter. KWin/Venus dma-bufs are imported by Vulkan
- * and presented by SurfaceFlinger; input travels independently as native evdev.
+ * This is NOT a VNC/framebuffer/screenshot view. It owns the real Android
+ * Surface consumed by VesselWaylandPresenter. Wayland dma-bufs are imported by
+ * Vulkan, wl_shm clients use damage-only Vulkan uploads, and Android input is
+ * routed directly into the compositor's wl_seat/text-input-v3 path.
  */
 class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder.Callback {
     enum class PointerMode { DIRECT, TRACKPAD }
@@ -46,7 +47,7 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
             outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_ACTION_NONE
             return object : BaseInputConnection(this, false) {
                 override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                    text?.forEach { sendCharacter(it) }
+                    text?.toString()?.takeIf { it.isNotEmpty() }?.let(VesselInputClient::text)
                     return true
                 }
 
@@ -54,7 +55,8 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
                     handleAndroidKey(event) || super.sendKeyEvent(event)
 
                 override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-                    if (beforeLength > 0) tapLinuxKey(14)
+                    repeat(beforeLength.coerceAtMost(32)) { tapLinuxKey(14) }
+                    repeat(afterLength.coerceAtMost(32)) { tapLinuxKey(111) }
                     return true
                 }
             }
@@ -64,6 +66,7 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
         holder.addCallback(this@VncFramebufferView)
         isFocusable = true
         isFocusableInTouchMode = true
+        keepScreenOn = false
         setOnTouchListener { _, event -> handleTouch(event) }
         setOnGenericMotionListener { _, event -> handleGenericMotion(event) }
         setOnKeyListener { _, _, event -> handleAndroidKey(event) }
