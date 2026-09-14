@@ -3,6 +3,23 @@ name: Vessel Weston 16 native Vulkan protocol 37 APK
 on:
   push:
     branches: [ arch/vessel-wlroots-final ]
+    paths:
+      - 'app/**'
+      - 'gradle/**'
+      - 'gradlew'
+      - 'gradlew.bat'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'tools/venus_poc/vessel_runtime_daemon_v37.py'
+      - 'tools/venus_poc/guest_input_direct_v34.py'
+      - 'tools/venus_poc/guest_relay_wayland.py'
+      - 'tools/venus_poc/host_relay_wayland.py'
+      - 'tools/venus_poc/host_input_bridge.py'
+      - 'tools/venus_poc/build_weston16_vulkan.sh'
+      - 'tools/venus_poc/run_venus_wayland.sh'
+      - 'tools/venus_poc/vessel_wayland_bridge/**'
+      - '.github/workflows/vessel-native-wayland.yml'
   workflow_dispatch:
 
 concurrency:
