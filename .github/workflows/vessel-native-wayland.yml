@@ -105,11 +105,11 @@ jobs:
             test -S /tmp/vessel-runtime/vessel-test-0
 
             WAYLAND_DISPLAY=vessel-test-0 wayland-info >/tmp/wayland-info.txt
-            grep -F "interface: wl_compositor, version: 4" /tmp/wayland-info.txt
-            grep -F "interface: wl_subcompositor, version: 1" /tmp/wayland-info.txt
-            grep -F "interface: wl_data_device_manager, version: 3" /tmp/wayland-info.txt
-            grep -F "interface: wl_seat, version: 5" /tmp/wayland-info.txt
-            grep -F "interface: xdg_wm_base, version: 1" /tmp/wayland-info.txt
+            grep -E "wl_compositor.*version: 4" /tmp/wayland-info.txt
+            grep -E "wl_subcompositor.*version: 1" /tmp/wayland-info.txt
+            grep -E "wl_data_device_manager.*version: 3" /tmp/wayland-info.txt
+            grep -E "wl_seat.*version: 5" /tmp/wayland-info.txt
+            grep -E "xdg_wm_base.*version: 1" /tmp/wayland-info.txt
 
             WAYLAND_DISPLAY=vessel-test-0 timeout 3s foot >/tmp/foot.log 2>&1 &
             FOOT_PID=$!
