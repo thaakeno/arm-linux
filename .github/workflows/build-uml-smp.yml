@@ -25,19 +25,25 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       - name: Checkout Vessel
         uses: actions/checkout@v4
 
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
-
+      # ubuntu-latest already ships the Android command-line tools.  Do not use
+      # android-actions/setup-android here: as of Sep 2026 its default package
+      # list still asks sdkmanager for the removed legacy `tools` package and
+      # aborts before our kernel build even starts.
       - name: Install NDK and kernel build dependencies
         run: |
           set -euxo pipefail
-          yes | sdkmanager --licenses || true
-          sdkmanager --install 'ndk;27.2.12479018'
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install 'ndk;27.2.12479018'
           sudo apt-get update
           sudo apt-get install -y \
             clang build-essential flex bison bc rsync cpio pkg-config \
@@ -45,7 +51,7 @@ jobs:
 
       - name: Build SMP UML/arm64 with Vessel umshm and virtio-gpu
         env:
-          NDK: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          NDK: /usr/local/lib/android/sdk/ndk/27.2.12479018
           JOBS: '4'
         run: |
           set -euxo pipefail
