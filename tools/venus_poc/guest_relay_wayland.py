@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
-"""Venus + KWin dma-buf relay for Vessel protocol 31.
+"""Guest half of Vessel's Venus + Wayland frame relay.
 
-Host Venus external objects are mapped into UML through /dev/umshm. If Mesa or
-KWin later sends one of those file descriptions back over SCM_RIGHTS, kcmp()
-identifies the original object and we send only its object id to the Android
-host. Pixel data never crosses the TCP control transport.
-
-AF_UNIX SOCK_STREAM ancillary data is a barrier rather than a message record.
-When recvmsg() receives SCM_RIGHTS it can also return ordinary stream bytes that
-precede the one-byte descriptor carrier.  Prefix bytes must remain plain stream
-data or the receiving vtest side can consume and discard the descriptor before
-its dedicated recvmsg() call.
+Venus external objects stay on the umshm zero-copy path. The compositor can
+also submit bounded, damage-only wl_shm payloads for software Wayland clients;
+those are a fallback path only and never replace dma-buf for GPU clients.
 """
 from __future__ import annotations
 
@@ -33,10 +26,13 @@ SIGNAL_H2G = 8
 FD_REF_G2H = 9
 FRAME_IMPORT_G2H = 10
 FRAME_NOTIFY_G2H = 11
+FRAME_SHM_G2H = 12
 FRAME_MSG = struct.Struct("<IIIIIIIIQQ")
 FRAME_MAGIC = 0x31574656
 FRAME_IMPORT = 1
 FRAME_FRAME = 2
+FRAME_SHM_DAMAGE = 4
+MAX_SHM_PAYLOAD = 64 * 1024 * 1024
 KCMP_FILE = 0
 SYS_KCMP = 272
 libc = ctypes.CDLL(None, use_errno=True)
@@ -161,10 +157,7 @@ class Relay:
             try:
                 obj_id = self.resolve_object(fd)
                 self.writer.send(FD_REF_G2H, struct.pack("!II", obj_id, len(carrier)) + carrier)
-                print(
-                    f"[guest-wayland] returned external fd as object id={obj_id} with exact 1-byte carrier",
-                    flush=True,
-                )
+                print(f"[guest-wayland] returned external fd as object id={obj_id}", flush=True)
             finally:
                 os.close(fd)
 
@@ -254,7 +247,7 @@ class Relay:
         control = bytearray(socket.CMSG_SPACE(4 * struct.calcsize("i")))
         data, anc, _flags, _ = conn.recvmsg(FRAME_MSG.size, len(control), socket.MSG_WAITALL)
         if len(data) != FRAME_MSG.size:
-            raise EOFError("short KWin frame message")
+            raise EOFError("short Vessel compositor frame message")
         passed = -1
         for level, ctype, cdata in anc:
             if level == socket.SOL_SOCKET and ctype == socket.SCM_RIGHTS:
@@ -278,7 +271,7 @@ class Relay:
         listener.listen(2)
         listener.settimeout(0.5)
         self.frame_listener = listener
-        print(f"[guest-wayland] KWin frame export socket {self.frame_path}", flush=True)
+        print(f"[guest-wayland] Vessel compositor frame socket {self.frame_path}", flush=True)
         try:
             while not self.stop.is_set():
                 try:
@@ -296,24 +289,33 @@ class Relay:
                         if magic != FRAME_MAGIC:
                             if fd >= 0:
                                 os.close(fd)
-                            raise RuntimeError("bad KWin frame magic")
+                            raise RuntimeError("bad Vessel frame magic")
                         if msg_type == FRAME_IMPORT:
                             if fd < 0:
-                                raise RuntimeError("KWin import missing dma-buf fd")
+                                raise RuntimeError("Vessel dma-buf import missing fd")
                             try:
                                 obj_id = self.resolve_object(fd)
                                 self.writer.send(FRAME_IMPORT_G2H, struct.pack("!I", obj_id) + raw)
-                                print(f"[guest-wayland] KWin dma-buf -> host object id={obj_id}", flush=True)
+                                print(f"[guest-wayland] dma-buf -> host object id={obj_id}", flush=True)
                             finally:
                                 os.close(fd)
                         elif msg_type == FRAME_FRAME:
                             if fd >= 0:
                                 os.close(fd)
                             self.writer.send(FRAME_NOTIFY_G2H, raw)
+                        elif msg_type == FRAME_SHM_DAMAGE:
+                            if fd >= 0:
+                                os.close(fd)
+                            damage_h = fields[8] >> 32
+                            payload_len = fields[5] * damage_h
+                            if payload_len <= 0 or payload_len > MAX_SHM_PAYLOAD:
+                                raise RuntimeError(f"invalid SHM damage payload {payload_len}")
+                            pixels = recvn(conn, payload_len)
+                            self.writer.send(FRAME_SHM_G2H, raw + pixels)
                         else:
                             if fd >= 0:
                                 os.close(fd)
-                            raise RuntimeError(f"bad KWin frame type {msg_type}")
+                            raise RuntimeError(f"bad Vessel frame type {msg_type}")
         finally:
             listener.close()
             self.frame_listener = None
@@ -349,7 +351,7 @@ class Relay:
         workers = [
             threading.Thread(target=self._worker, args=(self.local_to_host, "Mesa->host"), daemon=True),
             threading.Thread(target=self._worker, args=(self.host_to_local, "host->Mesa"), daemon=True),
-            threading.Thread(target=self._worker, args=(self.frame_export_loop, "KWin-frame"), daemon=True),
+            threading.Thread(target=self._worker, args=(self.frame_export_loop, "compositor-frame"), daemon=True),
         ]
         for t in workers:
             t.start()
