@@ -71,6 +71,7 @@ class VmSessionService : Service() {
             e.contains("runtime daemon did not start", ignoreCase = true) -> "Vessel runtime daemon failed to start"
             e.contains("UML exited during boot", ignoreCase = true) -> "Debian UML exited during boot"
             e.contains("did not reach a shell", ignoreCase = true) -> "Debian did not reach a shell before timeout"
+            e.contains("forbidden software", ignoreCase = true) -> "Weston could not start the Adreno GPU renderer"
             else -> e.lineSequence().firstOrNull()?.take(180) ?: "Runtime failed"
         }
     }
@@ -123,7 +124,14 @@ class VmSessionService : Service() {
         scope.launch {
             while (isActive) {
                 refresh(silent = true)
-                delay(if (state.value.busy || state.value.running || state.value.progressPhase !in setOf("idle", "desktop_ready", "error")) 300 else 1200)
+                val s = state.value
+                delay(
+                    when {
+                        s.busy || s.progressPhase !in setOf("idle", "desktop_ready", "error") -> 250
+                        s.running -> 1_000
+                        else -> 1_500
+                    }
+                )
             }
         }
         scope.launch { persistVerificationLoop() }
@@ -178,15 +186,19 @@ class VmSessionService : Service() {
             "command_agent" -> "Connecting Debian control channel"
             "venus" -> "Starting Venus GPU transport"
             "debian_ready" -> "Debian + Venus ready"
-            "compositor_prepare" -> "Preparing Vessel compositor"
-            "compositor_deps" -> "Installing minimal Wayland runtime"
-            "compositor_start" -> "Starting Vessel compositor"
-            "compositor_ready" -> "Connecting native compositor to Android"
-            "desktop_ready" -> "Vessel desktop live"
+            "desktop_deps" -> "Checking Weston desktop runtime"
+            "transport_build" -> "Preparing native display transport"
+            "desktop_config" -> "Configuring Weston desktop"
+            "transport_start" -> "Starting Android display transport"
+            "weston_start" -> "Starting Weston/libweston compositor"
+            "desktop_surface" -> "First Weston frame reached Android"
+            "desktop_ready" -> "Weston desktop live"
             else -> rawDetail
         }
         val uptime = obj.optLong("uptimeMs", if (running) state.value.uptimeMs else 0L)
-        val compositorStarting = running && phase in setOf("compositor_prepare", "compositor_deps", "compositor_start", "compositor_ready")
+        val desktopStarting = running && phase in setOf(
+            "desktop_deps", "transport_build", "desktop_config", "transport_start", "weston_start", "desktop_surface"
+        )
         val message = when {
             error.isNotBlank() -> error
             desktop -> "Vessel desktop is live · ${formatUptime(uptime)}"
@@ -202,11 +214,11 @@ class VmSessionService : Service() {
             running = running,
             debianStarting = running && !guest,
             kdeInstalled = desktop,
-            kdeInstalling = !desktop && compositorStarting,
+            kdeInstalling = !desktop && desktopStarting,
             kdeStage = when {
-                desktop -> "Vessel compositor live · native dma-buf display · ${formatUptime(uptime)}"
-                compositorStarting -> detail
-                running && guest -> "Debian ready · compositor not started"
+                desktop -> "Weston/libweston · native Android display · ${formatUptime(uptime)}"
+                desktopStarting -> detail
+                running && guest -> "Debian ready · desktop not started"
                 else -> "not started"
             },
             internetReady = guest,
@@ -226,8 +238,8 @@ class VmSessionService : Service() {
                 else -> "runtime_ready"
             },
             message = message,
-            graphics = if (guest) "Mesa Zink + Venus · Adreno GPU · dma-buf/umshm" else state.value.graphics,
-            capabilities = if (ok) "Rootless UML · Vessel Wayland compositor · native dma-buf · persistent ext4" else state.value.capabilities
+            graphics = if (guest) "Weston GL · Zink + Venus · Adreno · dma-buf/umshm" else state.value.graphics,
+            capabilities = if (ok) "Rootless UML · Weston/libweston · XWayland · native Vulkan display · persistent ext4" else state.value.capabilities
         )
     }
 
@@ -278,18 +290,18 @@ class VmSessionService : Service() {
 
     fun installDebian() = startDebian(requestedWidth, requestedHeight, requestedDpi, 120)
 
-    fun installKde() = operation("Starting Vessel compositor") {
+    fun installKde() = operation("Starting Weston desktop") {
         state.value = state.value.copy(
             kdeInstalling = true,
             lastError = "",
             progressPhase = "queued",
             progressPercent = 1,
-            progressDetail = "Starting Vessel compositor",
-            message = "Starting Vessel compositor…"
+            progressDetail = "Starting Weston desktop",
+            message = "Starting Weston desktop…"
         )
         applyRuntime(
             uml.startDesktopAsync(requestedWidth, requestedHeight, requestedDpi),
-            "Vessel compositor startup launched"
+            "Weston desktop startup launched"
         )
     }
 
@@ -319,7 +331,7 @@ class VmSessionService : Service() {
             append(" · protocol=").append(runtime.optInt("protocolVersion", 0))
             append(" · display=").append(runtime.optString("displayTransport", "unknown"))
             if (runtime.optBoolean("guestReady")) append(" · Venus guest=ready")
-            if (runtime.optBoolean("desktopReady")) append(" · compositor=live")
+            if (runtime.optBoolean("desktopReady")) append(" · Weston=live")
         }
         state.value = state.value.copy(capabilities = text, message = text)
         applyRuntime(runtime, text)
@@ -377,7 +389,7 @@ class VmSessionService : Service() {
                     )
                 }
             }
-            delay(2_000)
+            delay(if (s.running) 30_000 else 60_000)
         }
     }
 
