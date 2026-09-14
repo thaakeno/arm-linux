@@ -13,14 +13,14 @@ import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.Socket
 
-/** Android-side controller for Vessel's rootless UML + Venus + wlroots runtime. */
+/** Android-side controller for Vessel's rootless UML + Venus + direct Wayland compositor runtime. */
 class TermuxUmlController(private val context: Context) {
     companion object {
         const val TERMUX_PACKAGE = "com.termux"
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = -1
-        const val REQUIRED_PROTOCOL = 33
+        const val REQUIRED_PROTOCOL = 34
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
         private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
@@ -28,7 +28,7 @@ class TermuxUmlController(private val context: Context) {
         private const val EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
         private const val EXTRA_WORKDIR = "com.termux.RUN_COMMAND_WORKDIR"
         private const val EXTRA_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
-        private const val DISPLAY_TRANSPORT = "wlroots-sway-dmabuf-venus-android-surface-v1"
+        private const val DISPLAY_TRANSPORT = "vessel-compositor-dmabuf-venus-android-surface-v2"
     }
 
     fun isTermuxInstalled(): Boolean = try {
@@ -48,7 +48,7 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 33 wlroots runtime"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 34 direct compositor runtime"
               set -e
 
               DAEMON_RE='^([^ ]*/)?python(3)?[[:space:]]+[^ ]*/vessel_runtime_daemon(_v[0-9]+)?\.py([[:space:]].*)?${'$'}'
@@ -64,8 +64,6 @@ class TermuxUmlController(private val context: Context) {
                 [ -z "${'$'}REMAINING" ] || kill -KILL ${'$'}REMAINING 2>/dev/null || true
               fi
 
-              # First launch must work on a clean Termux install. Earlier builds
-              # assumed this clone existed and could leave the UI stuck at READY.
               if [ ! -d ~/venus-poc/.git ]; then
                 rm -rf ~/venus-poc
                 git clone --filter=blob:none --no-checkout https://github.com/thaakeno/arm-linux.git ~/venus-poc
@@ -81,14 +79,14 @@ class TermuxUmlController(private val context: Context) {
                 git -C ~/vessel-poc-runtime clean -ffd
               fi
 
-              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v33.py
+              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v34.py
               test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
               test -f ~/vessel-poc-runtime/tools/venus_poc/run_venus_wayland.sh
               export VESSEL_POC_DIR=~/vessel-poc-runtime
               export VESSEL_MEM_MB=8192
               export ENABLE_X11=0
               export VESSEL_ANDROID_PACKAGE=${'$'}(if [ "${BuildConfig.LOCAL_TEST}" = "true" ]; then echo com.example.dreamlinux.localvessel; else echo com.example.dreamlinux; fi)
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v33.py
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v34.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
@@ -130,7 +128,7 @@ class TermuxUmlController(private val context: Context) {
             throw IllegalStateException(reason)
         }
         if (!isNativeProtocol(obj)) {
-            throw IllegalStateException("$action returned a stale/non-GPU Vessel runtime")
+            throw IllegalStateException("$action returned a stale Vessel runtime")
         }
         return obj
     }
@@ -156,7 +154,7 @@ class TermuxUmlController(private val context: Context) {
             }
         }
         throw IllegalStateException(
-            "Vessel protocol 33 wlroots runtime did not start. In Termux run: cat ~/vessel-daemon.log",
+            "Vessel protocol 34 runtime did not start. In Termux run: cat ~/vessel-daemon.log",
             last,
         )
     }
@@ -192,6 +190,17 @@ class TermuxUmlController(private val context: Context) {
             requestBlocking(
                 JSONObject().put("action", "desktop").put("width", width).put("height", height).put("dpi", dpi),
                 22 * 60 * 1_000,
+            ),
+        )
+    }
+
+    suspend fun startDesktopAsync(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) {
+        ensureDaemon()
+        requireOk(
+            "Start desktop",
+            requestBlocking(
+                JSONObject().put("action", "desktopAsync").put("width", width).put("height", height).put("dpi", dpi),
+                6_000,
             ),
         )
     }
