@@ -3,7 +3,6 @@ package com.example.dreamlinux
 import android.app.*
 import android.content.Intent
 import android.os.IBinder
-import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -55,8 +54,6 @@ class VmSessionService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var uml: TermuxUmlController
-    // 1600x720 matches modern ~20:9 phones well and avoids wasting bandwidth
-    // and GPU work on pixels the physical panel cannot use at this scale.
     private var requestedWidth = 1600
     private var requestedHeight = 720
     private var requestedDpi = 120
@@ -126,7 +123,7 @@ class VmSessionService : Service() {
         scope.launch {
             while (isActive) {
                 refresh(silent = true)
-                delay(if (state.value.busy || state.value.running) 650 else 1600)
+                delay(if (state.value.busy || state.value.running || state.value.progressPhase !in setOf("idle", "desktop_ready", "error")) 300 else 1200)
             }
         }
         scope.launch { persistVerificationLoop() }
@@ -176,22 +173,27 @@ class VmSessionService : Service() {
         val error = shortError(rawError)
         val percent = obj.optInt("progressPercent", state.value.progressPercent)
         val rawDetail = obj.optString("progressDetail", state.value.progressDetail).ifBlank { state.value.progressDetail }
-        val detail = when {
-            rawError.isNotBlank() && phase == "error" -> error
-            phase == "wayland_present" -> "Connecting KWin GPU output to Android display"
-            phase == "wayland_start" -> "Starting KWin GPU compositor"
-            phase == "wayland_build" -> "Preparing native GPU display bridge"
+        val detail = when (phase) {
+            "queued" -> "Starting Vessel Linux"
+            "command_agent" -> "Connecting Debian control channel"
+            "venus" -> "Starting Venus GPU transport"
+            "debian_ready" -> "Debian + Venus ready"
+            "compositor_prepare" -> "Preparing Vessel compositor"
+            "compositor_deps" -> "Installing minimal Wayland runtime"
+            "compositor_start" -> "Starting Vessel compositor"
+            "compositor_ready" -> "Connecting native compositor to Android"
+            "desktop_ready" -> "Vessel desktop live"
             else -> rawDetail
         }
         val uptime = obj.optLong("uptimeMs", if (running) state.value.uptimeMs else 0L)
-        val compositorStarting = running && phase in setOf("wayland_build", "wayland_start", "wayland_present")
+        val compositorStarting = running && phase in setOf("compositor_prepare", "compositor_deps", "compositor_start", "compositor_ready")
         val message = when {
             error.isNotBlank() -> error
-            desktop -> "KDE Plasma is live · ${formatUptime(uptime)}"
-            state.value.busy && detail.isNotBlank() -> "$detail · ${formatUptime(uptime)}"
+            desktop -> "Vessel desktop is live · ${formatUptime(uptime)}"
+            detail.isNotBlank() && (state.value.busy || running || phase != "idle") -> "$detail · ${formatUptime(uptime)}"
             fallbackMessage != null -> fallbackMessage
             guest -> "Debian ARM64 ready · ${formatUptime(uptime)}"
-            running -> detail.ifBlank { "Booting Debian ARM64" } + " · ${formatUptime(uptime)}"
+            running -> "Booting Debian ARM64 · ${formatUptime(uptime)}"
             else -> "Runtime ready"
         }
         val rawLog = obj.optString("logTail", state.value.console)
@@ -202,10 +204,9 @@ class VmSessionService : Service() {
             kdeInstalled = desktop,
             kdeInstalling = !desktop && compositorStarting,
             kdeStage = when {
-                desktop -> "KWin/Plasma live · native Vulkan display · ${formatUptime(uptime)}"
-                running && phase == "wayland_present" -> "KWin compositor running · connecting Android display"
-                running && compositorStarting -> detail
-                running && guest -> "Debian ready · desktop not requested"
+                desktop -> "Vessel compositor live · native dma-buf display · ${formatUptime(uptime)}"
+                compositorStarting -> detail
+                running && guest -> "Debian ready · compositor not started"
                 else -> "not started"
             },
             internetReady = guest,
@@ -226,7 +227,7 @@ class VmSessionService : Service() {
             },
             message = message,
             graphics = if (guest) "Mesa Zink + Venus · Adreno GPU · dma-buf/umshm" else state.value.graphics,
-            capabilities = if (ok) "Rootless UML · native Vulkan desktop · direct evdev input · persistent ext4" else state.value.capabilities
+            capabilities = if (ok) "Rootless UML · Vessel Wayland compositor · native dma-buf · persistent ext4" else state.value.capabilities
         )
     }
 
@@ -254,12 +255,20 @@ class VmSessionService : Service() {
         requestedWidth = width.coerceIn(800, 3840)
         requestedHeight = height.coerceIn(540, 2160)
         requestedDpi = dpi.coerceIn(96, 240)
-        operation("Starting Debian") {
-            state.value = state.value.copy(debianStarting = true, lastError = "", message = "Booting ARM64 UML…")
-            applyRuntime(uml.start(), "Debian ARM64 ready")
-            state.value = state.value.copy(kdeInstalling = true, kdeStage = "Preparing Plasma", message = "Preparing KDE Plasma…")
-            applyRuntime(uml.startDesktop(requestedWidth, requestedHeight, requestedDpi), "KDE Plasma is live")
-            state.value = state.value.copy(kdeInstalling = false, kdeInstalled = true)
+        operation("Starting Vessel Linux") {
+            state.value = state.value.copy(
+                debianStarting = true,
+                kdeInstalling = true,
+                lastError = "",
+                progressPhase = "queued",
+                progressPercent = 1,
+                progressDetail = "Starting Vessel Linux",
+                message = "Starting Vessel Linux…"
+            )
+            applyRuntime(
+                uml.startDesktopAsync(requestedWidth, requestedHeight, requestedDpi),
+                "Vessel startup launched"
+            )
         }
     }
 
@@ -269,10 +278,19 @@ class VmSessionService : Service() {
 
     fun installDebian() = startDebian(requestedWidth, requestedHeight, requestedDpi, 120)
 
-    fun installKde() = operation("Starting KDE Plasma") {
-        state.value = state.value.copy(kdeInstalling = true, lastError = "", kdeStage = "Preparing Plasma", message = "Preparing Plasma desktop…")
-        applyRuntime(uml.startDesktop(requestedWidth, requestedHeight, requestedDpi), "KDE Plasma is live")
-        state.value = state.value.copy(kdeInstalling = false, kdeInstalled = true)
+    fun installKde() = operation("Starting Vessel compositor") {
+        state.value = state.value.copy(
+            kdeInstalling = true,
+            lastError = "",
+            progressPhase = "queued",
+            progressPercent = 1,
+            progressDetail = "Starting Vessel compositor",
+            message = "Starting Vessel compositor…"
+        )
+        applyRuntime(
+            uml.startDesktopAsync(requestedWidth, requestedHeight, requestedDpi),
+            "Vessel compositor startup launched"
+        )
     }
 
     fun stopVm() = operation("Stopping Linux") {
@@ -301,7 +319,7 @@ class VmSessionService : Service() {
             append(" · protocol=").append(runtime.optInt("protocolVersion", 0))
             append(" · display=").append(runtime.optString("displayTransport", "unknown"))
             if (runtime.optBoolean("guestReady")) append(" · Venus guest=ready")
-            if (runtime.optBoolean("desktopReady")) append(" · Plasma=live")
+            if (runtime.optBoolean("desktopReady")) append(" · compositor=live")
         }
         state.value = state.value.copy(capabilities = text, message = text)
         applyRuntime(runtime, text)
