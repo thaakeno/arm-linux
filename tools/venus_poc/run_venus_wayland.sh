@@ -10,8 +10,10 @@ VENUS_SOCK="${VENUS_SOCK:-$PREFIX/tmp/venus.sock}"
 UMSHM_SOCK="${UMSHM_SOCK:-$PREFIX/tmp/umshm.sock}"
 HOST_LOG="${HOST_LOG:-$UML_DIR/vessel-renderer.log}"
 RELAY_LOG="${RELAY_LOG:-$UML_DIR/vessel-relay.log}"
+FRAME_RELAY_LOG="${FRAME_RELAY_LOG:-$UML_DIR/vessel-frame-relay.log}"
 INPUT_LOG="${INPUT_LOG:-$UML_DIR/vessel-input-bridge.log}"
 PORT="${VENUS_RELAY_PORT:-5002}"
+FRAME_PORT="${VESSEL_FRAME_RELAY_PORT:-5003}"
 VESSEL_VCPUS="${VESSEL_VCPUS:-6}"
 VESSEL_MEM_MB="${VESSEL_MEM_MB:-8192}"
 PROCESS_WORKER_MARKER="${PROCESS_WORKER_MARKER:-$PREFIX/opt/virglrenderer-android/.venus-process-worker}"
@@ -19,10 +21,6 @@ PROCESS_WORKER_MARKER="${PROCESS_WORKER_MARKER:-$PREFIX/opt/virglrenderer-androi
 start_virgl() {
   rm -f "$VENUS_SOCK"
   cd "$POC_DIR"
-  # Vessel has exactly one active guest-side Venus connection. Keep vtest
-  # in-process and single-client; the render server itself uses process workers.
-  # This avoids the Android thread-worker/shared-teardown race that produced
-  # pthread_mutex_lock-on-destroyed-mutex during KWin context teardown.
   virgl_test_server_android \
     --angle-vulkan \
     --venus \
@@ -63,9 +61,11 @@ cleanup() {
   rc=$?
   trap - EXIT INT TERM
   [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
+  [ -n "${FRAME_RELAY_PID:-}" ] && kill "$FRAME_RELAY_PID" 2>/dev/null || true
   [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null || true
   [ -n "${INPUT_PID:-}" ] && kill "$INPUT_PID" 2>/dev/null || true
   [ -n "${VIRGL_PID:-}" ] && kill "$VIRGL_PID" 2>/dev/null || true
+  pkill -f '[h]ost_frame_damage_relay.py' 2>/dev/null || true
   pkill -f '[h]ost_relay_wayland.py' 2>/dev/null || true
   pkill -f '[h]ost_input_bridge.py' 2>/dev/null || true
   pkill -f '[v]irgl_test_server_android' 2>/dev/null || true
@@ -76,6 +76,7 @@ trap cleanup EXIT INT TERM
 
 for f in \
   "$POC_DIR/tools/venus_poc/host_relay_wayland.py" \
+  "$POC_DIR/tools/venus_poc/host_frame_damage_relay.py" \
   "$POC_DIR/tools/venus_poc/host_input_bridge.py" \
   "$UML_DIR/linux-umshm" \
   "$UML_DIR/stub_exe-umshm" \
@@ -106,11 +107,15 @@ for proc in /proc/[0-9]*; do
   esac
 done
 sleep .4
+
+pkill -f '[h]ost_frame_damage_relay.py' 2>/dev/null || true
 pkill -f '[h]ost_relay_wayland.py' 2>/dev/null || true
 pkill -f '[h]ost_input_bridge.py' 2>/dev/null || true
 pkill -f '[v]irgl_test_server_android' 2>/dev/null || true
 rm -f "$VENUS_SOCK" "$UMSHM_SOCK"
 : >"$HOST_LOG"
+: >"$RELAY_LOG"
+: >"$FRAME_RELAY_LOG"
 : >"$INPUT_LOG"
 
 start_virgl
@@ -124,12 +129,32 @@ python3 "$POC_DIR/tools/venus_poc/host_relay_wayland.py" \
   --port "$PORT" \
   >"$RELAY_LOG" 2>&1 &
 RELAY_PID=$!
+
 for _ in $(seq 1 80); do
   [ -S "$UMSHM_SOCK" ] && break
-  kill -0 "$RELAY_PID" 2>/dev/null || { echo "[venus-wayland] host relay died" >&2; tail -120 "$RELAY_LOG"; exit 1; }
+  kill -0 "$RELAY_PID" 2>/dev/null || {
+    echo "[venus-wayland] host relay died" >&2
+    tail -120 "$RELAY_LOG" >&2 || true
+    exit 1
+  }
   sleep .1
 done
-[ -S "$UMSHM_SOCK" ] || { echo "[venus-wayland] umshm socket missing" >&2; exit 1; }
+[ -S "$UMSHM_SOCK" ] || {
+  echo "[venus-wayland] umshm socket missing" >&2
+  exit 1
+}
+
+python3 "$POC_DIR/tools/venus_poc/host_frame_damage_relay.py" \
+  --listen 127.0.0.1 \
+  --port "$FRAME_PORT" \
+  >"$FRAME_RELAY_LOG" 2>&1 &
+FRAME_RELAY_PID=$!
+sleep .1
+kill -0 "$FRAME_RELAY_PID" 2>/dev/null || {
+  echo "[venus-wayland] persistent frame relay died" >&2
+  cat "$FRAME_RELAY_LOG" >&2 || true
+  exit 1
+}
 
 python3 "$POC_DIR/tools/venus_poc/host_input_bridge.py" \
   --android-port 47634 --guest-port 47633 \
@@ -143,9 +168,11 @@ kill -0 "$INPUT_PID" 2>/dev/null || {
 }
 
 echo "[venus-wayland] Venus host + dma-buf/AHardwareBuffer relay ready"
+echo "[venus-wayland] persistent SHM damage relay ready"
 echo "[venus-wayland] native evdev input bridge ready"
 echo "[venus-wayland] host log:  $HOST_LOG"
 echo "[venus-wayland] relay log: $RELAY_LOG"
+echo "[venus-wayland] frame log: $FRAME_RELAY_LOG"
 echo "[venus-wayland] input log: $INPUT_LOG"
 echo "[venus-wayland] booting Debian UML with $VESSEL_VCPUS vCPUs and ${VESSEL_MEM_MB} MiB RAM..."
 
