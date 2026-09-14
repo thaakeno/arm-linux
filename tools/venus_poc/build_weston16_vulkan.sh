@@ -21,9 +21,24 @@ if [ "$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
     if [ ! -f /etc/apt/sources.list.d/bookworm-backports.list ]; then
         printf '%s\n' 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/bookworm-backports.list
     fi
+    # Weston 16 requires wayland-protocols >= 1.46. Bookworm-backports only has
+    # 1.43, while sid currently carries the architecture-independent 1.49 data
+    # package. Keep sid low-priority and explicitly select only that package.
+    if [ ! -f /etc/apt/sources.list.d/vessel-wayland-protocols-sid.list ]; then
+        printf '%s\n' 'deb http://deb.debian.org/debian sid main' > /etc/apt/sources.list.d/vessel-wayland-protocols-sid.list
+    fi
+    cat >/etc/apt/preferences.d/vessel-sid-wayland-protocols <<'EOF'
+Package: *
+Pin: release a=unstable
+Pin-Priority: 50
+
+Package: wayland-protocols
+Pin: release a=unstable
+Pin-Priority: 990
+EOF
+
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    # Weston 16 needs newer Wayland/libdrm/display-info than stock Bookworm.
     apt-get install -y --no-install-recommends \
         ca-certificates curl xz-utils meson ninja-build pkg-config python3 \
         build-essential glslang-tools libvulkan-dev libgbm-dev \
@@ -33,7 +48,8 @@ if [ "$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
         libxcb-xkb-dev libx11-dev libx11-xcb-dev libxcursor-dev \
         libjpeg-dev libwebp-dev xwayland dbus-x11 foot fonts-dejavu-core
     apt-get install -y --no-install-recommends -t bookworm-backports \
-        libwayland-dev libwayland-bin wayland-protocols libdrm-dev libdisplay-info-dev
+        libwayland-dev libwayland-bin libdrm-dev libdisplay-info-dev
+    apt-get install -y --no-install-recommends -t sid wayland-protocols
 fi
 
 for cmd in meson ninja pkg-config glslangValidator curl sha256sum; do
@@ -41,7 +57,12 @@ for cmd in meson ninja pkg-config glslangValidator curl sha256sum; do
 done
 pkg-config --atleast-version=1.22 wayland-server || { pkg-config --modversion wayland-server; exit 21; }
 pkg-config --atleast-version=2.4.108 libdrm || { pkg-config --modversion libdrm; exit 22; }
-pkg-config --exists vulkan gbm pixman-1 xkbcommon cairo || exit 23
+pkg-config --atleast-version=1.46 wayland-protocols || { pkg-config --modversion wayland-protocols; exit 23; }
+pkg-config --exists vulkan gbm pixman-1 xkbcommon cairo || exit 24
+
+echo "[weston16-build] wayland-server=$(pkg-config --modversion wayland-server)"
+echo "[weston16-build] wayland-protocols=$(pkg-config --modversion wayland-protocols)"
+echo "[weston16-build] libdrm=$(pkg-config --modversion libdrm)"
 
 rm -rf "$SRC_ROOT"
 mkdir -p "$SRC_ROOT"
@@ -82,7 +103,7 @@ find "$PREFIX" -name 'vulkan-renderer.so' -type f -print -quit | grep -q .
 find "$PREFIX" -name 'wayland-backend.so' -type f -print -quit | grep -q .
 if find "$PREFIX" -name 'gl-renderer.so' -type f -print -quit | grep -q .; then
     echo 'forbidden gl-renderer.so was built' >&2
-    exit 24
+    exit 25
 fi
 
 echo VESSEL_WESTON16_VULKAN_BUILT
