@@ -1,4 +1,4 @@
-name: Vessel Weston protocol 36 APK
+name: Vessel Weston 16 native Vulkan protocol 37 APK
 
 on:
   push:
@@ -6,76 +6,65 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: vessel-weston-${{ github.ref }}
+  group: vessel-weston-vulkan-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  native-wayland-runtime:
+  native-vulkan-screen:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: false
 
-      - name: Verify protocol 36 runtime invariants
-        run: |
-          set -euxo pipefail
-          grep -F 'PROTOCOL_VERSION = 36' tools/venus_poc/vessel_runtime_daemon_v36.py
-          grep -F 'v36-owned-weston-log-exact-frame-probe' tools/venus_poc/vessel_runtime_daemon_v36.py
-          grep -F 'weston-nested-vessel-transport-venus-android-surface-v2' tools/venus_poc/vessel_runtime_daemon_v36.py
-          grep -F -- '--backend=wayland-backend.so --use-pixman' tools/venus_poc/vessel_runtime_daemon_v36.py
-          grep -F 'PERSISTENT_SHM_RELAY_READY' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F 'FRAME_SHM_G2H = 12' tools/venus_poc/guest_frame_damage_relay.py
-          grep -F 'FRAME_SHM_G2H = 12' tools/venus_poc/host_frame_damage_relay.py
-          grep -F 'stale_uml_pids=()' tools/venus_poc/run_venus_wayland.sh
-          ! grep -F 'sleep .4' tools/venus_poc/run_venus_wayland.sh
-          python3 - <<'PY'
-          from pathlib import Path
-          s = Path('tools/venus_poc/vessel_runtime_daemon_v36.py').read_text()
-          assert 'install -o vessel -g vessel -m 0600 /dev/null "$WESTON_LOG"' in s
-          assert "grep -Eq '^\\[vessel-host\\] (dmabuf-import|shm-damage) '" in s
-          assert '"[vessel-host] dmabuf-import " in last' in s
-          assert '"[vessel-host] shm-damage " in last' in s
-          assert "grep -Eq 'dmabuf-import|shm-damage'" not in s
-          PY
-
-      - name: Syntax-check runtime and relays
+      - name: Verify GPU-only protocol 37 invariants
         run: |
           set -euxo pipefail
           python3 -m py_compile \
-            tools/venus_poc/vessel_runtime_daemon_v31.py \
-            tools/venus_poc/vessel_runtime_daemon_v33.py \
-            tools/venus_poc/vessel_runtime_daemon_v34.py \
-            tools/venus_poc/vessel_runtime_daemon_v35.py \
-            tools/venus_poc/vessel_runtime_daemon_v36.py \
-            tools/venus_poc/guest_command_agent_v33.py \
+            tools/venus_poc/vessel_runtime_daemon_v37.py \
+            tools/venus_poc/ci_dmabuf_screen_probe.py \
             tools/venus_poc/guest_input_direct_v34.py \
             tools/venus_poc/guest_relay_wayland.py \
-            tools/venus_poc/guest_frame_damage_relay.py \
             tools/venus_poc/host_relay_wayland.py \
-            tools/venus_poc/host_frame_damage_relay.py \
             tools/venus_poc/host_input_bridge.py
+          bash -n tools/venus_poc/build_weston16_vulkan.sh
           bash -n tools/venus_poc/run_venus_wayland.sh
+          grep -F 'PROTOCOL_VERSION = 37' tools/venus_poc/vessel_runtime_daemon_v37.py
+          grep -F 'v37-weston16-native-vulkan-gpu-only' tools/venus_poc/vessel_runtime_daemon_v37.py
+          grep -F 'weston16-vulkan-venus-android-surface-v3' tools/venus_poc/vessel_runtime_daemon_v37.py
+          grep -F -- '--backend=wayland --renderer=vulkan' tools/venus_poc/vessel_runtime_daemon_v37.py
+          grep -F '"softwareFallback": False' tools/venus_poc/vessel_runtime_daemon_v37.py
+          grep -F '"translationLayer": "none"' tools/venus_poc/vessel_runtime_daemon_v37.py
+          grep -F '"gpuOnly": True' tools/venus_poc/vessel_runtime_daemon_v37.py
+          ! grep -E 'MESA_LOADER_DRIVER_OVERRIDE|GALLIUM_DRIVER|--use-pixman|renderer=gl' tools/venus_poc/vessel_runtime_daemon_v37.py
+          ! grep -F 'host_frame_damage_relay.py" \\' tools/venus_poc/run_venus_wayland.sh
+          grep -F 'software/SHM display fallback disabled' tools/venus_poc/run_venus_wayland.sh
 
-      - name: Compile transport and run nested Weston + Foot frame smoke test
+      - name: Build Weston 16 Vulkan and verify a real non-black dma-buf screen
         run: |
           set -euxo pipefail
           docker run --rm -v "$PWD:/src:ro" -w /src debian:12-slim bash -lc '
             set -euxo pipefail
-            apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              build-essential pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
-              weston foot xwayland dbus-x11 python3
+            export VESSEL_WESTON_PREFIX=/opt/vessel-weston16
+            export VESSEL_BUILD_JOBS=2
+            bash /src/tools/venus_poc/build_weston16_vulkan.sh
+            apt-get install -y --no-install-recommends mesa-vulkan-drivers
 
-            rm -rf /tmp/vessel-transport-build /tmp/vessel-runtime /tmp/vessel-frame-test.sock
+            /opt/vessel-weston16/bin/weston --version | grep -F "16.0.0"
+            find /opt/vessel-weston16 -name vulkan-renderer.so -type f -print -quit | grep -q .
+            ! find /opt/vessel-weston16 -name gl-renderer.so -type f -print -quit | grep -q .
+
+            rm -rf /tmp/vessel-transport-build /tmp/vessel-runtime
+            rm -f /tmp/vessel-screen.sock /tmp/screen-probe.log /tmp/transport.log /tmp/weston.log /tmp/foot.log
             mkdir -p /tmp/vessel-transport-build /tmp/vessel-runtime
-            install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
             chmod 700 /tmp/vessel-runtime
+            install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
+
             cd /tmp/vessel-transport-build
             wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-server-protocol.h
             wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-protocol.c
@@ -89,59 +78,92 @@ jobs:
               xdg-shell-protocol.c linux-dmabuf-unstable-v1-protocol.c presentation-time-protocol.c \
               $(pkg-config --cflags --libs wayland-server xkbcommon) -o /tmp/vessel-transport-host
 
-            python3 -c "import os,socket,struct; p=\"/tmp/vessel-frame-test.sock\"; os.path.exists(p) and os.unlink(p); s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.bind(p); s.listen(1); c,_=s.accept(); h=struct.Struct(\"<IIIIIIIIQQ\"); raw=c.recv(h.size,socket.MSG_WAITALL); f=h.unpack(raw); assert f[0]==0x31574656; n=f[5]*(f[8]>>32) if f[1]==4 else 0; data=b\"\"; exec(\"while len(data)<n:\\n data+=c.recv(min(65536,n-len(data)))\"); print(\"FRAME_OK\",f[1],f[2],f[3],n,flush=True)" >/tmp/frame-listener.log 2>&1 &
-            LISTENER=$!
+            python3 /src/tools/venus_poc/ci_dmabuf_screen_probe.py \
+              --socket /tmp/vessel-screen.sock --timeout 30 >/tmp/screen-probe.log 2>&1 &
+            PROBE=$!
             export XDG_RUNTIME_DIR=/tmp/vessel-runtime
-            /tmp/vessel-transport-host --socket vessel-parent-0 \
-              --frame-socket /tmp/vessel-frame-test.sock --input-socket /tmp/vessel-input-test.sock \
+            /tmp/vessel-transport-host \
+              --socket vessel-parent-0 \
+              --frame-socket /tmp/vessel-screen.sock \
+              --input-socket /tmp/vessel-input-test.sock \
               --width 800 --height 540 --refresh 60 >/tmp/transport.log 2>&1 &
             PARENT=$!
-            WESTON=
-            FOOT=
+            WESTON=""
+            FOOT=""
             cleanup() {
               rc=$?
               set +e
-              echo "===== transport.log ====="; cat /tmp/transport.log 2>/dev/null || true
               echo "===== weston.log ====="; cat /tmp/weston.log 2>/dev/null || true
+              echo "===== transport.log ====="; cat /tmp/transport.log 2>/dev/null || true
+              echo "===== screen-probe.log ====="; cat /tmp/screen-probe.log 2>/dev/null || true
               echo "===== foot.log ====="; cat /tmp/foot.log 2>/dev/null || true
-              echo "===== frame-listener.log ====="; cat /tmp/frame-listener.log 2>/dev/null || true
               [ -n "$FOOT" ] && kill "$FOOT" 2>/dev/null || true
               [ -n "$WESTON" ] && kill "$WESTON" 2>/dev/null || true
-              kill "$PARENT" "$LISTENER" 2>/dev/null || true
+              kill "$PARENT" "$PROBE" 2>/dev/null || true
               exit "$rc"
             }
             trap cleanup EXIT
-            for i in $(seq 1 100); do [ -S /tmp/vessel-runtime/vessel-parent-0 ] && break; sleep .05; done
+            for i in $(seq 1 120); do [ -S /tmp/vessel-runtime/vessel-parent-0 ] && break; sleep .05; done
             test -S /tmp/vessel-runtime/vessel-parent-0
 
-            printf "%s\n" \
-              "[core]" "shell=desktop-shell.so" "xwayland=true" "repaint-window=7" "idle-time=0" \
-              "[shell]" "background-color=0xff08100d" "panel-color=0xe8121b17" "panel-position=top" \
-              "locking=false" "animation=none" "close-animation=none" "startup-animation=none" "focus-animation=none" \
-              "[autolaunch]" "path=/usr/bin/foot" "watch=false" > /tmp/weston.ini
+            cat >/tmp/weston.ini <<EOF
+            [core]
+            shell=desktop-shell.so
+            xwayland=true
+            repaint-window=7
+            idle-time=0
 
-            WAYLAND_DISPLAY=vessel-parent-0 weston \
-              --backend=wayland-backend.so --use-pixman \
-              --socket=vessel-desktop-ci --display=vessel-parent-0 \
-              --width=800 --height=540 --scale=1 --fullscreen \
-              --xwayland --idle-time=0 --config=/tmp/weston.ini --log=/tmp/weston.log &
+            [shell]
+            background-color=0xff12382b
+            panel-color=0xe8121b17
+            panel-position=top
+            locking=false
+            animation=none
+            close-animation=none
+            startup-animation=none
+            focus-animation=none
+            cursor-size=24
+            EOF
+
+            LVP=$(find /usr/share/vulkan/icd.d -type f -name "*lvp*.json" -print -quit)
+            test -n "$LVP"
+            echo "CI Vulkan ICD: $LVP"
+            VK_DRIVER_FILES="$LVP" vulkaninfo --summary >/tmp/vulkaninfo.log 2>&1 || { cat /tmp/vulkaninfo.log; exit 31; }
+
+            WAYLAND_DISPLAY=vessel-parent-0 VK_DRIVER_FILES="$LVP" \
+              /opt/vessel-weston16/bin/weston \
+                --backend=wayland --renderer=vulkan \
+                --socket=vessel-desktop-ci --display=vessel-parent-0 \
+                --width=800 --height=540 --scale=1 --fullscreen \
+                --xwayland --idle-time=0 --config=/tmp/weston.ini --log=/tmp/weston.log &
             WESTON=$!
-            for i in $(seq 1 160); do [ -S /tmp/vessel-runtime/vessel-desktop-ci ] && break; kill -0 $WESTON 2>/dev/null || break; sleep .05; done
+            for i in $(seq 1 200); do
+              [ -S /tmp/vessel-runtime/vessel-desktop-ci ] && break
+              kill -0 "$WESTON" 2>/dev/null || break
+              sleep .05
+            done
             test -S /tmp/vessel-runtime/vessel-desktop-ci
-            kill -0 $WESTON
+            kill -0 "$WESTON"
 
-            WAYLAND_DISPLAY=vessel-desktop-ci timeout 4s foot >/tmp/foot.log 2>&1 &
+            WAYLAND_DISPLAY=vessel-desktop-ci timeout 8s foot >/tmp/foot.log 2>&1 &
             FOOT=$!
-            sleep 1
-            kill -0 $FOOT 2>/dev/null
-            wait $FOOT || test $? -eq 124
-            for i in $(seq 1 100); do grep -q FRAME_OK /tmp/frame-listener.log 2>/dev/null && break; sleep .05; done
-            grep -q FRAME_OK /tmp/frame-listener.log
-            grep -F "[vessel-host] shm-damage " /tmp/transport.log
+            sleep 2
+            kill -0 "$FOOT" 2>/dev/null || { cat /tmp/foot.log; exit 32; }
+
+            for i in $(seq 1 300); do
+              grep -q GPU_SCREEN_OK /tmp/screen-probe.log 2>/dev/null && break
+              kill -0 "$PROBE" 2>/dev/null || break
+              sleep .05
+            done
+            grep -q GPU_SCREEN_OK /tmp/screen-probe.log
+            grep -E "^\[vessel-host\] dmabuf-import " /tmp/transport.log
+            ! grep -q "shm-damage" /tmp/transport.log
+            grep -Ei "vulkan.*renderer|renderer.*vulkan|vulkan-renderer" /tmp/weston.log
+            ! grep -Ei "gl-renderer|zink|pixman renderer" /tmp/weston.log
           '
 
   build:
-    needs: native-wayland-runtime
+    needs: native-vulkan-screen
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -158,14 +180,19 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
-      - name: Verify Android protocol 36 wiring
+      - name: Verify Android protocol 37 and truthful UI
         run: |
           set -euxo pipefail
-          grep -F 'REQUIRED_PROTOCOL = 36' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'v36-owned-weston-log-exact-frame-probe' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'weston-nested-vessel-transport-venus-android-surface-v2' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v36.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'REQUIRED_PROTOCOL = 37' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'v37-weston16-native-vulkan-gpu-only' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'weston16-vulkan-venus-android-surface-v3' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v37.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'Weston 16 native Vulkan' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'Weston 16 desktop-shell' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'keepScreenOn = false' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -F 'FIFO' app/src/main/cpp/vessel_wayland_presenter_v3.cpp
+          ! grep -F 'KDE Plasma' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          ! grep -E 'Zink|Pixman|software fallback' app/src/main/java/com/example/dreamlinux/VesselActivity.kt app/src/main/java/com/example/dreamlinux/VmSessionService.kt app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
       - name: Build, test and lint Vessel app
         run: |
           set -euxo pipefail
@@ -174,7 +201,7 @@ jobs:
       - name: Upload Vessel APK
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-protocol36-debug
+          name: vessel-protocol37-native-vulkan-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
