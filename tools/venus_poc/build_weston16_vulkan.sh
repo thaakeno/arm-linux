@@ -95,6 +95,8 @@ meson setup "$BUILD" "$SOURCE" \
     -Dcolor-management-lcms=false \
     -Dsystemd=false \
     -Ddemo-clients=false \
+    -Dsimple-clients=[] \
+    -Dresize-pool=false \
     -Dtests=false \
     -Ddoc=false
 
