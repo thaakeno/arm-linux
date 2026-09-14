@@ -3,11 +3,12 @@ package com.example.dreamlinux
 import android.view.Surface
 
 /**
- * Native GPU presenter for the Wayland/Venus output path.
+ * Native GPU presenter for Vessel's Wayland/Venus output path.
  *
- * Frames arrive as exported dma-bufs from the KWin Wayland compositor. Native
- * code imports them into Vulkan, copies them through a triple AHardwareBuffer
- * ring entirely on the GPU, then presents through the SurfaceView swapchain.
+ * Frames arrive as compositor dma-bufs. Native code imports them into Vulkan
+ * and presents them to the existing Vessel SurfaceView without VNC, screenshots
+ * or CPU framebuffer copies. The Linux compositor is intentionally independent
+ * from this Android presentation layer.
  */
 object VesselWaylandPresenter {
     init {
