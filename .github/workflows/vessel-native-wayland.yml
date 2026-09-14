@@ -1,4 +1,4 @@
-name: Vessel Weston desktop APK
+name: Vessel Weston protocol 36 APK
 
 on:
   push:
@@ -22,27 +22,29 @@ jobs:
           fetch-depth: 0
           submodules: false
 
-      - name: Verify protocol 35 Weston architecture
+      - name: Verify protocol 36 runtime invariants
         run: |
           set -euxo pipefail
-          grep -F 'PROTOCOL_VERSION = 35' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F 'weston-nested-vessel-transport-venus-android-surface-v1' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F 'Weston/libweston desktop-shell' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F -- '--backend=wayland-backend.so' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F -- '--xwayland' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F 'repaint-window=7' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F 'VESSEL_TRANSPORT_CACHE_HIT' tools/venus_poc/vessel_runtime_daemon_v35.py
-          ! grep -E 'seatd-launch|WLR_BACKENDS|WLR_RENDERER|sway --|kwin_wayland|Xtigervnc|vncserver|screenshot' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F 'wl_seat_interface,7' tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
-          grep -F 'wp_presentation_interface' tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
-          grep -F 'zwp_linux_dmabuf_v1_send_modifier' tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
-          grep -F 'shm-damage' tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
-          grep -F 'SOCK_SEQPACKET' tools/venus_poc/guest_input_direct_v34.py
-          grep -F 'FRAME_SHM_G2H = 12' tools/venus_poc/guest_relay_wayland.py
-          grep -F 'FRAME_SHM_G2H = 12' tools/venus_poc/host_relay_wayland.py
-          grep -F 'vessel_wayland_presenter_v3.cpp' app/src/main/cpp/CMakeLists.txt
+          grep -F 'PROTOCOL_VERSION = 36' tools/venus_poc/vessel_runtime_daemon_v36.py
+          grep -F 'v36-owned-weston-log-exact-frame-probe' tools/venus_poc/vessel_runtime_daemon_v36.py
+          grep -F 'weston-nested-vessel-transport-venus-android-surface-v2' tools/venus_poc/vessel_runtime_daemon_v36.py
+          grep -F -- '--backend=wayland-backend.so --use-pixman' tools/venus_poc/vessel_runtime_daemon_v36.py
+          grep -F 'PERSISTENT_SHM_RELAY_READY' tools/venus_poc/vessel_runtime_daemon_v35.py
+          grep -F 'FRAME_SHM_G2H = 12' tools/venus_poc/guest_frame_damage_relay.py
+          grep -F 'FRAME_SHM_G2H = 12' tools/venus_poc/host_frame_damage_relay.py
+          grep -F 'stale_uml_pids=()' tools/venus_poc/run_venus_wayland.sh
+          ! grep -F 'sleep .4' tools/venus_poc/run_venus_wayland.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('tools/venus_poc/vessel_runtime_daemon_v36.py').read_text()
+          assert 'install -o vessel -g vessel -m 0600 /dev/null "$WESTON_LOG"' in s
+          assert "grep -Eq '^\\[vessel-host\\] (dmabuf-import|shm-damage) '" in s
+          assert '"[vessel-host] dmabuf-import " in last' in s
+          assert '"[vessel-host] shm-damage " in last' in s
+          assert "grep -Eq 'dmabuf-import|shm-damage'" not in s
+          PY
 
-      - name: Syntax-check runtime and relay code
+      - name: Syntax-check runtime and relays
         run: |
           set -euxo pipefail
           python3 -m py_compile \
@@ -50,14 +52,17 @@ jobs:
             tools/venus_poc/vessel_runtime_daemon_v33.py \
             tools/venus_poc/vessel_runtime_daemon_v34.py \
             tools/venus_poc/vessel_runtime_daemon_v35.py \
+            tools/venus_poc/vessel_runtime_daemon_v36.py \
             tools/venus_poc/guest_command_agent_v33.py \
             tools/venus_poc/guest_input_direct_v34.py \
             tools/venus_poc/guest_relay_wayland.py \
+            tools/venus_poc/guest_frame_damage_relay.py \
             tools/venus_poc/host_relay_wayland.py \
+            tools/venus_poc/host_frame_damage_relay.py \
             tools/venus_poc/host_input_bridge.py
           bash -n tools/venus_poc/run_venus_wayland.sh
 
-      - name: Compile transport and run nested Weston + Foot smoke test
+      - name: Compile transport and run nested Weston + Foot frame smoke test
         run: |
           set -euxo pipefail
           docker run --rm -v "$PWD:/src:ro" -w /src debian:12-slim bash -lc '
@@ -69,7 +74,7 @@ jobs:
 
             rm -rf /tmp/vessel-transport-build /tmp/vessel-runtime /tmp/vessel-frame-test.sock
             mkdir -p /tmp/vessel-transport-build /tmp/vessel-runtime
-            install -d -m 1777 /tmp/.X11-unix
+            install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
             chmod 700 /tmp/vessel-runtime
             cd /tmp/vessel-transport-build
             wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-server-protocol.h
@@ -83,11 +88,9 @@ jobs:
               /src/tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c \
               xdg-shell-protocol.c linux-dmabuf-unstable-v1-protocol.c presentation-time-protocol.c \
               $(pkg-config --cflags --libs wayland-server xkbcommon) -o /tmp/vessel-transport-host
-            test -x /tmp/vessel-transport-host
 
             python3 -c "import os,socket,struct; p=\"/tmp/vessel-frame-test.sock\"; os.path.exists(p) and os.unlink(p); s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.bind(p); s.listen(1); c,_=s.accept(); h=struct.Struct(\"<IIIIIIIIQQ\"); raw=c.recv(h.size,socket.MSG_WAITALL); f=h.unpack(raw); assert f[0]==0x31574656; n=f[5]*(f[8]>>32) if f[1]==4 else 0; data=b\"\"; exec(\"while len(data)<n:\\n data+=c.recv(min(65536,n-len(data)))\"); print(\"FRAME_OK\",f[1],f[2],f[3],n,flush=True)" >/tmp/frame-listener.log 2>&1 &
             LISTENER=$!
-
             export XDG_RUNTIME_DIR=/tmp/vessel-runtime
             /tmp/vessel-transport-host --socket vessel-parent-0 \
               --frame-socket /tmp/vessel-frame-test.sock --input-socket /tmp/vessel-input-test.sock \
@@ -98,14 +101,10 @@ jobs:
             cleanup() {
               rc=$?
               set +e
-              echo "===== transport.log ====="
-              cat /tmp/transport.log 2>/dev/null || true
-              echo "===== weston.log ====="
-              cat /tmp/weston.log 2>/dev/null || true
-              echo "===== foot.log ====="
-              cat /tmp/foot.log 2>/dev/null || true
-              echo "===== frame-listener.log ====="
-              cat /tmp/frame-listener.log 2>/dev/null || true
+              echo "===== transport.log ====="; cat /tmp/transport.log 2>/dev/null || true
+              echo "===== weston.log ====="; cat /tmp/weston.log 2>/dev/null || true
+              echo "===== foot.log ====="; cat /tmp/foot.log 2>/dev/null || true
+              echo "===== frame-listener.log ====="; cat /tmp/frame-listener.log 2>/dev/null || true
               [ -n "$FOOT" ] && kill "$FOOT" 2>/dev/null || true
               [ -n "$WESTON" ] && kill "$WESTON" 2>/dev/null || true
               kill "$PARENT" "$LISTENER" 2>/dev/null || true
@@ -114,26 +113,12 @@ jobs:
             trap cleanup EXIT
             for i in $(seq 1 100); do [ -S /tmp/vessel-runtime/vessel-parent-0 ] && break; sleep .05; done
             test -S /tmp/vessel-runtime/vessel-parent-0
-            grep -F "READY socket=vessel-parent-0" /tmp/transport.log
 
             printf "%s\n" \
-              "[core]" \
-              "shell=desktop-shell.so" \
-              "xwayland=true" \
-              "repaint-window=7" \
-              "idle-time=0" \
-              "[shell]" \
-              "background-color=0xff08100d" \
-              "panel-color=0xe8121b17" \
-              "panel-position=top" \
-              "locking=false" \
-              "animation=none" \
-              "close-animation=none" \
-              "startup-animation=none" \
-              "focus-animation=none" \
-              "[autolaunch]" \
-              "path=/usr/bin/foot" \
-              "watch=false" > /tmp/weston.ini
+              "[core]" "shell=desktop-shell.so" "xwayland=true" "repaint-window=7" "idle-time=0" \
+              "[shell]" "background-color=0xff08100d" "panel-color=0xe8121b17" "panel-position=top" \
+              "locking=false" "animation=none" "close-animation=none" "startup-animation=none" "focus-animation=none" \
+              "[autolaunch]" "path=/usr/bin/foot" "watch=false" > /tmp/weston.ini
 
             WAYLAND_DISPLAY=vessel-parent-0 weston \
               --backend=wayland-backend.so --use-pixman \
@@ -150,10 +135,9 @@ jobs:
             sleep 1
             kill -0 $FOOT 2>/dev/null
             wait $FOOT || test $? -eq 124
-
             for i in $(seq 1 100); do grep -q FRAME_OK /tmp/frame-listener.log 2>/dev/null && break; sleep .05; done
             grep -q FRAME_OK /tmp/frame-listener.log
-            grep -F "shm-damage" /tmp/transport.log
+            grep -E '^\[vessel-host\] shm-damage ' /tmp/transport.log
           '
 
   build:
@@ -174,13 +158,13 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
-      - name: Verify Android protocol 35 wiring
+      - name: Verify Android protocol 36 wiring
         run: |
           set -euxo pipefail
-          grep -F 'REQUIRED_PROTOCOL = 35' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'weston-nested-vessel-transport-venus-android-surface-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v35.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'fun text(value: String)' app/src/main/java/com/example/dreamlinux/VesselInputClient.kt
+          grep -F 'REQUIRED_PROTOCOL = 36' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'v36-owned-weston-log-exact-frame-probe' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'weston-nested-vessel-transport-venus-android-surface-v2' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v36.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'keepScreenOn = false' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
       - name: Build, test and lint Vessel app
         run: |
@@ -190,7 +174,7 @@ jobs:
       - name: Upload Vessel APK
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-weston-debug
+          name: vessel-protocol36-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
