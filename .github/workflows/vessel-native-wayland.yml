@@ -1,0 +1,109 @@
+name: Vessel Native Wayland APK
+
+on:
+  push:
+    branches: [ arch/vessel-native-wayland ]
+  workflow_dispatch:
+
+concurrency:
+  group: vessel-native-wayland-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  native-wayland-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+      - name: Verify Vessel app was not replaced
+        run: |
+          set -euxo pipefail
+          git fetch origin app/vessel-final
+          BASE=166ac8115df31f40577038d16dbd7f39308ef296
+          git diff --exit-code "$BASE" -- \
+            app/src/main/AndroidManifest.xml \
+            app/src/main/java/com/example/dreamlinux/MainActivity.kt \
+            app/src/main/java/com/example/dreamlinux/NativeLinuxSurfaceView.kt \
+            app/src/main/res/mipmap-hdpi \
+            app/src/main/res/mipmap-mdpi \
+            app/src/main/res/mipmap-xhdpi \
+            app/src/main/res/mipmap-xxhdpi \
+            app/src/main/res/mipmap-xxxhdpi
+          ! grep -R -E 'TAWC|DistroManager|DistributionManager|wmww' app/src/main || true
+          test -f tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+          grep -F 'REQUIRED_PROTOCOL = 32' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'nested-wayland-dmabuf-venus-android-surface-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'arch/vessel-native-wayland' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v32.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          ! grep -F '_install_effect()' tools/venus_poc/vessel_runtime_daemon_v32.py
+          ! grep -F 'vesseloutputEnabled' tools/venus_poc/vessel_runtime_daemon_v32.py
+          ! grep -E 'Xtigervnc|vncserver|screenshot' tools/venus_poc/vessel_runtime_daemon_v32.py
+      - name: Syntax-check runtime
+        run: |
+          set -euxo pipefail
+          python3 -m py_compile \
+            tools/venus_poc/vessel_runtime_daemon_v31.py \
+            tools/venus_poc/vessel_runtime_daemon_v32.py \
+            tools/venus_poc/guest_command_agent.py \
+            tools/venus_poc/guest_relay_wayland.py \
+            tools/venus_poc/host_relay_wayland.py \
+            tools/venus_poc/host_input_bridge.py
+          bash -n tools/venus_poc/run_venus_wayland.sh
+      - name: Compile native parent Wayland server on Debian 12
+        run: |
+          set -euxo pipefail
+          docker run --rm -v "$PWD:/src:ro" -w /src debian:12-slim bash -lc '
+            set -euxo pipefail
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              build-essential pkg-config libwayland-dev wayland-protocols
+            rm -rf /tmp/vessel-wayland-build
+            mkdir -p /tmp/vessel-wayland-build
+            cd /tmp/vessel-wayland-build
+            wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-server-protocol.h
+            wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-protocol.c
+            wayland-scanner server-header /usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml linux-dmabuf-unstable-v1-server-protocol.h
+            wayland-scanner private-code /usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml linux-dmabuf-unstable-v1-protocol.c
+            cc -O2 -std=gnu11 -Wall -Wextra -Werror=implicit-function-declaration \
+              -I/tmp/vessel-wayland-build /src/tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c \
+              xdg-shell-protocol.c linux-dmabuf-unstable-v1-protocol.c \
+              $(pkg-config --cflags --libs wayland-server) -o /tmp/vessel-wayland-bridge
+            test -x /tmp/vessel-wayland-bridge
+          '
+
+  build:
+    needs: native-wayland-runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: temurin
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK and NDK
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
+      - name: Build, test and lint original Vessel app
+        run: |
+          set -euxo pipefail
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon --no-configuration-cache
+      - name: Upload Vessel APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: vessel-native-wayland-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
