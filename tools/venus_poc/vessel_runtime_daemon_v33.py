@@ -44,6 +44,8 @@ class WlrootsRuntime(v31.WaylandRuntime):
             "vncPort": -1,
             "commandPort": getattr(self, "command_port", 0),
             "commandPortPolicy": "kernel-ephemeral",
+            "seatPolicy": "libseat-noop-headless",
+            "compositorUser": "vessel",
         })
         return state
 
@@ -106,6 +108,7 @@ class WlrootsRuntime(v31.WaylandRuntime):
         have = self.guest(
             "command -v sway >/dev/null && command -v wayland-scanner >/dev/null && "
             "pkg-config --exists wayland-server && command -v foot >/dev/null && "
+            "command -v runuser >/dev/null && command -v useradd >/dev/null && "
             "test -e /usr/lib/aarch64-linux-gnu/dri/zink_dri.so && echo WLROOTS_DEPS_READY || true",
             20,
         )
@@ -114,7 +117,7 @@ class WlrootsRuntime(v31.WaylandRuntime):
             self.guest(
                 "export DEBIAN_FRONTEND=noninteractive; apt-get update && "
                 "apt-get install -y --no-install-recommends "
-                "sway swaybg sway-backgrounds foot seatd dbus-x11 xwayland "
+                "sway swaybg sway-backgrounds foot dbus-x11 xwayland passwd util-linux "
                 "libgl1-mesa-dri mesa-utils vulkan-tools "
                 "build-essential pkg-config libwayland-dev wayland-protocols",
                 1200,
@@ -140,8 +143,12 @@ echo VESSEL_WAYLAND_PARENT_READY
             raise RuntimeError("Vessel native Wayland parent did not build")
 
     def _configure_sway(self) -> None:
-        cfg = r'''mkdir -p /root/.config/sway
-cat > /root/.config/sway/config <<'EOF'
+        cfg = r'''set -eu
+if ! id -u vessel >/dev/null 2>&1; then
+    useradd --create-home --shell /bin/bash vessel
+fi
+mkdir -p /home/vessel/.config/sway
+cat > /home/vessel/.config/sway/config <<'EOF'
 set $mod Mod4
 font pango:sans 10
 floating_modifier $mod normal
@@ -163,6 +170,7 @@ bar {
 }
 exec foot --server
 EOF
+chown -R vessel:vessel /home/vessel/.config
 '''
         self.guest(cfg, 20)
 
@@ -174,26 +182,34 @@ EOF
         self._prepare_runtime()
         self._configure_sway()
 
-        self.set_progress("wayland_start", 80, "Starting wlroots compositor")
+        self.set_progress("wayland_start", 80, "Starting rootless headless wlroots compositor")
         env = self._gpu_env()
         wrapper = f'''#!/bin/bash
 set -euo pipefail
+
+# Sway refuses to run as root, and Bookworm's seatd 0.7 has no VT-free mode.
+# Vessel does not own a real VT anyway. Use libseat's noop backend, which is
+# specifically intended for headless/nested compositors, and give the dedicated
+# unprivileged compositor user direct access only to the guest input event nodes.
 rm -rf /tmp/vessel-runtime
 mkdir -p /tmp/vessel-runtime
+chown vessel:vessel /tmp/vessel-runtime
 chmod 700 /tmp/vessel-runtime
+
 [ -f /root/venus-env.sh ] && . /root/venus-env.sh || true
 {env}
+
+cp /root/virtio-wsi-test.json /tmp/vessel-virtio-wsi-test.json
+chown vessel:vessel /tmp/vessel-virtio-wsi-test.json
+chmod 644 /tmp/vessel-virtio-wsi-test.json
+
+if [ -d /dev/input ]; then
+  chgrp vessel /dev/input/event* 2>/dev/null || true
+  chmod g+rw /dev/input/event* 2>/dev/null || true
+fi
+
 export XDG_RUNTIME_DIR=/tmp/vessel-runtime
-export XDG_SESSION_TYPE=wayland
-export XDG_CURRENT_DESKTOP=sway
-export MESA_LOADER_DRIVER_OVERRIDE=zink
-export GALLIUM_DRIVER=zink
-export LIBGL_ALWAYS_SOFTWARE=0
-export WLR_RENDERER=gles2
-export WLR_BACKENDS=wayland,libinput
-export WLR_WL_OUTPUTS=1
-export WLR_LIBINPUT_NO_DEVICES=1
-export SEATD_VTBOUND=0
+export WAYLAND_DISPLAY=vessel-host-0
 rm -f /tmp/vessel-native-wayland.log /tmp/vessel-sway.log /tmp/vessel-child-wayland
 
 /usr/local/bin/vessel-wayland-bridge --socket vessel-host-0 --frame-socket /tmp/vessel-frame-export.sock --width {width} --height {height} --refresh 60 >/tmp/vessel-native-wayland.log 2>&1 &
@@ -206,8 +222,26 @@ for i in $(seq 1 120); do
 done
 [ -S /tmp/vessel-runtime/vessel-host-0 ] || exit 52
 
-export WAYLAND_DISPLAY=vessel-host-0
-seatd-launch -- sway --unsupported-gpu -c /root/.config/sway/config >/tmp/vessel-sway.log 2>&1 &
+runuser -u vessel -- env \
+  HOME=/home/vessel \
+  USER=vessel \
+  LOGNAME=vessel \
+  XDG_RUNTIME_DIR=/tmp/vessel-runtime \
+  XDG_SESSION_TYPE=wayland \
+  XDG_CURRENT_DESKTOP=sway \
+  WAYLAND_DISPLAY=vessel-host-0 \
+  VTEST_SOCKET_NAME=/tmp/.venus_test \
+  VN_DEBUG=vtest \
+  VK_DRIVER_FILES=/tmp/vessel-virtio-wsi-test.json \
+  MESA_LOADER_DRIVER_OVERRIDE=zink \
+  GALLIUM_DRIVER=zink \
+  LIBGL_ALWAYS_SOFTWARE=0 \
+  WLR_RENDERER=gles2 \
+  WLR_BACKENDS=wayland,libinput \
+  WLR_WL_OUTPUTS=1 \
+  WLR_LIBINPUT_NO_DEVICES=1 \
+  LIBSEAT_BACKEND=noop \
+  dbus-run-session -- sway --unsupported-gpu -c /home/vessel/.config/sway/config >/tmp/vessel-sway.log 2>&1 &
 SWAY_PID=$!
 echo "$SWAY_PID" >/tmp/vessel-sway.pid
 for i in $(seq 1 240); do
@@ -227,7 +261,7 @@ wait "$SWAY_PID"
             "rm -f /tmp/vessel-wayland-session.sh /tmp/vessel-native-wayland.pid /tmp/vessel-sway.pid /tmp/vessel-child-wayland; "
             f"printf '%s' {shlex.quote(encoded)} | base64 -d > /root/vessel-wayland-session.sh; "
             "chmod +x /root/vessel-wayland-session.sh; "
-            "nohup dbus-run-session -- /root/vessel-wayland-session.sh >/tmp/vessel-wayland-session.log 2>&1 </dev/null & "
+            "nohup /root/vessel-wayland-session.sh >/tmp/vessel-wayland-session.log 2>&1 </dev/null & "
             "echo $! >/tmp/vessel-wayland-session.pid"
         )
         self.guest(launch, 30)
@@ -240,12 +274,14 @@ wait "$SWAY_PID"
                 "test -s /tmp/vessel-child-wayland && echo CHILD_READY || true; "
                 "pgrep -x sway >/dev/null && echo SWAY_ALIVE || true; "
                 "grep -F 'imported wl_buffer' /tmp/vessel-native-wayland.log 2>/dev/null | tail -1 || true; "
-                "tail -60 /tmp/vessel-sway.log 2>/dev/null || true",
+                "tail -80 /tmp/vessel-sway.log 2>/dev/null || true",
                 10,
             )
             low = status.lower()
             if "llvmpipe" in low or "softpipe" in low or "pixman renderer" in low:
                 raise RuntimeError("wlroots fell back to software rendering:\n" + status[-7000:])
+            if "unable to drop root" in low or "could not determine vt" in low:
+                raise RuntimeError("wlroots entered a forbidden root/VT session path:\n" + status[-7000:])
             if (
                 "PARENT_READY" in status
                 and "CHILD_READY" in status
@@ -263,7 +299,10 @@ wait "$SWAY_PID"
             "echo '=== parent ==='; tail -260 /tmp/vessel-native-wayland.log 2>/dev/null || true; "
             "echo '=== sway ==='; tail -320 /tmp/vessel-sway.log 2>/dev/null || true; "
             "echo '=== session ==='; tail -180 /tmp/vessel-wayland-session.log 2>/dev/null || true; "
-            "echo '=== sockets ==='; ls -l /tmp/.venus_test /tmp/vessel-frame-export.sock /tmp/vessel-runtime 2>&1 || true",
+            "echo '=== command agent ==='; tail -120 /tmp/vessel-command-agent.log 2>/dev/null || true; "
+            "echo '=== input ==='; tail -120 /tmp/vessel-input.log 2>/dev/null || true; "
+            "echo '=== sockets ==='; ls -l /tmp/.venus_test /tmp/vessel-frame-export.sock /tmp/vessel-runtime 2>&1 || true; "
+            "echo '=== input nodes ==='; ls -l /dev/input 2>&1 || true",
             15,
         )
         raise RuntimeError("wlroots native presentation did not become ready:\n" + guest_tail[-24000:])
@@ -273,8 +312,8 @@ wait "$SWAY_PID"
             child = self.guest("cat /tmp/vessel-child-wayland 2>/dev/null || true", 5).strip().splitlines()
             display = child[-1] if child else "wayland-1"
             self.guest(
-                f"export XDG_RUNTIME_DIR=/tmp/vessel-runtime WAYLAND_DISPLAY={shlex.quote(display)}; "
-                "nohup foot >/tmp/vessel-terminal.log 2>&1 </dev/null &",
+                f"runuser -u vessel -- env HOME=/home/vessel XDG_RUNTIME_DIR=/tmp/vessel-runtime "
+                f"WAYLAND_DISPLAY={shlex.quote(display)} nohup foot >/tmp/vessel-terminal.log 2>&1 </dev/null &",
                 8,
             )
             return self.state()
