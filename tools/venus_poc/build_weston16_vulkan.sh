@@ -11,7 +11,16 @@ SOURCE="$SRC_ROOT/weston-$VERSION"
 BUILD="$SRC_ROOT/build"
 URL="https://deb.debian.org/debian/pool/main/w/weston/weston_${VERSION}.orig.tar.xz"
 
+configure_runtime_linker() {
+    export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    if [ "$(id -u)" -eq 0 ] && command -v ldconfig >/dev/null 2>&1; then
+        printf '%s\n' "$PREFIX/lib" > /etc/ld.so.conf.d/vessel-weston16.conf
+        ldconfig
+    fi
+}
+
 if [ -x "$PREFIX/bin/weston" ] && [ -f "$MARKER" ]; then
+    configure_runtime_linker
     "$PREFIX/bin/weston" --version
     echo VESSEL_WESTON16_VULKAN_CACHE_HIT
     exit 0
@@ -102,8 +111,7 @@ meson setup "$BUILD" "$SOURCE" \
 
 ninja -C "$BUILD" -j"${VESSEL_BUILD_JOBS:-2}"
 ninja -C "$BUILD" install
-mkdir -p "$PREFIX"
-printf '%s\n' "$VERSION" > "$MARKER"
+configure_runtime_linker
 
 "$PREFIX/bin/weston" --version
 find "$PREFIX" -name 'vulkan-renderer.so' -type f -print -quit | grep -q .
@@ -113,4 +121,5 @@ if find "$PREFIX" -name 'gl-renderer.so' -type f -print -quit | grep -q .; then
     exit 25
 fi
 
+printf '%s\n' "$VERSION" > "$MARKER"
 echo VESSEL_WESTON16_VULKAN_BUILT
