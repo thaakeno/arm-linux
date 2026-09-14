@@ -53,7 +53,7 @@ jobs:
             export VESSEL_WESTON_PREFIX=/opt/vessel-weston16
             export VESSEL_BUILD_JOBS=2
             bash /src/tools/venus_poc/build_weston16_vulkan.sh
-            apt-get install -y --no-install-recommends mesa-vulkan-drivers
+            apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
 
             /opt/vessel-weston16/bin/weston --version | grep -F "16.0.0"
             find /opt/vessel-weston16 -name vulkan-renderer.so -type f -print -quit | grep -q .
@@ -97,6 +97,7 @@ jobs:
               echo "===== transport.log ====="; cat /tmp/transport.log 2>/dev/null || true
               echo "===== screen-probe.log ====="; cat /tmp/screen-probe.log 2>/dev/null || true
               echo "===== foot.log ====="; cat /tmp/foot.log 2>/dev/null || true
+              echo "===== vulkaninfo.log ====="; cat /tmp/vulkaninfo.log 2>/dev/null || true
               [ -n "$FOOT" ] && kill "$FOOT" 2>/dev/null || true
               [ -n "$WESTON" ] && kill "$WESTON" 2>/dev/null || true
               kill "$PARENT" "$PROBE" 2>/dev/null || true
@@ -106,24 +107,23 @@ jobs:
             for i in $(seq 1 120); do [ -S /tmp/vessel-runtime/vessel-parent-0 ] && break; sleep .05; done
             test -S /tmp/vessel-runtime/vessel-parent-0
 
-            cat >/tmp/weston.ini <<EOF
-            [core]
-            shell=desktop-shell.so
-            xwayland=true
-            repaint-window=7
-            idle-time=0
-
-            [shell]
-            background-color=0xff12382b
-            panel-color=0xe8121b17
-            panel-position=top
-            locking=false
-            animation=none
-            close-animation=none
-            startup-animation=none
-            focus-animation=none
-            cursor-size=24
-            EOF
+            printf "%s\n" \
+              "[core]" \
+              "shell=desktop-shell.so" \
+              "xwayland=true" \
+              "repaint-window=7" \
+              "idle-time=0" \
+              "" \
+              "[shell]" \
+              "background-color=0xff12382b" \
+              "panel-color=0xe8121b17" \
+              "panel-position=top" \
+              "locking=false" \
+              "animation=none" \
+              "close-animation=none" \
+              "startup-animation=none" \
+              "focus-animation=none" \
+              "cursor-size=24" > /tmp/weston.ini
 
             LVP=$(find /usr/share/vulkan/icd.d -type f -name "*lvp*.json" -print -quit)
             test -n "$LVP"
