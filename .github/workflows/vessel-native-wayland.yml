@@ -37,6 +37,11 @@ jobs:
           grep -F 'wl_display_init_shm' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
           grep -F 'zwp_linux_dmabuf_v1_interface' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
           grep -F 'xdg_wm_base_interface' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+          grep -F 'wl_subcompositor_interface' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+          grep -F 'wl_data_device_manager_interface' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+          grep -F 'wl_seat_interface,5' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+          grep -F 'wl_event_loop_add_timer' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+          grep -F 'wl_resource_instance_of' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
 
       - name: Verify live Android progress polling
         run: |
@@ -69,16 +74,17 @@ jobs:
             tools/venus_poc/host_input_bridge.py
           bash -n tools/venus_poc/run_venus_wayland.sh
 
-      - name: Compile Vessel compositor on Debian 12
+      - name: Compile and smoke-test Vessel compositor on Debian 12
         run: |
           set -euxo pipefail
           docker run --rm -v "$PWD:/src:ro" -w /src debian:12-slim bash -lc '
             set -euxo pipefail
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              build-essential pkg-config libwayland-dev wayland-protocols
-            rm -rf /tmp/vessel-compositor-build
-            mkdir -p /tmp/vessel-compositor-build
+              build-essential pkg-config libwayland-dev wayland-protocols wayland-utils foot
+            rm -rf /tmp/vessel-compositor-build /tmp/vessel-runtime
+            mkdir -p /tmp/vessel-compositor-build /tmp/vessel-runtime
+            chmod 700 /tmp/vessel-runtime
             cd /tmp/vessel-compositor-build
             wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-server-protocol.h
             wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-protocol.c
@@ -89,6 +95,28 @@ jobs:
               xdg-shell-protocol.c linux-dmabuf-unstable-v1-protocol.c \
               $(pkg-config --cflags --libs wayland-server) -o /tmp/vessel-compositor
             test -x /tmp/vessel-compositor
+
+            export XDG_RUNTIME_DIR=/tmp/vessel-runtime
+            /tmp/vessel-compositor --socket vessel-test-0 --frame-socket /tmp/no-frame-consumer.sock \
+              --width 1600 --height 720 --refresh 60 >/tmp/vessel-compositor.log 2>&1 &
+            COMPOSITOR_PID=$!
+            trap "kill $COMPOSITOR_PID 2>/dev/null || true" EXIT
+            for i in $(seq 1 50); do [ -S /tmp/vessel-runtime/vessel-test-0 ] && break; sleep .1; done
+            test -S /tmp/vessel-runtime/vessel-test-0
+
+            WAYLAND_DISPLAY=vessel-test-0 wayland-info >/tmp/wayland-info.txt
+            grep -F "interface: wl_compositor, version: 4" /tmp/wayland-info.txt
+            grep -F "interface: wl_subcompositor, version: 1" /tmp/wayland-info.txt
+            grep -F "interface: wl_data_device_manager, version: 3" /tmp/wayland-info.txt
+            grep -F "interface: wl_seat, version: 5" /tmp/wayland-info.txt
+            grep -F "interface: xdg_wm_base, version: 1" /tmp/wayland-info.txt
+
+            WAYLAND_DISPLAY=vessel-test-0 timeout 3s foot >/tmp/foot.log 2>&1 &
+            FOOT_PID=$!
+            sleep 1
+            kill -0 $FOOT_PID
+            wait $FOOT_PID || test $? -eq 124
+            ! grep -E "no sub compositor|no clipboard available|no seats available" /tmp/foot.log
           '
 
   build:
