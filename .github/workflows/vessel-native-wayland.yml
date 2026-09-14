@@ -1,4 +1,4 @@
-name: Vessel advanced compositor APK
+name: Vessel Weston desktop APK
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: vessel-advanced-compositor-${{ github.ref }}
+  group: vessel-weston-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -15,36 +15,34 @@ permissions:
 jobs:
   native-wayland-runtime:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: false
 
-      - name: Verify protocol 35 advanced compositor architecture
+      - name: Verify protocol 35 Weston architecture
         run: |
           set -euxo pipefail
-          grep -F 'REQUIRED_PROTOCOL = 35' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel-compositor-v35-dmabuf-shm-venus-android-surface-v3' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v35.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'Vessel Mobile Compositor v35' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F 'VESSEL_V35_CACHE_HIT' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F 'damage-driven, refresh-throttled' tools/venus_poc/vessel_runtime_daemon_v35.py
+          grep -F 'PROTOCOL_VERSION = 35' tools/venus_poc/vessel_runtime_daemon_v35.py
+          grep -F 'weston-nested-vessel-transport-venus-android-surface-v1' tools/venus_poc/vessel_runtime_daemon_v35.py
+          grep -F 'Weston/libweston desktop-shell' tools/venus_poc/vessel_runtime_daemon_v35.py
+          grep -F -- '--backend=wayland-backend.so' tools/venus_poc/vessel_runtime_daemon_v35.py
+          grep -F -- '--xwayland' tools/venus_poc/vessel_runtime_daemon_v35.py
+          grep -F 'repaint-window=7' tools/venus_poc/vessel_runtime_daemon_v35.py
+          grep -F 'VESSEL_TRANSPORT_CACHE_HIT' tools/venus_poc/vessel_runtime_daemon_v35.py
           ! grep -E 'seatd-launch|WLR_BACKENDS|WLR_RENDERER|sway --|kwin_wayland|Xtigervnc|vncserver|screenshot' tools/venus_poc/vessel_runtime_daemon_v35.py
-          grep -F 'zwp_text_input_manager_v3_interface' tools/venus_poc/vessel_wayland_bridge/vessel_compositor_v35.c
-          grep -F 'wp_presentation_interface' tools/venus_poc/vessel_wayland_bridge/vessel_compositor_v35.c
-          grep -F 'zxdg_decoration_manager_v1_interface' tools/venus_poc/vessel_wayland_bridge/vessel_compositor_v35.c
-          grep -F 'wl_data_device_manager_interface' tools/venus_poc/vessel_wayland_bridge/vessel_compositor_v35.c
-          grep -F 'wl_seat_interface,7' tools/venus_poc/vessel_wayland_bridge/vessel_compositor_v35.c
-          grep -F 'zwp_linux_dmabuf_v1_send_modifier' tools/venus_poc/vessel_wayland_bridge/vessel_compositor_v35.c
-          grep -F 'VESSEL_SHM_DAMAGE' tools/venus_poc/vessel_wayland_bridge/vessel_compositor_v35.c
+          grep -F 'wl_seat_interface,7' tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
+          grep -F 'wp_presentation_interface' tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
+          grep -F 'zwp_linux_dmabuf_v1_send_modifier' tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
+          grep -F 'shm-damage' tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
+          grep -F 'SOCK_SEQPACKET' tools/venus_poc/guest_input_direct_v34.py
           grep -F 'FRAME_SHM_G2H = 12' tools/venus_poc/guest_relay_wayland.py
           grep -F 'FRAME_SHM_G2H = 12' tools/venus_poc/host_relay_wayland.py
           grep -F 'vessel_wayland_presenter_v3.cpp' app/src/main/cpp/CMakeLists.txt
-          grep -F 'fun text(value: String)' app/src/main/java/com/example/dreamlinux/VesselInputClient.kt
 
-      - name: Syntax-check runtime and relays
+      - name: Syntax-check runtime and relay code
         run: |
           set -euxo pipefail
           python3 -m py_compile \
@@ -53,59 +51,92 @@ jobs:
             tools/venus_poc/vessel_runtime_daemon_v34.py \
             tools/venus_poc/vessel_runtime_daemon_v35.py \
             tools/venus_poc/guest_command_agent_v33.py \
+            tools/venus_poc/guest_input_direct_v34.py \
             tools/venus_poc/guest_relay_wayland.py \
             tools/venus_poc/host_relay_wayland.py \
             tools/venus_poc/host_input_bridge.py
           bash -n tools/venus_poc/run_venus_wayland.sh
 
-      - name: Compile and smoke-test Vessel compositor on Debian 12
+      - name: Compile transport and run nested Weston + Foot smoke test
         run: |
           set -euxo pipefail
           docker run --rm -v "$PWD:/src:ro" -w /src debian:12-slim bash -lc '
             set -euxo pipefail
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              build-essential pkg-config libwayland-dev wayland-protocols libxkbcommon-dev foot python3
-            rm -rf /tmp/vessel-v35-build /tmp/vessel-runtime /tmp/vessel-frame-test.sock
-            mkdir -p /tmp/vessel-v35-build /tmp/vessel-runtime
+              build-essential pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
+              weston foot xwayland dbus-x11 python3
+
+            rm -rf /tmp/vessel-transport-build /tmp/vessel-runtime /tmp/vessel-frame-test.sock
+            mkdir -p /tmp/vessel-transport-build /tmp/vessel-runtime
             chmod 700 /tmp/vessel-runtime
-            cd /tmp/vessel-v35-build
+            cd /tmp/vessel-transport-build
             wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-server-protocol.h
             wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-protocol.c
             wayland-scanner server-header /usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml linux-dmabuf-unstable-v1-server-protocol.h
             wayland-scanner private-code /usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml linux-dmabuf-unstable-v1-protocol.c
-            wayland-scanner server-header /usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v3.xml text-input-unstable-v3-server-protocol.h
-            wayland-scanner private-code /usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v3.xml text-input-unstable-v3-protocol.c
             wayland-scanner server-header /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml presentation-time-server-protocol.h
             wayland-scanner private-code /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml presentation-time-protocol.c
-            wayland-scanner server-header /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml xdg-decoration-unstable-v1-server-protocol.h
-            wayland-scanner private-code /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml xdg-decoration-unstable-v1-protocol.c
             cc -O2 -std=gnu11 -Wall -Wextra -Werror=implicit-function-declaration \
-              -I/tmp/vessel-v35-build /src/tools/venus_poc/vessel_wayland_bridge/vessel_compositor_v35.c \
-              xdg-shell-protocol.c linux-dmabuf-unstable-v1-protocol.c text-input-unstable-v3-protocol.c \
-              presentation-time-protocol.c xdg-decoration-unstable-v1-protocol.c \
-              $(pkg-config --cflags --libs wayland-server xkbcommon) -o /tmp/vessel-compositor-v35
-            test -x /tmp/vessel-compositor-v35
+              -I/tmp/vessel-transport-build \
+              /src/tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c \
+              xdg-shell-protocol.c linux-dmabuf-unstable-v1-protocol.c presentation-time-protocol.c \
+              $(pkg-config --cflags --libs wayland-server xkbcommon) -o /tmp/vessel-transport-host
+            test -x /tmp/vessel-transport-host
 
-            python3 -c "import os,socket,struct; p=\"/tmp/vessel-frame-test.sock\"; os.path.exists(p) and os.unlink(p); s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.bind(p); s.listen(1); c,_=s.accept(); h=struct.Struct(\"<IIIIIIIIQQ\"); raw=c.recv(h.size,socket.MSG_WAITALL); f=h.unpack(raw); assert f[0]==0x31574656; n=f[5]*(f[8]>>32) if f[1]==4 else 0; data=b\"\"; exec(\"while len(data)<n:\\n data+=c.recv(min(65536,n-len(data)))\"); assert len(data)==n; print(\"FRAME_OK\",f[1],f[2],f[3],flush=True)" >/tmp/frame-listener.log 2>&1 &
+            python3 -c "import os,socket,struct; p=\"/tmp/vessel-frame-test.sock\"; os.path.exists(p) and os.unlink(p); s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.bind(p); s.listen(1); c,_=s.accept(); h=struct.Struct(\"<IIIIIIIIQQ\"); raw=c.recv(h.size,socket.MSG_WAITALL); f=h.unpack(raw); assert f[0]==0x31574656; n=f[5]*(f[8]>>32) if f[1]==4 else 0; data=b\"\"; exec(\"while len(data)<n:\\n data+=c.recv(min(65536,n-len(data)))\"); print(\"FRAME_OK\",f[1],f[2],f[3],n,flush=True)" >/tmp/frame-listener.log 2>&1 &
             LISTENER=$!
-            export XDG_RUNTIME_DIR=/tmp/vessel-runtime
-            /tmp/vessel-compositor-v35 --socket vessel-test-0 --frame-socket /tmp/vessel-frame-test.sock \
-              --input-host 127.0.0.1 --input-port 9 --width 1600 --height 720 --refresh 60 >/tmp/vessel-compositor.log 2>&1 &
-            COMPOSITOR=$!
-            trap "kill $COMPOSITOR $LISTENER 2>/dev/null || true" EXIT
-            for i in $(seq 1 80); do [ -S /tmp/vessel-runtime/vessel-test-0 ] && break; sleep .05; done
-            test -S /tmp/vessel-runtime/vessel-test-0
-            grep -F "READY v35" /tmp/vessel-compositor.log
 
-            WAYLAND_DISPLAY=vessel-test-0 timeout 4s foot >/tmp/foot.log 2>&1 &
+            export XDG_RUNTIME_DIR=/tmp/vessel-runtime
+            /tmp/vessel-transport-host --socket vessel-parent-0 \
+              --frame-socket /tmp/vessel-frame-test.sock --input-socket /tmp/vessel-input-test.sock \
+              --width 800 --height 540 --refresh 60 >/tmp/transport.log 2>&1 &
+            PARENT=$!
+            trap "kill $PARENT $LISTENER ${WESTON:-} 2>/dev/null || true" EXIT
+            for i in $(seq 1 100); do [ -S /tmp/vessel-runtime/vessel-parent-0 ] && break; sleep .05; done
+            test -S /tmp/vessel-runtime/vessel-parent-0
+            grep -F "READY socket=vessel-parent-0" /tmp/transport.log
+
+            cat > /tmp/weston.ini <<EOF
+            [core]
+            shell=desktop-shell.so
+            xwayland=true
+            repaint-window=7
+            idle-time=0
+            [shell]
+            background-color=0xff08100d
+            panel-color=0xe8121b17
+            panel-position=top
+            locking=false
+            animation=none
+            close-animation=none
+            startup-animation=none
+            focus-animation=none
+            [autolaunch]
+            path=/usr/bin/foot
+            watch=false
+            EOF
+
+            WAYLAND_DISPLAY=vessel-parent-0 weston \
+              --backend=wayland-backend.so --use-pixman \
+              --socket=vessel-desktop-ci --display=vessel-parent-0 \
+              --width=800 --height=540 --scale=1 --fullscreen \
+              --xwayland --idle-time=0 --config=/tmp/weston.ini --log=/tmp/weston.log &
+            WESTON=$!
+            for i in $(seq 1 160); do [ -S /tmp/vessel-runtime/vessel-desktop-ci ] && break; kill -0 $WESTON 2>/dev/null || break; sleep .05; done
+            test -S /tmp/vessel-runtime/vessel-desktop-ci
+            kill -0 $WESTON
+
+            WAYLAND_DISPLAY=vessel-desktop-ci timeout 4s foot >/tmp/foot.log 2>&1 &
             FOOT=$!
             sleep 1
             kill -0 $FOOT 2>/dev/null
             wait $FOOT || test $? -eq 124
-            ! grep -E "no sub compositor|no clipboard available|no seats available|interface too old|text input interface not implemented|no decoration manager" /tmp/foot.log
-            for i in $(seq 1 40); do grep -q FRAME_OK /tmp/frame-listener.log && break; sleep .1; done
+
+            for i in $(seq 1 100); do grep -q FRAME_OK /tmp/frame-listener.log 2>/dev/null && break; sleep .05; done
             grep -q FRAME_OK /tmp/frame-listener.log
+            grep -F "shm-damage" /tmp/transport.log
+            cat /tmp/weston.log
             cat /tmp/frame-listener.log
           '
 
@@ -127,6 +158,14 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
+      - name: Verify Android protocol 35 wiring
+        run: |
+          set -euxo pipefail
+          grep -F 'REQUIRED_PROTOCOL = 35' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'weston-nested-vessel-transport-venus-android-surface-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v35.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'fun text(value: String)' app/src/main/java/com/example/dreamlinux/VesselInputClient.kt
+          grep -F 'keepScreenOn = false' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
       - name: Build, test and lint Vessel app
         run: |
           set -euxo pipefail
@@ -135,7 +174,7 @@ jobs:
       - name: Upload Vessel APK
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-advanced-compositor-debug
+          name: vessel-weston-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
