@@ -1,4 +1,4 @@
-name: Vessel wlroots APK
+name: Vessel direct compositor APK
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: vessel-wlroots-${{ github.ref }}
+  group: vessel-direct-compositor-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -21,34 +21,31 @@ jobs:
         with:
           fetch-depth: 0
           submodules: false
-      - name: Verify original Vessel frontend is untouched
+
+      - name: Verify protocol 34 direct compositor architecture
         run: |
           set -euxo pipefail
-          BASE=166ac8115df31f40577038d16dbd7f39308ef296
-          git diff --exit-code "$BASE" -- \
-            app/src/main/AndroidManifest.xml \
-            app/src/main/java/com/example/dreamlinux/MainActivity.kt \
-            app/src/main/java/com/example/dreamlinux/NativeLinuxSurfaceView.kt \
-            app/src/main/res/mipmap-hdpi \
-            app/src/main/res/mipmap-mdpi \
-            app/src/main/res/mipmap-xhdpi \
-            app/src/main/res/mipmap-xxhdpi \
-            app/src/main/res/mipmap-xxxhdpi
-          ! grep -R -E 'TAWC|DistroManager|DistributionManager|wmww' app/src/main || true
-      - name: Verify wlroots architecture
+          grep -F 'REQUIRED_PROTOCOL = 34' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel-compositor-dmabuf-venus-android-surface-v2' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v34.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'desktopAsync' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'Vessel compositor (libwayland-server, no DRM/VT/seatd)' tools/venus_poc/vessel_runtime_daemon_v34.py
+          grep -F '/usr/local/bin/vessel-compositor' tools/venus_poc/vessel_runtime_daemon_v34.py
+          grep -F 'desktopAsync' tools/venus_poc/vessel_runtime_daemon_v34.py
+          grep -F 'threading.Thread' tools/venus_poc/vessel_runtime_daemon_v34.py
+          ! grep -E 'seatd-launch|WLR_BACKENDS|WLR_RENDERER|sway --|kwin_wayland|Xtigervnc|vncserver|screenshot' tools/venus_poc/vessel_runtime_daemon_v34.py
+          grep -F 'wl_display_init_shm' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+          grep -F 'zwp_linux_dmabuf_v1_interface' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+          grep -F 'xdg_wm_base_interface' tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+
+      - name: Verify live Android progress polling
         run: |
           set -euxo pipefail
-          grep -F 'REQUIRED_PROTOCOL = 33' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'wlroots-sway-dmabuf-venus-android-surface-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'arch/vessel-wlroots-final' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v33.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'command -v sway' tools/venus_poc/vessel_runtime_daemon_v33.py
-          grep -F 'WLR_RENDERER=gles2' tools/venus_poc/vessel_runtime_daemon_v33.py
-          grep -F 'WLR_BACKENDS=wayland,libinput' tools/venus_poc/vessel_runtime_daemon_v33.py
-          grep -F 'MESA_LOADER_DRIVER_OVERRIDE=zink' tools/venus_poc/vessel_runtime_daemon_v33.py
-          grep -F "grep -F 'imported wl_buffer'" tools/venus_poc/vessel_runtime_daemon_v33.py
-          ! grep -E 'kwin_wayland|vesseloutputEnabled|_install_effect|Xtigervnc|vncserver|screenshot' tools/venus_poc/vessel_runtime_daemon_v33.py
-          test -f tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+          grep -F 'startDesktopAsync' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'delay(if (state.value.busy || state.value.running' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F '"compositor_start"' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F '"desktop_ready"' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+
       - name: Verify dynamic command transport
         run: |
           set -euxo pipefail
@@ -57,52 +54,41 @@ jobs:
           grep -F 'VESSEL_COMMAND_PORT=' tools/venus_poc/vessel_runtime_daemon_v33.py
           grep -F 'VESSEL_COMMAND_PORT' tools/venus_poc/guest_command_agent_v33.py
           ! grep -F 'PORT = 47640' tools/venus_poc/guest_command_agent_v33.py
-      - name: Verify rootless VT-free compositor session
-        run: |
-          set -euxo pipefail
-          grep -F 'LIBSEAT_BACKEND=noop' tools/venus_poc/vessel_runtime_daemon_v33.py
-          grep -F 'runuser -u vessel' tools/venus_poc/vessel_runtime_daemon_v33.py
-          grep -F 'useradd --create-home --shell /bin/bash vessel' tools/venus_poc/vessel_runtime_daemon_v33.py
-          grep -F 'chgrp vessel /dev/input/event' tools/venus_poc/vessel_runtime_daemon_v33.py
-          grep -F 'VK_DRIVER_FILES=/tmp/vessel-virtio-wsi-test.json' tools/venus_poc/vessel_runtime_daemon_v33.py
-          ! grep -F 'seatd-launch -- sway' tools/venus_poc/vessel_runtime_daemon_v33.py
-          ! grep -F 'SEATD_VTBOUND' tools/venus_poc/vessel_runtime_daemon_v33.py
+
       - name: Syntax-check runtime
         run: |
           set -euxo pipefail
           python3 -m py_compile \
             tools/venus_poc/vessel_runtime_daemon_v31.py \
             tools/venus_poc/vessel_runtime_daemon_v33.py \
+            tools/venus_poc/vessel_runtime_daemon_v34.py \
             tools/venus_poc/guest_command_agent.py \
             tools/venus_poc/guest_command_agent_v33.py \
             tools/venus_poc/guest_relay_wayland.py \
             tools/venus_poc/host_relay_wayland.py \
             tools/venus_poc/host_input_bridge.py
           bash -n tools/venus_poc/run_venus_wayland.sh
-      - name: Verify Debian 12 wlroots runtime and compile parent
+
+      - name: Compile Vessel compositor on Debian 12
         run: |
           set -euxo pipefail
           docker run --rm -v "$PWD:/src:ro" -w /src debian:12-slim bash -lc '
             set -euxo pipefail
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              build-essential pkg-config libwayland-dev wayland-protocols sway foot passwd util-linux
-            command -v sway
-            sway --version
-            command -v runuser
-            command -v useradd
-            rm -rf /tmp/vessel-wayland-build
-            mkdir -p /tmp/vessel-wayland-build
-            cd /tmp/vessel-wayland-build
+              build-essential pkg-config libwayland-dev wayland-protocols
+            rm -rf /tmp/vessel-compositor-build
+            mkdir -p /tmp/vessel-compositor-build
+            cd /tmp/vessel-compositor-build
             wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-server-protocol.h
             wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-protocol.c
             wayland-scanner server-header /usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml linux-dmabuf-unstable-v1-server-protocol.h
             wayland-scanner private-code /usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml linux-dmabuf-unstable-v1-protocol.c
             cc -O2 -std=gnu11 -Wall -Wextra -Werror=implicit-function-declaration \
-              -I/tmp/vessel-wayland-build /src/tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c \
+              -I/tmp/vessel-compositor-build /src/tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c \
               xdg-shell-protocol.c linux-dmabuf-unstable-v1-protocol.c \
-              $(pkg-config --cflags --libs wayland-server) -o /tmp/vessel-wayland-bridge
-            test -x /tmp/vessel-wayland-bridge
+              $(pkg-config --cflags --libs wayland-server) -o /tmp/vessel-compositor
+            test -x /tmp/vessel-compositor
           '
 
   build:
@@ -123,7 +109,7 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
-      - name: Build, test and lint original Vessel app
+      - name: Build, test and lint Vessel app
         run: |
           set -euxo pipefail
           chmod +x gradlew
@@ -131,7 +117,7 @@ jobs:
       - name: Upload Vessel APK
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-wlroots-debug
+          name: vessel-direct-compositor-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
