@@ -10,11 +10,11 @@ target_compile_features(dev1_payload PRIVATE cxx_std_17)
 target_compile_options(dev1_payload PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(dev1_payload PRIVATE dl)
 
-# Final desktop presentation path. KWin/Venus exports a dma-buf and Android
-# imports it directly into Vulkan, blits GPU->GPU into the SurfaceFlinger
-# swapchain, and keeps three command/sync contexts in flight. No screenshot,
-# CPU framebuffer, VNC, AHardwareBuffer staging copy, or per-frame queue idle.
-add_library(vessel_wayland_presenter SHARED vessel_wayland_presenter_v2.cpp)
+# Vessel desktop presentation path. GPU dma-bufs are cached by serial and
+# imported directly into Vulkan; SHM fallback updates only damaged rectangles
+# into a persistent Vulkan image. SurfaceFlinger presentation stays FIFO/vsync
+# paced with three frames in flight and no per-frame queue idle.
+add_library(vessel_wayland_presenter SHARED vessel_wayland_presenter_v3.cpp)
 target_compile_features(vessel_wayland_presenter PRIVATE cxx_std_17)
 # Android Vulkan declarations in vulkan.h are gated on VK_USE_PLATFORM_ANDROID_KHR.
 target_compile_definitions(vessel_wayland_presenter PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
