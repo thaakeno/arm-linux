@@ -87,28 +87,7 @@ jobs:
               $(pkg-config --cflags --libs wayland-server xkbcommon) -o /tmp/vessel-compositor-v35
             test -x /tmp/vessel-compositor-v35
 
-            python3 - <<"PY" >/tmp/frame-listener.log 2>&1 &
-import os, socket, struct
-path="/tmp/vessel-frame-test.sock"
-try: os.unlink(path)
-except FileNotFoundError: pass
-s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.bind(path); s.listen(1)
-c,_=s.accept()
-hdr=struct.Struct("<IIIIIIIIQQ")
-raw=c.recv(hdr.size, socket.MSG_WAITALL)
-if len(raw)!=hdr.size: raise SystemExit("short frame header")
-f=hdr.unpack(raw)
-if f[0]!=0x31574656: raise SystemExit("bad magic")
-if f[1]==4:
-    n=f[5]*(f[8]>>32)
-    got=0
-    while got<n:
-        b=c.recv(min(65536,n-got))
-        if not b: break
-        got+=len(b)
-    if got!=n: raise SystemExit(f"short shm payload {got}/{n}")
-print("FRAME_OK",f[1],f[2],f[3],flush=True)
-PY
+            python3 -c "import os,socket,struct; p=\"/tmp/vessel-frame-test.sock\"; os.path.exists(p) and os.unlink(p); s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.bind(p); s.listen(1); c,_=s.accept(); h=struct.Struct(\"<IIIIIIIIQQ\"); raw=c.recv(h.size,socket.MSG_WAITALL); f=h.unpack(raw); assert f[0]==0x31574656; n=f[5]*(f[8]>>32) if f[1]==4 else 0; data=b\"\"; exec(\"while len(data)<n:\\n data+=c.recv(min(65536,n-len(data)))\"); assert len(data)==n; print(\"FRAME_OK\",f[1],f[2],f[3],flush=True)" >/tmp/frame-listener.log 2>&1 &
             LISTENER=$!
             export XDG_RUNTIME_DIR=/tmp/vessel-runtime
             /tmp/vessel-compositor-v35 --socket vessel-test-0 --frame-socket /tmp/vessel-frame-test.sock \
