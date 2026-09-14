@@ -28,7 +28,7 @@ class TermuxUmlController(private val context: Context) {
         private const val EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
         private const val EXTRA_WORKDIR = "com.termux.RUN_COMMAND_WORKDIR"
         private const val EXTRA_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
-        private const val DISPLAY_TRANSPORT = "wlroots-labwc-dmabuf-venus-android-surface-v1"
+        private const val DISPLAY_TRANSPORT = "wlroots-sway-dmabuf-venus-android-surface-v1"
     }
 
     fun isTermuxInstalled(): Boolean = try {
@@ -64,8 +64,8 @@ class TermuxUmlController(private val context: Context) {
                 [ -z "${'$'}REMAINING" ] || kill -KILL ${'$'}REMAINING 2>/dev/null || true
               fi
 
-              # Make first launch self-healing. Older builds assumed ~/venus-poc
-              # already existed and silently left Vessel stuck at "Runtime ready".
+              # First launch must work on a clean Termux install. Earlier builds
+              # assumed this clone existed and could leave the UI stuck at READY.
               if [ ! -d ~/venus-poc/.git ]; then
                 rm -rf ~/venus-poc
                 git clone --filter=blob:none --no-checkout https://github.com/thaakeno/arm-linux.git ~/venus-poc
