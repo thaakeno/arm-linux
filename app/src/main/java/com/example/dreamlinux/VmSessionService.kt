@@ -31,11 +31,17 @@ data class SessionState(
     val installProgress:Double=-1.0,
     val installBytes:Long=0L,
     val installTotal:Long=-1L,
+    // Legacy field names kept for state compatibility; these now mean Weston desktop.
     val kdeInstalled:Boolean=false,
     val kdeInstalling:Boolean=false,
     val kdeStage:String="not started",
+    val desktopName:String="Weston 16 desktop-shell",
+    val rendererMode:String="native-vulkan",
+    val presenterStatus:String="starting",
+    val runtimeRevision:String="",
+    val displayTransport:String="",
     val capabilities:String="Not checked",
-    val graphics:String="Mesa Zink + Venus · host Adreno GPU",
+    val graphics:String="Weston 16 native Vulkan · Venus · host Adreno GPU · dma-buf",
     val internetReady:Boolean=false,
     val internetStage:String="offline",
     val progressPhase:String="idle",
@@ -71,7 +77,9 @@ class VmSessionService : Service() {
             e.contains("runtime daemon did not start", ignoreCase = true) -> "Vessel runtime daemon failed to start"
             e.contains("UML exited during boot", ignoreCase = true) -> "Debian UML exited during boot"
             e.contains("did not reach a shell", ignoreCase = true) -> "Debian did not reach a shell before timeout"
-            e.contains("forbidden software", ignoreCase = true) -> "Weston could not start the Adreno GPU renderer"
+            e.contains("GPU-only invariant", ignoreCase = true) -> "GPU-only display invariant failed"
+            e.contains("native Vulkan did not produce", ignoreCase = true) -> "Weston 16 native Vulkan did not produce a GPU frame"
+            e.contains("renderer invariant", ignoreCase = true) -> "Weston 16 Vulkan-only renderer check failed"
             else -> e.lineSequence().firstOrNull()?.take(180) ?: "Runtime failed"
         }
     }
@@ -94,6 +102,25 @@ class VmSessionService : Service() {
         val marker = "[Vessel error details]"
         if (base.contains(marker) && base.contains(rawError.take(120))) return base.takeLast(200_000)
         return (base.trimEnd() + "\n\n$marker\n" + rawError.trim()).takeLast(200_000)
+    }
+
+    private fun detailedRuntimeLog(obj: JSONObject, rawLog: String, rawError: String): String {
+        val base = withDetailedErrorLog(rawLog, rawError)
+        val presenter = runCatching { VesselWaylandPresenter.status() }.getOrElse { "presenter-error:${it.message}" }
+        val status = buildString {
+            append("\n\n[Vessel status]\n")
+            append("protocol=").append(obj.optInt("protocolVersion", 0)).append('\n')
+            append("revision=").append(obj.optString("runtimeRevision", "unknown")).append('\n')
+            append("compositor=").append(obj.optString("compositor", "unknown")).append('\n')
+            append("renderer=").append(obj.optString("renderer", "unknown")).append('\n')
+            append("rendererMode=").append(obj.optString("rendererMode", "unknown")).append('\n')
+            append("transport=").append(obj.optString("displayTransport", "unknown")).append('\n')
+            append("translationLayer=").append(obj.optString("translationLayer", "unknown")).append('\n')
+            append("gpuOnly=").append(obj.optBoolean("gpuOnly", false)).append('\n')
+            append("softwareFallback=").append(obj.optBoolean("softwareFallback", false)).append('\n')
+            append("androidPresenter=").append(presenter)
+        }
+        return (base.trimEnd() + status).takeLast(200_000)
     }
 
     override fun onCreate() {
@@ -184,24 +211,28 @@ class VmSessionService : Service() {
         val detail = when (phase) {
             "queued" -> "Starting Vessel Linux"
             "command_agent" -> "Connecting Debian control channel"
-            "venus" -> "Starting Venus GPU transport"
+            "venus" -> "Starting Venus Vulkan transport"
             "debian_ready" -> "Debian + Venus ready"
-            "desktop_deps" -> "Checking Weston desktop runtime"
-            "transport_build" -> "Preparing native display transport"
-            "desktop_config" -> "Configuring Weston desktop"
-            "transport_start" -> "Starting Android display transport"
-            "weston_start" -> "Starting Weston/libweston compositor"
-            "desktop_surface" -> "First Weston frame reached Android"
-            "desktop_ready" -> "Weston desktop live"
+            "desktop_deps" -> "Checking Weston 16 native Vulkan runtime"
+            "transport_build" -> "Preparing native dma-buf display transport"
+            "desktop_config" -> "Configuring Weston 16 desktop-shell"
+            "transport_start" -> "Starting GPU-only Android display transport"
+            "weston_start" -> "Starting Weston 16 native Vulkan compositor"
+            "desktop_surface" -> "Native Vulkan dma-buf reached Android transport"
+            "desktop_ready" -> "Weston 16 native Vulkan desktop live"
             else -> rawDetail
         }
         val uptime = obj.optLong("uptimeMs", if (running) state.value.uptimeMs else 0L)
         val desktopStarting = running && phase in setOf(
             "desktop_deps", "transport_build", "desktop_config", "transport_start", "weston_start", "desktop_surface"
         )
+        val desktopName = obj.optString("desktopName", "Weston 16 desktop-shell")
+        val renderer = obj.optString("renderer", "Weston 16 native Vulkan · Venus · Adreno · dma-buf")
+        val rendererMode = obj.optString("rendererMode", "native-vulkan")
+        val presenter = runCatching { VesselWaylandPresenter.status() }.getOrElse { "presenter-error:${it.message}" }
         val message = when {
             error.isNotBlank() -> error
-            desktop -> "Vessel desktop is live · ${formatUptime(uptime)}"
+            desktop -> "$desktopName is live · ${formatUptime(uptime)}"
             detail.isNotBlank() && (state.value.busy || running || phase != "idle") -> "$detail · ${formatUptime(uptime)}"
             fallbackMessage != null -> fallbackMessage
             guest -> "Debian ARM64 ready · ${formatUptime(uptime)}"
@@ -216,15 +247,20 @@ class VmSessionService : Service() {
             kdeInstalled = desktop,
             kdeInstalling = !desktop && desktopStarting,
             kdeStage = when {
-                desktop -> "Weston/libweston · native Android display · ${formatUptime(uptime)}"
+                desktop -> "$desktopName · native Vulkan · ${formatUptime(uptime)}"
                 desktopStarting -> detail
                 running && guest -> "Debian ready · desktop not started"
                 else -> "not started"
             },
+            desktopName = desktopName,
+            rendererMode = rendererMode,
+            presenterStatus = presenter,
+            runtimeRevision = obj.optString("runtimeRevision", state.value.runtimeRevision),
+            displayTransport = obj.optString("displayTransport", state.value.displayTransport),
             internetReady = guest,
             internetStage = if (guest) "NAT via umnet/passt" else "offline",
             vmRoot = obj.optString("runtimeDir", state.value.vmRoot),
-            console = withDetailedErrorLog(rawLog, rawError),
+            console = detailedRuntimeLog(obj, rawLog, rawError),
             progressPhase = phase,
             progressPercent = percent,
             progressDetail = detail,
@@ -238,8 +274,8 @@ class VmSessionService : Service() {
                 else -> "runtime_ready"
             },
             message = message,
-            graphics = if (guest) "Weston GL · Zink + Venus · Adreno · dma-buf/umshm" else state.value.graphics,
-            capabilities = if (ok) "Rootless UML · Weston/libweston · XWayland · native Vulkan display · persistent ext4" else state.value.capabilities
+            graphics = if (guest) renderer else state.value.graphics,
+            capabilities = if (ok) "Rootless UML · Weston 16 native Vulkan · XWayland · Venus dma-buf · Android Vulkan · persistent ext4" else state.value.capabilities
         )
     }
 
@@ -290,18 +326,18 @@ class VmSessionService : Service() {
 
     fun installDebian() = startDebian(requestedWidth, requestedHeight, requestedDpi, 120)
 
-    fun installKde() = operation("Starting Weston desktop") {
+    fun installKde() = operation("Starting Weston 16 desktop") {
         state.value = state.value.copy(
             kdeInstalling = true,
             lastError = "",
             progressPhase = "queued",
             progressPercent = 1,
-            progressDetail = "Starting Weston desktop",
-            message = "Starting Weston desktop…"
+            progressDetail = "Starting Weston 16 native Vulkan desktop",
+            message = "Starting Weston 16 native Vulkan desktop…"
         )
         applyRuntime(
             uml.startDesktopAsync(requestedWidth, requestedHeight, requestedDpi),
-            "Weston desktop startup launched"
+            "Weston 16 desktop startup launched"
         )
     }
 
@@ -322,6 +358,29 @@ class VmSessionService : Service() {
 
     fun shell(command: String) = debianConsole(command)
 
+    fun launchDesktopApp(name: String) = operation("Launching $name") {
+        val result = uml.desktopAction(name)
+        applyRuntime(result, "$name launched")
+    }
+
+    fun launchFirefox() = launchDesktopApp("firefox")
+
+    fun runGuestVulkanProbe() = operation("Running Vulkan diagnostics") {
+        val result = uml.guest(
+            "echo '=== Weston ==='; /opt/vessel-weston16/bin/weston --version 2>&1 || true; " +
+                "echo '=== Vulkan ==='; VTEST_SOCKET_NAME=/tmp/.venus_test VN_DEBUG=vtest VK_DRIVER_FILES=/tmp/vessel-virtio-wsi.json vulkaninfo --summary 2>&1 || true; " +
+                "echo '=== Weston log ==='; tail -160 /tmp/vessel-runtime/weston16-vulkan.log 2>/dev/null || true; " +
+                "echo '=== transport ==='; tail -160 /tmp/vessel-transport.log 2>/dev/null || true",
+            45,
+        )
+        val output = result.optString("output")
+        state.value = state.value.copy(
+            debianTerminal = (state.value.debianTerminal + "\n# Vulkan diagnostics\n$output").takeLast(256_000),
+            message = "Vulkan diagnostics completed"
+        )
+        applyRuntime(result, "Vulkan diagnostics completed")
+    }
+
     fun probeCapabilities() = operation("Checking runtime") {
         val runtime = uml.ensureDaemon()
         val text = buildString {
@@ -329,9 +388,12 @@ class VmSessionService : Service() {
             append(" · Termux=").append(if (uml.isTermuxInstalled()) "yes" else "no")
             append(" · command permission=").append(if (uml.hasRunCommandPermission()) "yes" else "no")
             append(" · protocol=").append(runtime.optInt("protocolVersion", 0))
+            append(" · compositor=").append(runtime.optString("compositor", "unknown"))
+            append(" · renderer=").append(runtime.optString("rendererMode", "unknown"))
+            append(" · translation=").append(runtime.optString("translationLayer", "unknown"))
             append(" · display=").append(runtime.optString("displayTransport", "unknown"))
             if (runtime.optBoolean("guestReady")) append(" · Venus guest=ready")
-            if (runtime.optBoolean("desktopReady")) append(" · Weston=live")
+            if (runtime.optBoolean("desktopReady")) append(" · desktop=live")
         }
         state.value = state.value.copy(capabilities = text, message = text)
         applyRuntime(runtime, text)
@@ -380,6 +442,11 @@ class VmSessionService : Service() {
                             .put("running", s.running)
                             .put("stage", s.stage)
                             .put("desktop", s.kdeInstalled)
+                            .put("desktopName", s.desktopName)
+                            .put("rendererMode", s.rendererMode)
+                            .put("presenterStatus", s.presenterStatus)
+                            .put("runtimeRevision", s.runtimeRevision)
+                            .put("displayTransport", s.displayTransport)
                             .put("progress", s.progressDetail)
                             .put("error", s.lastError)
                             .put("graphics", s.graphics)
