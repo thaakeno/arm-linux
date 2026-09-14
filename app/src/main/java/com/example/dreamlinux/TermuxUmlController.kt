@@ -20,7 +20,8 @@ class TermuxUmlController(private val context: Context) {
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = -1
-        const val REQUIRED_PROTOCOL = 35
+        const val REQUIRED_PROTOCOL = 36
+        private const val REQUIRED_RUNTIME_REVISION = "v36-owned-weston-log-exact-frame-probe"
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
         private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
@@ -28,7 +29,7 @@ class TermuxUmlController(private val context: Context) {
         private const val EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
         private const val EXTRA_WORKDIR = "com.termux.RUN_COMMAND_WORKDIR"
         private const val EXTRA_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
-        private const val DISPLAY_TRANSPORT = "weston-nested-vessel-transport-venus-android-surface-v1"
+        private const val DISPLAY_TRANSPORT = "weston-nested-vessel-transport-venus-android-surface-v2"
     }
 
     fun isTermuxInstalled(): Boolean = try {
@@ -48,7 +49,7 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 35 Weston/libweston runtime"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 36 Weston/libweston runtime"
               set -e
 
               DAEMON_RE='^([^ ]*/)?python(3)?[[:space:]]+[^ ]*/vessel_runtime_daemon(_v[0-9]+)?\.py([[:space:]].*)?${'$'}'
@@ -79,6 +80,7 @@ class TermuxUmlController(private val context: Context) {
                 git -C ~/vessel-poc-runtime clean -ffd
               fi
 
+              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v36.py
               test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v35.py
               test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
               test -f ~/vessel-poc-runtime/tools/venus_poc/guest_input_direct_v34.py
@@ -87,7 +89,7 @@ class TermuxUmlController(private val context: Context) {
               export VESSEL_MEM_MB=8192
               export ENABLE_X11=0
               export VESSEL_ANDROID_PACKAGE=${'$'}(if [ "${BuildConfig.LOCAL_TEST}" = "true" ]; then echo com.example.dreamlinux.localvessel; else echo com.example.dreamlinux; fi)
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v35.py
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v36.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
@@ -118,6 +120,7 @@ class TermuxUmlController(private val context: Context) {
 
     private fun isNativeProtocol(obj: JSONObject): Boolean =
         obj.optInt("protocolVersion", 0) == REQUIRED_PROTOCOL &&
+            obj.optString("runtimeRevision") == REQUIRED_RUNTIME_REVISION &&
             obj.optString("displayTransport") == DISPLAY_TRANSPORT &&
             obj.optInt("vncPort", -1) == -1
 
@@ -155,7 +158,7 @@ class TermuxUmlController(private val context: Context) {
             }
         }
         throw IllegalStateException(
-            "Vessel protocol 35 runtime did not start. In Termux run: cat ~/vessel-daemon.log",
+            "Vessel protocol 36 runtime did not start. In Termux run: cat ~/vessel-daemon.log",
             last,
         )
     }
@@ -176,6 +179,7 @@ class TermuxUmlController(private val context: Context) {
             JSONObject()
                 .put("ok", true)
                 .put("protocolVersion", REQUIRED_PROTOCOL)
+                .put("runtimeRevision", REQUIRED_RUNTIME_REVISION)
                 .put("displayTransport", DISPLAY_TRANSPORT)
                 .put("vncPort", -1)
                 .put("running", false)
