@@ -30,6 +30,7 @@ CONFIG_SMP=y
 CONFIG_NR_CPUS=8
 CONFIG_INPUT=y
 CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_MISC=y
 CONFIG_INPUT_UINPUT=y
 
 # Standard Linux virtio-gpu frontend over UML's existing vhost-user transport.
@@ -53,6 +54,7 @@ for cfg in \
   'CONFIG_NR_CPUS=8' \
   'CONFIG_INPUT=y' \
   'CONFIG_INPUT_EVDEV=y' \
+  'CONFIG_INPUT_MISC=y' \
   'CONFIG_INPUT_UINPUT=y' \
   'CONFIG_UML_DMA_EMULATION=y' \
   'CONFIG_VIRTIO=y' \
@@ -68,6 +70,7 @@ install -m0755 "$KERNEL" "$FINAL_ART/linux-umshm"; install -m0755 "$STUB" "$FINA
   echo "commit=$UPSTREAM_COMMIT"
   echo 'CONFIG_SMP=y'
   echo 'CONFIG_NR_CPUS=8'
+  echo 'CONFIG_INPUT_MISC=y'
   echo 'CONFIG_INPUT_UINPUT=y'
   echo 'CONFIG_UML_DMA_EMULATION=y'
   echo 'CONFIG_VIRTIO_UML=y'
