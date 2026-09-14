@@ -24,6 +24,20 @@ PY
 python3 "$SMP_UMSHM_PATCHER" "$SRC"
 python3 "$ROOT/tools/venus_poc/fix_umshm_nonblock.py" "$SRC"
 python3 "$ROOT/tools/venus_poc/fix_umshm_ptrace_fds.py" "$SRC"
+
+# UML's pristine arm64 defconfig starts with UML_DMA_EMULATION=n.  That makes
+# UML select NO_DMA during the harness' initial `make defconfig`.  Enabling DMA
+# only later through EXTRA_CONFIG is too late on this tree: the stale NO_DMA=y
+# state survives olddefconfig, HAS_DMA stays unavailable while DRM is resolved,
+# and Kconfig silently drops CONFIG_DRM=y.  Seed the two UML emulation knobs in
+# the source defconfig *before* the harness creates .config so DMA/IOMEM are
+# available from the first Kconfig resolution.  This is a config-only change to
+# the throw-away upstream checkout, not a kernel source patch.
+ARM64_DEFCONFIG="$SRC/arch/um/configs/arm64_defconfig"
+"$SRC/scripts/config" --file "$ARM64_DEFCONFIG" -e UML_DMA_EMULATION -e UML_IOMEM_EMULATION
+grep -qx 'CONFIG_UML_DMA_EMULATION=y' "$ARM64_DEFCONFIG"
+grep -qx 'CONFIG_UML_IOMEM_EMULATION=y' "$ARM64_DEFCONFIG"
+
 CONFIG="$WORK/vessel-smp.config"
 cat >"$CONFIG" <<'EOF'
 CONFIG_SMP=y
@@ -34,8 +48,11 @@ CONFIG_INPUT_MISC=y
 CONFIG_INPUT_UINPUT=y
 
 # Standard Linux virtio-gpu frontend over UML's existing vhost-user transport.
-# DRM requires HAS_DMA; on UML that means enabling the DMA bookkeeping shim.
+# These are also repeated here so the final generated config is self-describing;
+# the important part is that DMA/IOMEM were already enabled for the first
+# defconfig pass above.
 CONFIG_UML_DMA_EMULATION=y
+CONFIG_UML_IOMEM_EMULATION=y
 CONFIG_VIRTIO_MENU=y
 CONFIG_VIRTIO=y
 CONFIG_VIRTIO_UML=y
@@ -49,6 +66,10 @@ bash "$SRC/tools/um-arm64/harness/build-bionic.sh"
 KERNEL="$UPSTREAM_ART/linux-bionic"; STUB="$UPSTREAM_ART/stub_exe_bionic"
 [ -s "$KERNEL" ] || { echo "missing rebuilt UML kernel: $KERNEL" >&2; exit 1; }
 [ -s "$STUB" ] || { echo "missing rebuilt UML stub: $STUB" >&2; exit 1; }
+
+echo 'Resolved UML/virtio/DRM Kconfig:'
+grep -E '^(CONFIG_(UML_DMA_EMULATION|UML_IOMEM_EMULATION|NO_DMA|HAS_DMA|NO_IOMEM|HAS_IOMEM|VIRTIO|VIRTIO_UML|DRM|DRM_VIRTIO_GPU|DRM_VIRTIO_GPU_KMS)=|# CONFIG_(UML_DMA_EMULATION|UML_IOMEM_EMULATION|NO_DMA|HAS_DMA|NO_IOMEM|HAS_IOMEM|VIRTIO|VIRTIO_UML|DRM|DRM_VIRTIO_GPU|DRM_VIRTIO_GPU_KMS) is not set)' "$OUT/.config" || true
+
 for cfg in \
   'CONFIG_SMP=y' \
   'CONFIG_NR_CPUS=8' \
@@ -57,6 +78,8 @@ for cfg in \
   'CONFIG_INPUT_MISC=y' \
   'CONFIG_INPUT_UINPUT=y' \
   'CONFIG_UML_DMA_EMULATION=y' \
+  'CONFIG_UML_IOMEM_EMULATION=y' \
+  'CONFIG_HAS_DMA=y' \
   'CONFIG_VIRTIO=y' \
   'CONFIG_VIRTIO_UML=y' \
   'CONFIG_DRM=y' \
@@ -73,7 +96,10 @@ install -m0755 "$KERNEL" "$FINAL_ART/linux-umshm"; install -m0755 "$STUB" "$FINA
   echo 'CONFIG_INPUT_MISC=y'
   echo 'CONFIG_INPUT_UINPUT=y'
   echo 'CONFIG_UML_DMA_EMULATION=y'
+  echo 'CONFIG_UML_IOMEM_EMULATION=y'
+  echo 'CONFIG_HAS_DMA=y'
   echo 'CONFIG_VIRTIO_UML=y'
+  echo 'CONFIG_DRM=y'
   echo 'CONFIG_DRM_VIRTIO_GPU=y'
   echo 'CONFIG_DRM_VIRTIO_GPU_KMS=y'
   echo 'default_vcpus=6'
