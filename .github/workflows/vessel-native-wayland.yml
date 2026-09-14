@@ -92,7 +92,25 @@ jobs:
               --frame-socket /tmp/vessel-frame-test.sock --input-socket /tmp/vessel-input-test.sock \
               --width 800 --height 540 --refresh 60 >/tmp/transport.log 2>&1 &
             PARENT=$!
-            trap "kill $PARENT $LISTENER ${WESTON:-} 2>/dev/null || true" EXIT
+            WESTON=
+            FOOT=
+            cleanup() {
+              rc=$?
+              set +e
+              echo "===== transport.log ====="
+              cat /tmp/transport.log 2>/dev/null || true
+              echo "===== weston.log ====="
+              cat /tmp/weston.log 2>/dev/null || true
+              echo "===== foot.log ====="
+              cat /tmp/foot.log 2>/dev/null || true
+              echo "===== frame-listener.log ====="
+              cat /tmp/frame-listener.log 2>/dev/null || true
+              [ -n "$FOOT" ] && kill "$FOOT" 2>/dev/null || true
+              [ -n "$WESTON" ] && kill "$WESTON" 2>/dev/null || true
+              kill "$PARENT" "$LISTENER" 2>/dev/null || true
+              exit "$rc"
+            }
+            trap cleanup EXIT
             for i in $(seq 1 100); do [ -S /tmp/vessel-runtime/vessel-parent-0 ] && break; sleep .05; done
             test -S /tmp/vessel-runtime/vessel-parent-0
             grep -F "READY socket=vessel-parent-0" /tmp/transport.log
@@ -135,8 +153,6 @@ jobs:
             for i in $(seq 1 100); do grep -q FRAME_OK /tmp/frame-listener.log 2>/dev/null && break; sleep .05; done
             grep -q FRAME_OK /tmp/frame-listener.log
             grep -F "shm-damage" /tmp/transport.log
-            cat /tmp/weston.log
-            cat /tmp/frame-listener.log
           '
 
   build:
