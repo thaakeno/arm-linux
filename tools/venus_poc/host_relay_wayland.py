@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
-"""Host half of Vessel's Venus + Wayland dma-buf bridge.
+"""Host half of Vessel's Venus + Wayland frame bridge.
 
-Venus SCM_RIGHTS objects are registered in UML once and retained here. Returned
-object references from Debian are converted back to the original host fd. KWin
-frame exports are forwarded by SCM_RIGHTS to the Android APK's native Vulkan
-presenter without copying pixel payloads through Python or TCP.
-
-Important: AF_UNIX SOCK_STREAM ancillary data is a barrier, not a record.  A
-recvmsg() that receives SCM_RIGHTS may also return ordinary bytes that were sent
-*before* the descriptor carrier byte.  Mesa Venus later calls read() for those
-ordinary protocol bytes and recvmsg() for exactly the one-byte FD carrier.  We
-therefore preserve that boundary explicitly across the TCP relay: prefix bytes
-are forwarded as DATA and only the final carrier byte is forwarded with the FD.
+GPU clients keep the existing Venus/umshm dma-buf path. Software Wayland
+clients can send bounded damage-only SHM updates through the same framed relay
+to the Android Vulkan presenter. No full-screen polling or screenshot loop is
+used.
 """
 from __future__ import annotations
 
@@ -33,6 +26,7 @@ SIGNAL_H2G = 8
 FD_REF_G2H = 9
 FRAME_IMPORT_G2H = 10
 FRAME_NOTIFY_G2H = 11
+FRAME_SHM_G2H = 12
 CTRL_MSG = struct.Struct("=IIQ")
 CTRL_ACK = struct.Struct("=Ii")
 CTRL_REGISTER = 0
@@ -242,14 +236,6 @@ class Relay:
 
     @staticmethod
     def _split_fd_carrier(data: bytes) -> tuple[bytes, bytes]:
-        """Preserve Linux AF_UNIX SCM_RIGHTS stream-barrier semantics.
-
-        recvmsg() may return ordinary stream bytes that precede the byte carrying
-        ancillary data.  For Mesa vtest the FD carrier itself is exactly one
-        dummy byte.  Re-attaching SCM_RIGHTS to the first byte of the whole
-        chunk makes Mesa's earlier read() consume and discard the control
-        message.  Keep the prefix as plain data and the final byte as carrier.
-        """
         if not data:
             raise RuntimeError("SCM_RIGHTS message missing carrier byte")
         return data[:-1], data[-1:]
@@ -296,10 +282,7 @@ class Relay:
                 obj_id = self.alloc_id()
                 self.register_object(obj_id, fd, backing)
                 self.writer.send(FD_DIRECT_H2G, struct.pack("!IQI", obj_id, size, len(carrier)) + carrier)
-                print(
-                    f"[host-wayland] forwarded Venus object id={obj_id} with exact 1-byte SCM_RIGHTS carrier",
-                    flush=True,
-                )
+                print(f"[host-wayland] forwarded Venus object id={obj_id}", flush=True)
             finally:
                 if not keep_fd:
                     os.close(fd)
@@ -337,10 +320,13 @@ class Relay:
                 message = payload[4:]
                 fd = self.object_fds.get(obj_id)
                 if fd is None:
-                    raise RuntimeError(f"KWin referenced unknown host object id={obj_id}")
+                    raise RuntimeError(f"Vessel compositor referenced unknown host object id={obj_id}")
                 self.presenter.send_import(message, fd)
-                print(f"[host-wayland] Android imported KWin object id={obj_id}", flush=True)
+                print(f"[host-wayland] Android imported Vessel dma-buf id={obj_id}", flush=True)
             elif t == FRAME_NOTIFY_G2H:
+                self.presenter.send_frame(payload)
+            elif t == FRAME_SHM_G2H:
+                # Header + bounded damage pixels are already one coherent payload.
                 self.presenter.send_frame(payload)
             else:
                 raise RuntimeError(f"unexpected guest frame type {t}")
