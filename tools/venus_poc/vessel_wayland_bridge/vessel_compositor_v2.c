@@ -381,8 +381,21 @@ static void surface_attach(struct wl_client *client, struct wl_resource *resourc
     (void)x;
     (void)y;
     struct surface *s = wl_resource_get_user_data(resource);
-    s->pending = buffer ? wl_resource_get_user_data(buffer) : NULL;
-    s->pending_attached = 1;
+    if (!buffer) {
+        s->pending = NULL;
+        s->pending_attached = 1;
+        return;
+    }
+    if (wl_resource_instance_of(buffer, &wl_buffer_interface, &buffer_impl)) {
+        s->pending = wl_resource_get_user_data(buffer);
+        s->pending_attached = 1;
+        return;
+    }
+    /* SHM and other non-dmabuf buffers are valid Wayland buffers but cannot
+     * enter Vessel's zero-copy Vulkan relay. Ignore them safely rather than
+     * interpreting foreign wl_buffer user-data as a vessel_buffer. */
+    s->pending = NULL;
+    s->pending_attached = 0;
 }
 
 static void surface_damage(struct wl_client *client, struct wl_resource *resource,
