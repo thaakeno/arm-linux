@@ -49,6 +49,15 @@ jobs:
           grep -F "grep -F 'imported wl_buffer'" tools/venus_poc/vessel_runtime_daemon_v33.py
           ! grep -E 'kwin_wayland|vesseloutputEnabled|_install_effect|Xtigervnc|vncserver|screenshot' tools/venus_poc/vessel_runtime_daemon_v33.py
           test -f tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
+      - name: Verify dynamic command transport
+        run: |
+          set -euxo pipefail
+          grep -F 'v31.COMMAND_PORT = 0' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'getpeername' /dev/null 2>/dev/null || true
+          grep -F 'getsockname()[1]' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'VESSEL_COMMAND_PORT=' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'VESSEL_COMMAND_PORT' tools/venus_poc/guest_command_agent_v33.py
+          ! grep -F 'PORT = 47640' tools/venus_poc/guest_command_agent_v33.py
       - name: Syntax-check runtime
         run: |
           set -euxo pipefail
@@ -56,6 +65,7 @@ jobs:
             tools/venus_poc/vessel_runtime_daemon_v31.py \
             tools/venus_poc/vessel_runtime_daemon_v33.py \
             tools/venus_poc/guest_command_agent.py \
+            tools/venus_poc/guest_command_agent_v33.py \
             tools/venus_poc/guest_relay_wayland.py \
             tools/venus_poc/host_relay_wayland.py \
             tools/venus_poc/host_input_bridge.py
