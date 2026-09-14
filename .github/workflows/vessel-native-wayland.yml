@@ -39,13 +39,14 @@ jobs:
         run: |
           set -euxo pipefail
           grep -F 'REQUIRED_PROTOCOL = 33' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'wlroots-labwc-dmabuf-venus-android-surface-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'wlroots-sway-dmabuf-venus-android-surface-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'arch/vessel-wlroots-final' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'vessel_runtime_daemon_v33.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'command -v labwc' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'command -v sway' tools/venus_poc/vessel_runtime_daemon_v33.py
           grep -F 'WLR_RENDERER=gles2' tools/venus_poc/vessel_runtime_daemon_v33.py
           grep -F 'WLR_BACKENDS=wayland,libinput' tools/venus_poc/vessel_runtime_daemon_v33.py
           grep -F 'MESA_LOADER_DRIVER_OVERRIDE=zink' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F "grep -F 'imported wl_buffer'" tools/venus_poc/vessel_runtime_daemon_v33.py
           ! grep -E 'kwin_wayland|vesseloutputEnabled|_install_effect|Xtigervnc|vncserver|screenshot' tools/venus_poc/vessel_runtime_daemon_v33.py
           test -f tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
       - name: Syntax-check runtime
@@ -59,15 +60,17 @@ jobs:
             tools/venus_poc/host_relay_wayland.py \
             tools/venus_poc/host_input_bridge.py
           bash -n tools/venus_poc/run_venus_wayland.sh
-      - name: Compile Vessel native Wayland parent on Debian 12
+      - name: Verify Debian 12 wlroots runtime and compile parent
         run: |
           set -euxo pipefail
           docker run --rm -v "$PWD:/src:ro" -w /src debian:12-slim bash -lc '
             set -euxo pipefail
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              build-essential pkg-config libwayland-dev wayland-protocols labwc
-            command -v labwc
+              build-essential pkg-config libwayland-dev wayland-protocols sway seatd foot
+            command -v sway
+            sway --version
+            command -v seatd-launch
             rm -rf /tmp/vessel-wayland-build
             mkdir -p /tmp/vessel-wayland-build
             cd /tmp/vessel-wayland-build
