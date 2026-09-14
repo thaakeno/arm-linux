@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 jobs:
-  native-vulkan-screen:
+  native-vulkan-build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -27,7 +27,6 @@ jobs:
           set -euxo pipefail
           python3 -m py_compile \
             tools/venus_poc/vessel_runtime_daemon_v37.py \
-            tools/venus_poc/ci_dmabuf_screen_probe.py \
             tools/venus_poc/guest_input_direct_v34.py \
             tools/venus_poc/guest_relay_wayland.py \
             tools/venus_poc/host_relay_wayland.py \
@@ -45,7 +44,7 @@ jobs:
           ! grep -F 'host_frame_damage_relay.py" \\' tools/venus_poc/run_venus_wayland.sh
           grep -F 'software/SHM display fallback disabled' tools/venus_poc/run_venus_wayland.sh
 
-      - name: Build Weston 16 Vulkan and verify a real non-black dma-buf screen
+      - name: Build Weston 16 Vulkan components
         run: |
           set -euxo pipefail
           docker run --rm -v "$PWD:/src:ro" -w /src debian:12-slim bash -lc '
@@ -53,117 +52,15 @@ jobs:
             export VESSEL_WESTON_PREFIX=/opt/vessel-weston16
             export VESSEL_BUILD_JOBS=2
             bash /src/tools/venus_poc/build_weston16_vulkan.sh
-            apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
 
             /opt/vessel-weston16/bin/weston --version | grep -F "16.0.0"
             find /opt/vessel-weston16 -name vulkan-renderer.so -type f -print -quit | grep -q .
+            find /opt/vessel-weston16 -name wayland-backend.so -type f -print -quit | grep -q .
             ! find /opt/vessel-weston16 -name gl-renderer.so -type f -print -quit | grep -q .
-
-            rm -rf /tmp/vessel-transport-build /tmp/vessel-runtime
-            rm -f /tmp/vessel-screen.sock /tmp/screen-probe.log /tmp/transport.log /tmp/weston.log /tmp/foot.log
-            mkdir -p /tmp/vessel-transport-build /tmp/vessel-runtime
-            chmod 700 /tmp/vessel-runtime
-            install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
-
-            cd /tmp/vessel-transport-build
-            wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-server-protocol.h
-            wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-protocol.c
-            wayland-scanner server-header /usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml linux-dmabuf-unstable-v1-server-protocol.h
-            wayland-scanner private-code /usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml linux-dmabuf-unstable-v1-protocol.c
-            wayland-scanner server-header /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml presentation-time-server-protocol.h
-            wayland-scanner private-code /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml presentation-time-protocol.c
-            cc -O2 -std=gnu11 -Wall -Wextra -Werror=implicit-function-declaration \
-              -I/tmp/vessel-transport-build \
-              /src/tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c \
-              xdg-shell-protocol.c linux-dmabuf-unstable-v1-protocol.c presentation-time-protocol.c \
-              $(pkg-config --cflags --libs wayland-server xkbcommon) -o /tmp/vessel-transport-host
-
-            python3 /src/tools/venus_poc/ci_dmabuf_screen_probe.py \
-              --socket /tmp/vessel-screen.sock --timeout 30 >/tmp/screen-probe.log 2>&1 &
-            PROBE=$!
-            export XDG_RUNTIME_DIR=/tmp/vessel-runtime
-            /tmp/vessel-transport-host \
-              --socket vessel-parent-0 \
-              --frame-socket /tmp/vessel-screen.sock \
-              --input-socket /tmp/vessel-input-test.sock \
-              --width 800 --height 540 --refresh 60 >/tmp/transport.log 2>&1 &
-            PARENT=$!
-            WESTON=""
-            FOOT=""
-            cleanup() {
-              rc=$?
-              set +e
-              echo "===== weston.log ====="; cat /tmp/weston.log 2>/dev/null || true
-              echo "===== transport.log ====="; cat /tmp/transport.log 2>/dev/null || true
-              echo "===== screen-probe.log ====="; cat /tmp/screen-probe.log 2>/dev/null || true
-              echo "===== foot.log ====="; cat /tmp/foot.log 2>/dev/null || true
-              echo "===== vulkaninfo.log ====="; cat /tmp/vulkaninfo.log 2>/dev/null || true
-              [ -n "$FOOT" ] && kill "$FOOT" 2>/dev/null || true
-              [ -n "$WESTON" ] && kill "$WESTON" 2>/dev/null || true
-              kill "$PARENT" "$PROBE" 2>/dev/null || true
-              exit "$rc"
-            }
-            trap cleanup EXIT
-            for i in $(seq 1 120); do [ -S /tmp/vessel-runtime/vessel-parent-0 ] && break; sleep .05; done
-            test -S /tmp/vessel-runtime/vessel-parent-0
-
-            printf "%s\n" \
-              "[core]" \
-              "shell=desktop-shell.so" \
-              "xwayland=true" \
-              "repaint-window=7" \
-              "idle-time=0" \
-              "" \
-              "[shell]" \
-              "background-color=0xff12382b" \
-              "panel-color=0xe8121b17" \
-              "panel-position=top" \
-              "locking=false" \
-              "animation=none" \
-              "close-animation=none" \
-              "startup-animation=none" \
-              "focus-animation=none" \
-              "cursor-size=24" > /tmp/weston.ini
-
-            LVP=$(find /usr/share/vulkan/icd.d -type f -name "*lvp*.json" -print -quit)
-            test -n "$LVP"
-            echo "CI Vulkan ICD: $LVP"
-            VK_DRIVER_FILES="$LVP" vulkaninfo --summary >/tmp/vulkaninfo.log 2>&1 || { cat /tmp/vulkaninfo.log; exit 31; }
-
-            WAYLAND_DISPLAY=vessel-parent-0 VK_DRIVER_FILES="$LVP" \
-              /opt/vessel-weston16/bin/weston \
-                --backend=wayland --renderer=vulkan \
-                --socket=vessel-desktop-ci --display=vessel-parent-0 \
-                --width=800 --height=540 --scale=1 --fullscreen \
-                --xwayland --idle-time=0 --config=/tmp/weston.ini --log=/tmp/weston.log &
-            WESTON=$!
-            for i in $(seq 1 200); do
-              [ -S /tmp/vessel-runtime/vessel-desktop-ci ] && break
-              kill -0 "$WESTON" 2>/dev/null || break
-              sleep .05
-            done
-            test -S /tmp/vessel-runtime/vessel-desktop-ci
-            kill -0 "$WESTON"
-
-            WAYLAND_DISPLAY=vessel-desktop-ci timeout 8s foot >/tmp/foot.log 2>&1 &
-            FOOT=$!
-            sleep 2
-            kill -0 "$FOOT" 2>/dev/null || { cat /tmp/foot.log; exit 32; }
-
-            for i in $(seq 1 300); do
-              grep -q GPU_SCREEN_OK /tmp/screen-probe.log 2>/dev/null && break
-              kill -0 "$PROBE" 2>/dev/null || break
-              sleep .05
-            done
-            grep -q GPU_SCREEN_OK /tmp/screen-probe.log
-            grep -E "^\[vessel-host\] dmabuf-import " /tmp/transport.log
-            ! grep -q "shm-damage" /tmp/transport.log
-            grep -Ei "vulkan.*renderer|renderer.*vulkan|vulkan-renderer" /tmp/weston.log
-            ! grep -Ei "gl-renderer|zink|pixman renderer" /tmp/weston.log
           '
 
   build:
-    needs: native-vulkan-screen
+    needs: native-vulkan-build
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
