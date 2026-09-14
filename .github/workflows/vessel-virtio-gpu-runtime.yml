@@ -1,0 +1,127 @@
+name: Vessel UML Virtio GPU Runtime
+
+on:
+  push:
+    branches: [ arch/vessel-wlroots-final ]
+    paths:
+      - 'tools/venus_poc/patch_virtio_uml_vhost_gpu.py'
+      - 'tools/venus_poc/vhost_gpu_display_frontend.py'
+      - 'tools/venus_poc/build_vhost_device_gpu_termux.sh'
+      - 'tools/venus_poc/run_vessel_virtio_gpu.sh'
+      - 'tools/venus_poc/install_and_run_vessel_virtio_gpu.sh'
+      - '.github/workflows/vessel-virtio-gpu-runtime.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: vessel-virtio-gpu-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax-check Vessel virtio-gpu runtime
+        run: |
+          set -euxo pipefail
+          python3 -m py_compile \
+            tools/venus_poc/patch_virtio_uml_vhost_gpu.py \
+            tools/venus_poc/vhost_gpu_display_frontend.py
+          bash -n tools/venus_poc/build_vhost_device_gpu_termux.sh
+          bash -n tools/venus_poc/run_vessel_virtio_gpu.sh
+          bash -n tools/venus_poc/install_and_run_vessel_virtio_gpu.sh
+
+      - name: Verify pinned upstream GPU protocol assumptions
+        run: |
+          set -euxo pipefail
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+          git clone --filter=blob:none --no-checkout https://github.com/rust-vmm/vhost-device.git "$TMP/vhost-device"
+          git -C "$TMP/vhost-device" checkout 20fa14c4c56e40a12104794a934dd70dc7642ff2 -- \
+            vhost-device-gpu/src/device.rs \
+            vhost-device-gpu/src/backend/virgl.rs \
+            vhost-device-gpu/README.md
+          grep -F 'VIRTIO_GPU_F_RESOURCE_BLOB' "$TMP/vhost-device/vhost-device-gpu/src/device.rs"
+          grep -F 'VIRGL_HANDLE_TYPE_MEM_DMABUF' "$TMP/vhost-device/vhost-device-gpu/src/backend/virgl.rs"
+          grep -F 'set_dmabuf_scanout' "$TMP/vhost-device/vhost-device-gpu/src/backend/virgl.rs"
+          grep -F 'update_dmabuf_scanout' "$TMP/vhost-device/vhost-device-gpu/src/backend/virgl.rs"
+          grep -F -- '--socket-path' "$TMP/vhost-device/vhost-device-gpu/README.md"
+          grep -F -- '--gpu-mode' "$TMP/vhost-device/vhost-device-gpu/README.md"
+          grep -F -- '--use-surfaceless' "$TMP/vhost-device/vhost-device-gpu/README.md"
+
+      - name: Unit-smoke vhost-user-gpu display protocol
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          import socket
+          import struct
+          import tempfile
+          import threading
+          from pathlib import Path
+
+          path = Path('tools/venus_poc/vhost_gpu_display_frontend.py')
+          spec = importlib.util.spec_from_file_location('vugpu', path)
+          m = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+
+          with tempfile.TemporaryDirectory() as td:
+              sock_path = f'{td}/gpu.display'
+              listener = m.make_listener(sock_path)
+              presenter = m.AndroidPresenter(required=False)
+              front = m.Frontend(1280, 720, presenter)
+              errors = []
+              def server():
+                  try:
+                      c, _ = listener.accept()
+                      try:
+                          # Three requests are enough to prove framing, replies and
+                          # virtio display structure sizing before phone testing.
+                          for _ in range(3):
+                              req, flags, payload, fds = m.recv_gpu_message(c)
+                              assert flags == 0 and not fds
+                              if req == m.GPU_GET_PROTOCOL_FEATURES:
+                                  m.send_reply(c, req, m.U64.pack(m.GPU_FEATURES))
+                              elif req == m.GPU_SET_PROTOCOL_FEATURES:
+                                  front.protocol_features, = m.U64.unpack(payload)
+                              elif req == m.GPU_GET_DISPLAY_INFO:
+                                  m.send_reply(c, req, front.display_info())
+                              else:
+                                  raise AssertionError(req)
+                      finally:
+                          c.close()
+                  except BaseException as e:
+                      errors.append(e)
+              t = threading.Thread(target=server)
+              t.start()
+              c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              c.connect(sock_path)
+              c.sendall(m.GPU_HDR.pack(m.GPU_GET_PROTOCOL_FEATURES, 0, 0))
+              hdr = m.recvn(c, m.GPU_HDR.size)
+              req, flags, size = m.GPU_HDR.unpack(hdr)
+              assert req == m.GPU_GET_PROTOCOL_FEATURES and flags == m.GPU_REPLY and size == 8
+              assert m.U64.unpack(m.recvn(c, size))[0] == m.GPU_FEATURES
+              payload = m.U64.pack(m.GPU_FEATURES)
+              c.sendall(m.GPU_HDR.pack(m.GPU_SET_PROTOCOL_FEATURES, 0, len(payload)) + payload)
+              c.sendall(m.GPU_HDR.pack(m.GPU_GET_DISPLAY_INFO, 0, 0))
+              hdr = m.recvn(c, m.GPU_HDR.size)
+              req, flags, size = m.GPU_HDR.unpack(hdr)
+              assert req == m.GPU_GET_DISPLAY_INFO and flags == m.GPU_REPLY
+              info = m.recvn(c, size)
+              assert len(info) == m.DISPLAY_INFO_SIZE
+              first = m.VIRTIO_CTRL.size
+              x, y, w, h, enabled, display_flags = m.DISPLAY_ONE.unpack(info[first:first+m.DISPLAY_ONE.size])
+              assert (x, y, w, h, enabled, display_flags) == (0, 0, 1280, 720, 1, 0)
+              c.close()
+              t.join(timeout=2)
+              listener.close()
+              assert not t.is_alive()
+              if errors:
+                  raise errors[0]
+          print('VHOST_USER_GPU_FRONTEND_SMOKE_OK')
+          PY
