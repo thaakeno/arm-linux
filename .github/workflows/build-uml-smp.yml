@@ -1,9 +1,9 @@
 name: Vessel UML SMP Kernel
 
-# Rebuild trigger: rerun after accidental cancellation.
+# Rebuild trigger for Vessel's custom UML/arm64 kernel.
 on:
   push:
-    branches: [ app/vessel-final ]
+    branches: [ app/vessel-final, arch/vessel-wlroots-final ]
     paths:
       - 'tools/venus_poc/build_uml_smp_android.sh'
       - 'tools/venus_poc/apply_umshm.py'
@@ -42,7 +42,7 @@ jobs:
             clang build-essential flex bison bc rsync cpio pkg-config \
             libssl-dev libelf-dev dwarves python3 git file
 
-      - name: Build CONFIG_SMP UML/arm64 with Vessel umshm
+      - name: Build SMP UML/arm64 with Vessel umshm and virtio-gpu
         env:
           NDK: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           JOBS: '4'
@@ -56,12 +56,18 @@ jobs:
           ART=.kernel-build/artifacts
           grep -qx 'CONFIG_SMP=y' "$ART/vessel-uml-smp.config"
           grep -qx 'CONFIG_NR_CPUS=8' "$ART/vessel-uml-smp.config"
+          grep -qx 'CONFIG_UML_DMA_EMULATION=y' "$ART/vessel-uml-smp.config"
+          grep -qx 'CONFIG_VIRTIO=y' "$ART/vessel-uml-smp.config"
+          grep -qx 'CONFIG_VIRTIO_UML=y' "$ART/vessel-uml-smp.config"
+          grep -qx 'CONFIG_DRM=y' "$ART/vessel-uml-smp.config"
+          grep -qx 'CONFIG_DRM_VIRTIO_GPU=y' "$ART/vessel-uml-smp.config"
+          grep -qx 'CONFIG_DRM_VIRTIO_GPU_KMS=y' "$ART/vessel-uml-smp.config"
           strings "$ART/linux-umshm" | grep -F 'ncpus=<# of desired CPUs>'
           file "$ART/linux-umshm" | grep -Ei 'aarch64|ARM aarch64'
           test -s "$ART/stub_exe-umshm"
           cat "$ART/SHA256SUMS.txt"
 
-      - name: Upload SMP kernel
+      - name: Upload SMP + virtio-gpu kernel
         uses: actions/upload-artifact@v4
         with:
           name: vessel-uml-smp-arm64
