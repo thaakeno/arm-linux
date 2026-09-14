@@ -137,7 +137,7 @@ jobs:
             wait $FOOT || test $? -eq 124
             for i in $(seq 1 100); do grep -q FRAME_OK /tmp/frame-listener.log 2>/dev/null && break; sleep .05; done
             grep -q FRAME_OK /tmp/frame-listener.log
-            grep -E '^\[vessel-host\] shm-damage ' /tmp/transport.log
+            grep -F "[vessel-host] shm-damage " /tmp/transport.log
           '
 
   build:
