@@ -13,14 +13,14 @@ import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.Socket
 
-/** Android-side controller for Vessel's rootless UML + Zink/Venus + Wayland runtime. */
+/** Android-side controller for Vessel's rootless UML + Zink/Venus + native Wayland runtime. */
 class TermuxUmlController(private val context: Context) {
     companion object {
         const val TERMUX_PACKAGE = "com.termux"
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = -1
-        const val REQUIRED_PROTOCOL = 31
+        const val REQUIRED_PROTOCOL = 32
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
         private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
@@ -28,7 +28,7 @@ class TermuxUmlController(private val context: Context) {
         private const val EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
         private const val EXTRA_WORKDIR = "com.termux.RUN_COMMAND_WORKDIR"
         private const val EXTRA_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
-        private const val DISPLAY_TRANSPORT = "wayland-zink-venus-ahb-v2"
+        private const val DISPLAY_TRANSPORT = "nested-wayland-dmabuf-venus-android-surface-v1"
     }
 
     fun isTermuxInstalled(): Boolean = try { context.packageManager.getPackageInfo(TERMUX_PACKAGE, 0); true } catch (_: PackageManager.NameNotFoundException) { false }
@@ -41,7 +41,7 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) switching to protocol 31 Zink/Venus/AHB runtime"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) switching to protocol 32 native Wayland runtime"
               set -e
 
               DAEMON_RE='^([^ ]*/)?python(3)?[[:space:]]+[^ ]*/vessel_runtime_daemon(_v[0-9]+)?\.py([[:space:]].*)?${'$'}'
@@ -58,25 +58,26 @@ class TermuxUmlController(private val context: Context) {
                 [ -z "${'$'}REMAINING" ] || kill -KILL ${'$'}REMAINING 2>/dev/null || true
               fi
 
-              echo "[vessel-launch] refreshing app/vessel-final runtime worktree"
+              echo "[vessel-launch] refreshing native Wayland Vessel runtime worktree"
               cd ~/venus-poc
-              git fetch origin app/vessel-final
+              git fetch origin arch/vessel-native-wayland
               if [ ! -e ~/vessel-poc-runtime/.git ]; then
                 rm -rf ~/vessel-poc-runtime
-                git worktree add --detach ~/vessel-poc-runtime origin/app/vessel-final
+                git worktree add --detach ~/vessel-poc-runtime origin/arch/vessel-native-wayland
               else
-                git -C ~/vessel-poc-runtime reset --hard origin/app/vessel-final
+                git -C ~/vessel-poc-runtime reset --hard origin/arch/vessel-native-wayland
                 git -C ~/vessel-poc-runtime clean -ffd
               fi
 
-              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v31.py
+              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v32.py
+              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
               test -f ~/vessel-poc-runtime/tools/venus_poc/run_venus_wayland.sh
               export VESSEL_POC_DIR=~/vessel-poc-runtime
               export VESSEL_MEM_MB=8192
               export ENABLE_X11=0
               export VESSEL_ANDROID_PACKAGE=${'$'}(if [ "${BuildConfig.LOCAL_TEST}" = "true" ]; then echo com.example.dreamlinux.localvessel; else echo com.example.dreamlinux; fi)
-              echo "[vessel-launch] exec protocol 31 daemon"
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v31.py
+              echo "[vessel-launch] exec protocol 32 daemon"
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v32.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
@@ -135,7 +136,7 @@ class TermuxUmlController(private val context: Context) {
                 if (isNativeProtocol(status)) return@withContext status
             } catch (t: Throwable) { last = t }
         }
-        throw IllegalStateException("Vessel protocol 31 GPU Wayland runtime did not start. In Termux run: cat ~/vessel-daemon.log", last)
+        throw IllegalStateException("Vessel protocol 32 native Wayland runtime did not start. In Termux run: cat ~/vessel-daemon.log", last)
     }
 
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
