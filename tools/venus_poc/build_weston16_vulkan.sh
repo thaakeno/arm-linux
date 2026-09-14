@@ -88,6 +88,10 @@ meson setup "$BUILD" "$SOURCE" \
     -Drenderer-gl=false \
     -Drenderer-vulkan=true \
     -Dxwayland=true \
+    -Dshell-desktop=true \
+    -Dshell-ivi=false \
+    -Dshell-kiosk=false \
+    -Dshell-lua=false \
     -Dcolor-management-lcms=false \
     -Dsystemd=false \
     -Ddemo-clients=false \
