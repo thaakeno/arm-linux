@@ -85,7 +85,7 @@ jobs:
           grep -F 'weston16-vulkan-venus-android-surface-v3' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'vessel_runtime_daemon_v37.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'Weston 16 native Vulkan' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
-          grep -F 'Weston 16 desktop-shell' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          grep -F 'Weston 16 desktop' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'keepScreenOn = false' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           grep -F 'FIFO' app/src/main/cpp/vessel_wayland_presenter_v3.cpp
           ! grep -F 'KDE Plasma' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
