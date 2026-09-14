@@ -92,21 +92,41 @@ done
   exit 1
 }
 
+# Kill only Vessel UML instances using this exact persistent disk, then wait
+# for them to actually release it before starting the replacement. A fixed
+# sleep was racy and could leave debian-docker.ext4 locked during fast restarts.
+stale_uml_pids=()
 for proc in /proc/[0-9]*; do
   pid="${proc##*/}"
   [ "$pid" = "$$" ] && continue
-  cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+  [ -r "$proc/cmdline" ] || continue
+  cmd="$(cat "$proc/cmdline" 2>/dev/null | tr '\0' ' ' || true)"
   case "$cmd" in
     *linux-umshm*ubd0=debian-docker.ext4*)
       cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
       if [ "$cwd" = "$UML_DIR" ] || [[ "$cmd" == *"$UML_DIR/linux-umshm"* ]]; then
         echo "[venus-wayland] stopping stale UML pid=$pid"
-        kill "$pid" 2>/dev/null || true
+        kill -TERM "$pid" 2>/dev/null || true
+        stale_uml_pids+=("$pid")
       fi
       ;;
   esac
 done
-sleep .4
+
+for pid in "${stale_uml_pids[@]}"; do
+  for _ in $(seq 1 40); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep .1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "[venus-wayland] stale UML pid=$pid did not exit; forcing stop"
+    kill -KILL "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep .05
+    done
+  fi
+done
 
 pkill -f '[h]ost_frame_damage_relay.py' 2>/dev/null || true
 pkill -f '[h]ost_relay_wayland.py' 2>/dev/null || true
