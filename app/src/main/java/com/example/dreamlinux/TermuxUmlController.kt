@@ -13,7 +13,7 @@ import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.Socket
 
-/** Android-side controller for Vessel's rootless UML + Venus + advanced Wayland runtime. */
+/** Android-side controller for Vessel's rootless UML + Venus + nested Weston runtime. */
 class TermuxUmlController(private val context: Context) {
     companion object {
         const val TERMUX_PACKAGE = "com.termux"
@@ -28,7 +28,7 @@ class TermuxUmlController(private val context: Context) {
         private const val EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
         private const val EXTRA_WORKDIR = "com.termux.RUN_COMMAND_WORKDIR"
         private const val EXTRA_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
-        private const val DISPLAY_TRANSPORT = "vessel-compositor-v35-dmabuf-shm-venus-android-surface-v3"
+        private const val DISPLAY_TRANSPORT = "weston-nested-vessel-transport-venus-android-surface-v1"
     }
 
     fun isTermuxInstalled(): Boolean = try {
@@ -48,7 +48,7 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 35 advanced compositor runtime"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 35 Weston/libweston runtime"
               set -e
 
               DAEMON_RE='^([^ ]*/)?python(3)?[[:space:]]+[^ ]*/vessel_runtime_daemon(_v[0-9]+)?\.py([[:space:]].*)?${'$'}'
@@ -80,7 +80,8 @@ class TermuxUmlController(private val context: Context) {
               fi
 
               test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v35.py
-              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_wayland_bridge/vessel_compositor_v35.c
+              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
+              test -f ~/vessel-poc-runtime/tools/venus_poc/guest_input_direct_v34.py
               test -f ~/vessel-poc-runtime/tools/venus_poc/run_venus_wayland.sh
               export VESSEL_POC_DIR=~/vessel-poc-runtime
               export VESSEL_MEM_MB=8192
