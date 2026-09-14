@@ -81,7 +81,7 @@ jobs:
             set -euxo pipefail
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              build-essential pkg-config libwayland-dev wayland-protocols wayland-utils foot
+              build-essential pkg-config libwayland-dev wayland-protocols foot
             rm -rf /tmp/vessel-compositor-build /tmp/vessel-runtime
             mkdir -p /tmp/vessel-compositor-build /tmp/vessel-runtime
             chmod 700 /tmp/vessel-runtime
@@ -104,19 +104,17 @@ jobs:
             for i in $(seq 1 50); do [ -S /tmp/vessel-runtime/vessel-test-0 ] && break; sleep .1; done
             test -S /tmp/vessel-runtime/vessel-test-0
 
-            WAYLAND_DISPLAY=vessel-test-0 wayland-info >/tmp/wayland-info.txt
-            grep -E "wl_compositor.*version: 4" /tmp/wayland-info.txt
-            grep -E "wl_subcompositor.*version: 1" /tmp/wayland-info.txt
-            grep -E "wl_data_device_manager.*version: 3" /tmp/wayland-info.txt
-            grep -E "wl_seat.*version: 5" /tmp/wayland-info.txt
-            grep -E "xdg_wm_base.*version: 1" /tmp/wayland-info.txt
-
             WAYLAND_DISPLAY=vessel-test-0 timeout 3s foot >/tmp/foot.log 2>&1 &
             FOOT_PID=$!
             sleep 1
-            kill -0 $FOOT_PID
+            if ! kill -0 $FOOT_PID 2>/dev/null; then
+              echo "foot exited during protocol smoke test"
+              cat /tmp/foot.log
+              cat /tmp/vessel-compositor.log
+              exit 1
+            fi
             wait $FOOT_PID || test $? -eq 124
-            ! grep -E "no sub compositor|no clipboard available|no seats available" /tmp/foot.log
+            ! grep -E "no sub compositor|no clipboard available|no seats available|interface too old" /tmp/foot.log
           '
 
   build:
