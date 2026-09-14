@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Rebuild the exact UML/arm64 base used by Vessel with umshm/Venus, SMP and
-# /dev/uinput enabled for direct Android -> Linux evdev input.
+# Rebuild the exact UML/arm64 base used by Vessel with umshm/Venus, SMP,
+# /dev/uinput, and the standard virtio-gpu DRM frontend carried over
+# VIRTIO_UML/vhost-user.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${VESSEL_KERNEL_WORK:-$ROOT/.kernel-build}"
 SRC="$WORK/linux-um-arm64"; OUT="$WORK/out"; FINAL_ART="$WORK/artifacts"; UPSTREAM_ART="$FINAL_ART/upstream"
@@ -30,6 +31,16 @@ CONFIG_NR_CPUS=8
 CONFIG_INPUT=y
 CONFIG_INPUT_EVDEV=y
 CONFIG_INPUT_UINPUT=y
+
+# Standard Linux virtio-gpu frontend over UML's existing vhost-user transport.
+# DRM requires HAS_DMA; on UML that means enabling the DMA bookkeeping shim.
+CONFIG_UML_DMA_EMULATION=y
+CONFIG_VIRTIO_MENU=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_UML=y
+CONFIG_DRM=y
+CONFIG_DRM_VIRTIO_GPU=y
+CONFIG_DRM_VIRTIO_GPU_KMS=y
 EOF
 export TREE="$SRC" O="$OUT" ART="$UPSTREAM_ART" EXTRA_CONFIG="$CONFIG" JOBS
 [ -n "$NDK" ] && export NDK
@@ -37,8 +48,33 @@ bash "$SRC/tools/um-arm64/harness/build-bionic.sh"
 KERNEL="$UPSTREAM_ART/linux-bionic"; STUB="$UPSTREAM_ART/stub_exe_bionic"
 [ -s "$KERNEL" ] || { echo "missing rebuilt UML kernel: $KERNEL" >&2; exit 1; }
 [ -s "$STUB" ] || { echo "missing rebuilt UML stub: $STUB" >&2; exit 1; }
-for cfg in 'CONFIG_SMP=y' 'CONFIG_NR_CPUS=8' 'CONFIG_INPUT=y' 'CONFIG_INPUT_EVDEV=y' 'CONFIG_INPUT_UINPUT=y'; do grep -qx "$cfg" "$OUT/.config" || { echo "$cfg did not stick" >&2; exit 1; }; done
+for cfg in \
+  'CONFIG_SMP=y' \
+  'CONFIG_NR_CPUS=8' \
+  'CONFIG_INPUT=y' \
+  'CONFIG_INPUT_EVDEV=y' \
+  'CONFIG_INPUT_UINPUT=y' \
+  'CONFIG_UML_DMA_EMULATION=y' \
+  'CONFIG_VIRTIO=y' \
+  'CONFIG_VIRTIO_UML=y' \
+  'CONFIG_DRM=y' \
+  'CONFIG_DRM_VIRTIO_GPU=y' \
+  'CONFIG_DRM_VIRTIO_GPU_KMS=y'; do
+  grep -qx "$cfg" "$OUT/.config" || { echo "$cfg did not stick" >&2; exit 1; }
+done
 install -m0755 "$KERNEL" "$FINAL_ART/linux-umshm"; install -m0755 "$STUB" "$FINAL_ART/stub_exe-umshm"; cp "$OUT/.config" "$FINAL_ART/vessel-uml-smp.config"
-{ echo "upstream=$UPSTREAM_REPO"; echo "commit=$UPSTREAM_COMMIT"; echo 'CONFIG_SMP=y'; echo 'CONFIG_NR_CPUS=8'; echo 'CONFIG_INPUT_UINPUT=y'; echo 'default_vcpus=6'; sha256sum "$FINAL_ART/linux-umshm" "$FINAL_ART/stub_exe-umshm"; } | tee "$FINAL_ART/SHA256SUMS.txt"
+{
+  echo "upstream=$UPSTREAM_REPO"
+  echo "commit=$UPSTREAM_COMMIT"
+  echo 'CONFIG_SMP=y'
+  echo 'CONFIG_NR_CPUS=8'
+  echo 'CONFIG_INPUT_UINPUT=y'
+  echo 'CONFIG_UML_DMA_EMULATION=y'
+  echo 'CONFIG_VIRTIO_UML=y'
+  echo 'CONFIG_DRM_VIRTIO_GPU=y'
+  echo 'CONFIG_DRM_VIRTIO_GPU_KMS=y'
+  echo 'default_vcpus=6'
+  sha256sum "$FINAL_ART/linux-umshm" "$FINAL_ART/stub_exe-umshm"
+} | tee "$FINAL_ART/SHA256SUMS.txt"
 strings "$FINAL_ART/linux-umshm" | grep -Fq 'ncpus=<# of desired CPUs>' || { echo 'rebuilt kernel is missing ncpus option' >&2; exit 1; }
-echo "Vessel SMP + uinput kernel ready: $FINAL_ART/linux-umshm"
+echo "Vessel SMP + uinput + VIRTIO_UML virtio-gpu kernel ready: $FINAL_ART/linux-umshm"
