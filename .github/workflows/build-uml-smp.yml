@@ -9,6 +9,7 @@ on:
       - 'tools/venus_poc/apply_umshm.py'
       - 'tools/venus_poc/fix_umshm_nonblock.py'
       - 'tools/venus_poc/fix_umshm_ptrace_fds.py'
+      - 'tools/venus_poc/patch_virtio_uml_vhost_gpu.py'
       - 'tools/venus_poc/run_venus_uml.sh'
       - '.github/workflows/build-uml-smp.yml'
   workflow_dispatch:
@@ -63,6 +64,8 @@ jobs:
           grep -qx 'CONFIG_DRM_VIRTIO_GPU=y' "$ART/vessel-uml-smp.config"
           grep -qx 'CONFIG_DRM_VIRTIO_GPU_KMS=y' "$ART/vessel-uml-smp.config"
           strings "$ART/linux-umshm" | grep -F 'ncpus=<# of desired CPUs>'
+          strings "$ART/linux-umshm" | grep -F 'Vessel vhost-user-gpu display relay attached'
+          grep -F 'VHOST_USER_GPU_SET_SOCKET=33' "$ART/SHA256SUMS.txt"
           file "$ART/linux-umshm" | grep -Ei 'aarch64|ARM aarch64'
           test -s "$ART/stub_exe-umshm"
           cat "$ART/SHA256SUMS.txt"
