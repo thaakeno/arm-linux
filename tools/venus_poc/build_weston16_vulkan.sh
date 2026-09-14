@@ -88,6 +88,7 @@ meson setup "$BUILD" "$SOURCE" \
     -Drenderer-gl=false \
     -Drenderer-vulkan=true \
     -Dxwayland=true \
+    -Dcolor-management-lcms=false \
     -Dsystemd=false \
     -Ddemo-clients=false \
     -Dtests=false \
