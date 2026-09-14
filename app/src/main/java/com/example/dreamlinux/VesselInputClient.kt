@@ -1,5 +1,6 @@
 package com.example.dreamlinux
 
+import android.util.Base64
 import org.json.JSONObject
 import java.io.BufferedWriter
 import java.io.OutputStreamWriter
@@ -9,7 +10,7 @@ import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.truncate
 
-/** Persistent low-latency Android -> guest native input channel. */
+/** Persistent low-latency Android -> Vessel Wayland seat channel. */
 object VesselInputClient {
     private const val PORT = 47634
     private val running = AtomicBoolean(true)
@@ -69,6 +70,13 @@ object VesselInputClient {
 
     fun key(code: Int, down: Boolean) =
         send(JSONObject().put("t", "key").put("code", code).put("down", down))
+
+    /** UTF-8 text commit from Android IME -> compositor -> text-input-v3 focused client. */
+    fun text(value: String) {
+        if (value.isEmpty()) return
+        val encoded = Base64.encodeToString(value.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        send(JSONObject().put("t", "text").put("b64", encoded))
+    }
 
     private fun loop() {
         var backoff = 20L
