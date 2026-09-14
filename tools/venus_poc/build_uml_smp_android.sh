@@ -3,7 +3,9 @@ set -euo pipefail
 
 # Rebuild the exact UML/arm64 base used by Vessel with umshm/Venus, SMP,
 # /dev/uinput, and the standard virtio-gpu DRM frontend carried over
-# VIRTIO_UML/vhost-user.
+# VIRTIO_UML/vhost-user.  Vessel additionally patches the generic UML
+# vhost-user transport with the standard VHOST_USER_GPU_SET_SOCKET handoff
+# required by vhost-user-gpu backends.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${VESSEL_KERNEL_WORK:-$ROOT/.kernel-build}"
 SRC="$WORK/linux-um-arm64"; OUT="$WORK/out"; FINAL_ART="$WORK/artifacts"; UPSTREAM_ART="$FINAL_ART/upstream"
@@ -24,6 +26,7 @@ PY
 python3 "$SMP_UMSHM_PATCHER" "$SRC"
 python3 "$ROOT/tools/venus_poc/fix_umshm_nonblock.py" "$SRC"
 python3 "$ROOT/tools/venus_poc/fix_umshm_ptrace_fds.py" "$SRC"
+python3 "$ROOT/tools/venus_poc/patch_virtio_uml_vhost_gpu.py" "$SRC"
 
 # UML's pristine arm64 defconfig starts with UML_DMA_EMULATION=n.  That makes
 # UML select NO_DMA during the harness' initial `make defconfig`.  Enabling DMA
@@ -102,8 +105,10 @@ install -m0755 "$KERNEL" "$FINAL_ART/linux-umshm"; install -m0755 "$STUB" "$FINA
   echo 'CONFIG_DRM=y'
   echo 'CONFIG_DRM_VIRTIO_GPU=y'
   echo 'CONFIG_DRM_VIRTIO_GPU_KMS=y'
+  echo 'VHOST_USER_GPU_SET_SOCKET=33'
   echo 'default_vcpus=6'
   sha256sum "$FINAL_ART/linux-umshm" "$FINAL_ART/stub_exe-umshm"
 } | tee "$FINAL_ART/SHA256SUMS.txt"
 strings "$FINAL_ART/linux-umshm" | grep -Fq 'ncpus=<# of desired CPUs>' || { echo 'rebuilt kernel is missing ncpus option' >&2; exit 1; }
+strings "$FINAL_ART/linux-umshm" | grep -Fq 'Vessel vhost-user-gpu display relay attached' || { echo 'rebuilt kernel is missing VHOST_USER_GPU_SET_SOCKET handoff' >&2; exit 1; }
 echo "Vessel SMP + uinput + VIRTIO_UML virtio-gpu kernel ready: $FINAL_ART/linux-umshm"
