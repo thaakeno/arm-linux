@@ -1,12 +1,12 @@
-name: Vessel Native Wayland APK
+name: Vessel wlroots APK
 
 on:
   push:
-    branches: [ arch/vessel-native-wayland ]
+    branches: [ arch/vessel-wlroots-final ]
   workflow_dispatch:
 
 concurrency:
-  group: vessel-native-wayland-${{ github.ref }}
+  group: vessel-wlroots-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -21,10 +21,9 @@ jobs:
         with:
           fetch-depth: 0
           submodules: false
-      - name: Verify Vessel app was not replaced
+      - name: Verify original Vessel frontend is untouched
         run: |
           set -euxo pipefail
-          git fetch origin app/vessel-final
           BASE=166ac8115df31f40577038d16dbd7f39308ef296
           git diff --exit-code "$BASE" -- \
             app/src/main/AndroidManifest.xml \
@@ -36,33 +35,39 @@ jobs:
             app/src/main/res/mipmap-xxhdpi \
             app/src/main/res/mipmap-xxxhdpi
           ! grep -R -E 'TAWC|DistroManager|DistributionManager|wmww' app/src/main || true
+      - name: Verify wlroots architecture
+        run: |
+          set -euxo pipefail
+          grep -F 'REQUIRED_PROTOCOL = 33' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'wlroots-labwc-dmabuf-venus-android-surface-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'arch/vessel-wlroots-final' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v33.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'command -v labwc' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'WLR_RENDERER=gles2' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'WLR_BACKENDS=wayland,libinput' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'MESA_LOADER_DRIVER_OVERRIDE=zink' tools/venus_poc/vessel_runtime_daemon_v33.py
+          ! grep -E 'kwin_wayland|vesseloutputEnabled|_install_effect|Xtigervnc|vncserver|screenshot' tools/venus_poc/vessel_runtime_daemon_v33.py
           test -f tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
-          grep -F 'REQUIRED_PROTOCOL = 32' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'nested-wayland-dmabuf-venus-android-surface-v1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'arch/vessel-native-wayland' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v32.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          ! grep -F '_install_effect()' tools/venus_poc/vessel_runtime_daemon_v32.py
-          ! grep -F 'vesseloutputEnabled' tools/venus_poc/vessel_runtime_daemon_v32.py
-          ! grep -E 'Xtigervnc|vncserver|screenshot' tools/venus_poc/vessel_runtime_daemon_v32.py
       - name: Syntax-check runtime
         run: |
           set -euxo pipefail
           python3 -m py_compile \
             tools/venus_poc/vessel_runtime_daemon_v31.py \
-            tools/venus_poc/vessel_runtime_daemon_v32.py \
+            tools/venus_poc/vessel_runtime_daemon_v33.py \
             tools/venus_poc/guest_command_agent.py \
             tools/venus_poc/guest_relay_wayland.py \
             tools/venus_poc/host_relay_wayland.py \
             tools/venus_poc/host_input_bridge.py
           bash -n tools/venus_poc/run_venus_wayland.sh
-      - name: Compile native parent Wayland server on Debian 12
+      - name: Compile Vessel native Wayland parent on Debian 12
         run: |
           set -euxo pipefail
           docker run --rm -v "$PWD:/src:ro" -w /src debian:12-slim bash -lc '
             set -euxo pipefail
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              build-essential pkg-config libwayland-dev wayland-protocols
+              build-essential pkg-config libwayland-dev wayland-protocols labwc
+            command -v labwc
             rm -rf /tmp/vessel-wayland-build
             mkdir -p /tmp/vessel-wayland-build
             cd /tmp/vessel-wayland-build
@@ -103,7 +108,7 @@ jobs:
       - name: Upload Vessel APK
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-native-wayland-debug
+          name: vessel-wlroots-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
