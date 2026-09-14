@@ -69,6 +69,7 @@ jobs:
 
             rm -rf /tmp/vessel-transport-build /tmp/vessel-runtime /tmp/vessel-frame-test.sock
             mkdir -p /tmp/vessel-transport-build /tmp/vessel-runtime
+            install -d -m 1777 /tmp/.X11-unix
             chmod 700 /tmp/vessel-runtime
             cd /tmp/vessel-transport-build
             wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-server-protocol.h
