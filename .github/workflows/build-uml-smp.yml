@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -47,7 +47,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             clang build-essential flex bison bc rsync cpio pkg-config \
-            libssl-dev libelf-dev dwarves python3 git file
+            libssl-dev libelf-dev dwarves python3 git file zip
 
       - name: Build SMP UML/arm64 with Vessel umshm and virtio-gpu
         env:
@@ -87,3 +87,26 @@ jobs:
             .kernel-build/artifacts/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 7
+
+      - name: Publish rolling Termux-installable kernel
+        if: github.ref == 'refs/heads/arch/vessel-wlroots-final'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          ART=.kernel-build/artifacts
+          ZIP="$GITHUB_WORKSPACE/vessel-uml-smp-arm64.zip"
+          rm -f "$ZIP"
+          (
+            cd "$ART"
+            zip -9 "$ZIP" linux-umshm stub_exe-umshm vessel-uml-smp.config SHA256SUMS.txt
+          )
+          TAG='vessel-virtio-gpu-kernel-latest'
+          gh release delete "$TAG" --yes --cleanup-tag >/dev/null 2>&1 || true
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title 'Vessel Virtio GPU Kernel (rolling)' \
+            --notes "Rootless ARM64 UML kernel for Vessel virtio-gpu. Branch: $GITHUB_REF_NAME. Commit: $GITHUB_SHA. Includes VIRTIO_UML, DRM_VIRTIO_GPU and the VHOST_USER_GPU_SET_SOCKET side-channel handoff." \
+            --prerelease \
+            "$ZIP#vessel-uml-smp-arm64.zip"
+          gh release view "$TAG" --json tagName,assets,url
