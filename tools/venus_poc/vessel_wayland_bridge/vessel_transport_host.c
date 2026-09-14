@@ -337,14 +337,6 @@ static void feedback_destroy_resource(struct wl_resource *resource) {
     free(fb);
 }
 
-static void presentation_feedback_destroy(struct wl_client *client, struct wl_resource *resource) {
-    (void)client;
-    wl_resource_destroy(resource);
-}
-static const struct wp_presentation_feedback_interface feedback_impl = {
-    .destroy = presentation_feedback_destroy,
-};
-
 static int frame_timer_handler(void *data) {
     struct bridge *b = data;
     b->frame_timer_armed = 0;
@@ -647,8 +639,10 @@ static void dispatch_input(struct bridge *b, const struct vessel_input_msg *m) {
     if (m->type == VINPUT_ABS) {
         double nx = (double)m->a / 32767.0;
         double ny = (double)m->b / 32767.0;
-        if (nx < 0) nx = 0; if (nx > 1) nx = 1;
-        if (ny < 0) ny = 0; if (ny > 1) ny = 1;
+        if (nx < 0) nx = 0;
+        if (nx > 1) nx = 1;
+        if (ny < 0) ny = 0;
+        if (ny > 1) ny = 1;
         b->pointer_x = nx * b->width;
         b->pointer_y = ny * b->height;
         if (m->c && !b->touch_down) {
@@ -1040,7 +1034,10 @@ static void presentation_feedback_req(struct wl_client *client, struct wl_resour
     fb->resource=wl_resource_create(client,&wp_presentation_feedback_interface,1,id);
     if(!fb->resource){free(fb);wl_client_post_no_memory(client);return;}
     wl_list_insert(s->feedbacks.prev,&fb->link);
-    wl_resource_set_implementation(fb->resource,&feedback_impl,fb,feedback_destroy_resource);
+    /* wp_presentation_feedback has events only and no requests, so there is no
+     * server request vtable. Keep user-data/destructor tracking but pass NULL
+     * as the implementation, matching generated Wayland protocol semantics. */
+    wl_resource_set_implementation(fb->resource,NULL,fb,feedback_destroy_resource);
 }
 static const struct wp_presentation_interface presentation_impl={
     .destroy=presentation_destroy,.feedback=presentation_feedback_req,
@@ -1099,7 +1096,9 @@ int main(int argc,char **argv){
     wl_display_run(b.display);
     if(b.input_client_source)wl_event_source_remove(b.input_client_source);
     if(b.input_listener_source)wl_event_source_remove(b.input_listener_source);
-    if(b.input_client_fd>=0)close(b.input_client_fd);if(b.input_listener_fd>=0)close(b.input_listener_fd);unlink(b.input_socket);
+    if(b.input_client_fd>=0)close(b.input_client_fd);
+    if(b.input_listener_fd>=0)close(b.input_listener_fd);
+    unlink(b.input_socket);
     disconnect_frame(&b);wl_display_destroy_clients(b.display);wl_display_destroy(b.display);
     free(b.keymap_text);if(b.xkb_state)xkb_state_unref(b.xkb_state);if(b.xkb_keymap)xkb_keymap_unref(b.xkb_keymap);if(b.xkb_context)xkb_context_unref(b.xkb_context);
     return 0;
