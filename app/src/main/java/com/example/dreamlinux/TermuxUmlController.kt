@@ -13,14 +13,14 @@ import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.Socket
 
-/** Android-side controller for Vessel's rootless UML + Zink/Venus + native Wayland runtime. */
+/** Android-side controller for Vessel's rootless UML + Venus + wlroots runtime. */
 class TermuxUmlController(private val context: Context) {
     companion object {
         const val TERMUX_PACKAGE = "com.termux"
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = -1
-        const val REQUIRED_PROTOCOL = 32
+        const val REQUIRED_PROTOCOL = 33
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
         private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
@@ -28,11 +28,18 @@ class TermuxUmlController(private val context: Context) {
         private const val EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
         private const val EXTRA_WORKDIR = "com.termux.RUN_COMMAND_WORKDIR"
         private const val EXTRA_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
-        private const val DISPLAY_TRANSPORT = "nested-wayland-dmabuf-venus-android-surface-v1"
+        private const val DISPLAY_TRANSPORT = "wlroots-labwc-dmabuf-venus-android-surface-v1"
     }
 
-    fun isTermuxInstalled(): Boolean = try { context.packageManager.getPackageInfo(TERMUX_PACKAGE, 0); true } catch (_: PackageManager.NameNotFoundException) { false }
-    fun hasRunCommandPermission(): Boolean = context.checkSelfPermission(RUN_COMMAND_PERMISSION) == PackageManager.PERMISSION_GRANTED
+    fun isTermuxInstalled(): Boolean = try {
+        context.packageManager.getPackageInfo(TERMUX_PACKAGE, 0)
+        true
+    } catch (_: PackageManager.NameNotFoundException) {
+        false
+    }
+
+    fun hasRunCommandPermission(): Boolean =
+        context.checkSelfPermission(RUN_COMMAND_PERMISSION) == PackageManager.PERMISSION_GRANTED
 
     private fun launchDaemon() {
         check(isTermuxInstalled()) { "Termux is not installed" }
@@ -41,13 +48,12 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) switching to protocol 32 native Wayland runtime"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 33 wlroots runtime"
               set -e
 
               DAEMON_RE='^([^ ]*/)?python(3)?[[:space:]]+[^ ]*/vessel_runtime_daemon(_v[0-9]+)?\.py([[:space:]].*)?${'$'}'
               OLD_PIDS="${'$'}(pgrep -f "${'$'}DAEMON_RE" 2>/dev/null || true)"
               if [ -n "${'$'}OLD_PIDS" ]; then
-                echo "[vessel-launch] stopping old daemon pid(s): ${'$'}OLD_PIDS"
                 kill -TERM ${'$'}OLD_PIDS 2>/dev/null || true
                 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
                   REMAINING="${'$'}(pgrep -f "${'$'}DAEMON_RE" 2>/dev/null || true)"
@@ -58,26 +64,31 @@ class TermuxUmlController(private val context: Context) {
                 [ -z "${'$'}REMAINING" ] || kill -KILL ${'$'}REMAINING 2>/dev/null || true
               fi
 
-              echo "[vessel-launch] refreshing native Wayland Vessel runtime worktree"
+              # Make first launch self-healing. Older builds assumed ~/venus-poc
+              # already existed and silently left Vessel stuck at "Runtime ready".
+              if [ ! -d ~/venus-poc/.git ]; then
+                rm -rf ~/venus-poc
+                git clone --filter=blob:none --no-checkout https://github.com/thaakeno/arm-linux.git ~/venus-poc
+              fi
               cd ~/venus-poc
-              git fetch origin arch/vessel-native-wayland
+              git fetch --prune origin arch/vessel-wlroots-final
+
               if [ ! -e ~/vessel-poc-runtime/.git ]; then
                 rm -rf ~/vessel-poc-runtime
-                git worktree add --detach ~/vessel-poc-runtime origin/arch/vessel-native-wayland
+                git worktree add --detach ~/vessel-poc-runtime origin/arch/vessel-wlroots-final
               else
-                git -C ~/vessel-poc-runtime reset --hard origin/arch/vessel-native-wayland
+                git -C ~/vessel-poc-runtime reset --hard origin/arch/vessel-wlroots-final
                 git -C ~/vessel-poc-runtime clean -ffd
               fi
 
-              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v32.py
+              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v33.py
               test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c
               test -f ~/vessel-poc-runtime/tools/venus_poc/run_venus_wayland.sh
               export VESSEL_POC_DIR=~/vessel-poc-runtime
               export VESSEL_MEM_MB=8192
               export ENABLE_X11=0
               export VESSEL_ANDROID_PACKAGE=${'$'}(if [ "${BuildConfig.LOCAL_TEST}" = "true" ]; then echo com.example.dreamlinux.localvessel; else echo com.example.dreamlinux; fi)
-              echo "[vessel-launch] exec protocol 32 daemon"
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v32.py
+              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v33.py
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
@@ -97,7 +108,9 @@ class TermuxUmlController(private val context: Context) {
             socket.connect(InetSocketAddress("127.0.0.1", CONTROL_PORT), timeoutMs)
             socket.soTimeout = timeoutMs
             val writer = OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8)
-            writer.write(request.toString()); writer.write("\n"); writer.flush()
+            writer.write(request.toString())
+            writer.write("\n")
+            writer.flush()
             val line = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8)).readLine()
                 ?: error("Vessel runtime closed the control connection")
             return JSONObject(line)
@@ -111,7 +124,9 @@ class TermuxUmlController(private val context: Context) {
 
     private fun requireOk(action: String, obj: JSONObject): JSONObject {
         if (!obj.optBoolean("ok", false)) {
-            val reason = obj.optString("error").ifBlank { obj.optString("lastError").ifBlank { "$action failed" } }
+            val reason = obj.optString("error").ifBlank {
+                obj.optString("lastError").ifBlank { "$action failed" }
+            }
             throw IllegalStateException(reason)
         }
         if (!isNativeProtocol(obj)) {
@@ -121,7 +136,9 @@ class TermuxUmlController(private val context: Context) {
     }
 
     suspend fun ensureDaemon(): JSONObject = withContext(Dispatchers.IO) {
-        val existing = runCatching { requestBlocking(JSONObject().put("action", "status"), 900) }.getOrNull()
+        val existing = runCatching {
+            requestBlocking(JSONObject().put("action", "status"), 900)
+        }.getOrNull()
         if (existing != null && isNativeProtocol(existing)) return@withContext existing
         if (existing != null) {
             runCatching { requestBlocking(JSONObject().put("action", "stop"), 15_000) }
@@ -129,14 +146,19 @@ class TermuxUmlController(private val context: Context) {
         }
         launchDaemon()
         var last: Throwable? = null
-        repeat(150) {
-            delay(200)
+        repeat(240) {
+            delay(250)
             try {
                 val status = requestBlocking(JSONObject().put("action", "status"), 900)
                 if (isNativeProtocol(status)) return@withContext status
-            } catch (t: Throwable) { last = t }
+            } catch (t: Throwable) {
+                last = t
+            }
         }
-        throw IllegalStateException("Vessel protocol 32 native Wayland runtime did not start. In Termux run: cat ~/vessel-daemon.log", last)
+        throw IllegalStateException(
+            "Vessel protocol 33 wlroots runtime did not start. In Termux run: cat ~/vessel-daemon.log",
+            last,
+        )
     }
 
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
@@ -144,9 +166,49 @@ class TermuxUmlController(private val context: Context) {
         if (!isNativeProtocol(status)) return@withContext ensureDaemon()
         status
     }
-    suspend fun start(): JSONObject = withContext(Dispatchers.IO) { ensureDaemon(); requireOk("Start Debian", requestBlocking(JSONObject().put("action", "start").put("timeout", 80), 95_000)) }
-    suspend fun stop(): JSONObject = withContext(Dispatchers.IO) { runCatching { requestBlocking(JSONObject().put("action", "stop"), 12_000) }.getOrElse { JSONObject().put("ok", true).put("protocolVersion", REQUIRED_PROTOCOL).put("displayTransport", DISPLAY_TRANSPORT).put("vncPort", -1).put("running", false).put("guestReady", false).put("desktopReady", false) } }
-    suspend fun startDesktop(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) { ensureDaemon(); requireOk("Start Plasma", requestBlocking(JSONObject().put("action", "desktop").put("width", width).put("height", height).put("dpi", dpi), 22 * 60 * 1_000)) }
-    suspend fun guest(command: String, timeoutSeconds: Int = 45): JSONObject = withContext(Dispatchers.IO) { ensureDaemon(); requireOk("Guest command", requestBlocking(JSONObject().put("action", "guest").put("command", command).put("timeout", timeoutSeconds), (timeoutSeconds + 10) * 1_000)) }
-    suspend fun desktopAction(name: String): JSONObject = withContext(Dispatchers.IO) { ensureDaemon(); requireOk("Desktop action", requestBlocking(JSONObject().put("action", "desktopAction").put("name", name), 12_000)) }
+
+    suspend fun start(): JSONObject = withContext(Dispatchers.IO) {
+        ensureDaemon()
+        requireOk("Start Debian", requestBlocking(JSONObject().put("action", "start").put("timeout", 80), 95_000))
+    }
+
+    suspend fun stop(): JSONObject = withContext(Dispatchers.IO) {
+        runCatching { requestBlocking(JSONObject().put("action", "stop"), 12_000) }.getOrElse {
+            JSONObject()
+                .put("ok", true)
+                .put("protocolVersion", REQUIRED_PROTOCOL)
+                .put("displayTransport", DISPLAY_TRANSPORT)
+                .put("vncPort", -1)
+                .put("running", false)
+                .put("guestReady", false)
+                .put("desktopReady", false)
+        }
+    }
+
+    suspend fun startDesktop(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) {
+        ensureDaemon()
+        requireOk(
+            "Start desktop",
+            requestBlocking(
+                JSONObject().put("action", "desktop").put("width", width).put("height", height).put("dpi", dpi),
+                22 * 60 * 1_000,
+            ),
+        )
+    }
+
+    suspend fun guest(command: String, timeoutSeconds: Int = 45): JSONObject = withContext(Dispatchers.IO) {
+        ensureDaemon()
+        requireOk(
+            "Guest command",
+            requestBlocking(JSONObject().put("action", "guest").put("command", command).put("timeout", timeoutSeconds), (timeoutSeconds + 10) * 1_000),
+        )
+    }
+
+    suspend fun desktopAction(name: String): JSONObject = withContext(Dispatchers.IO) {
+        ensureDaemon()
+        requireOk(
+            "Desktop action",
+            requestBlocking(JSONObject().put("action", "desktopAction").put("name", name), 12_000),
+        )
+    }
 }
