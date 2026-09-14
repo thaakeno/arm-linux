@@ -97,25 +97,24 @@ jobs:
             test -S /tmp/vessel-runtime/vessel-parent-0
             grep -F "READY socket=vessel-parent-0" /tmp/transport.log
 
-            cat > /tmp/weston.ini <<EOF
-            [core]
-            shell=desktop-shell.so
-            xwayland=true
-            repaint-window=7
-            idle-time=0
-            [shell]
-            background-color=0xff08100d
-            panel-color=0xe8121b17
-            panel-position=top
-            locking=false
-            animation=none
-            close-animation=none
-            startup-animation=none
-            focus-animation=none
-            [autolaunch]
-            path=/usr/bin/foot
-            watch=false
-            EOF
+            printf "%s\n" \
+              "[core]" \
+              "shell=desktop-shell.so" \
+              "xwayland=true" \
+              "repaint-window=7" \
+              "idle-time=0" \
+              "[shell]" \
+              "background-color=0xff08100d" \
+              "panel-color=0xe8121b17" \
+              "panel-position=top" \
+              "locking=false" \
+              "animation=none" \
+              "close-animation=none" \
+              "startup-animation=none" \
+              "focus-animation=none" \
+              "[autolaunch]" \
+              "path=/usr/bin/foot" \
+              "watch=false" > /tmp/weston.ini
 
             WAYLAND_DISPLAY=vessel-parent-0 weston \
               --backend=wayland-backend.so --use-pixman \
