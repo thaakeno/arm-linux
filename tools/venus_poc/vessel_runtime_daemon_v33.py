@@ -16,12 +16,21 @@ from typing import Any
 
 import vessel_runtime_daemon_v31 as v31
 
+# Protocol 33 never uses a fixed reverse-RPC port. Binding port 0 asks the
+# kernel for a free ephemeral port, which is then passed explicitly to the
+# guest command agent.
+v31.COMMAND_PORT = 0
+
 PROTOCOL_VERSION = 33
 DISPLAY_TRANSPORT = "wlroots-sway-dmabuf-venus-android-surface-v1"
 POC = pathlib.Path(os.environ.get("VESSEL_POC_DIR", str(pathlib.Path.home() / "vessel-poc-runtime")))
 
 
 class WlrootsRuntime(v31.WaylandRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.command_port = int(self.rpc_listener.getsockname()[1])
+
     def state(self) -> dict[str, Any]:
         state = super().state()
         state.update({
@@ -33,8 +42,59 @@ class WlrootsRuntime(v31.WaylandRuntime):
             "framePolicy": "Wayland commit/frame-callback driven",
             "softwareFallback": False,
             "vncPort": -1,
+            "commandPort": getattr(self, "command_port", 0),
+            "commandPortPolicy": "kernel-ephemeral",
         })
         return state
+
+    def _prepare_venus_guest(self) -> None:
+        self.set_progress("command_agent", 38, "Starting dynamic guest command channel")
+        agent = POC / "tools/venus_poc/guest_command_agent_v33.py"
+        relay = POC / "tools/venus_poc/guest_relay_wayland.py"
+        if not agent.exists() or not relay.exists():
+            raise RuntimeError("protocol 33 guest helpers are missing")
+
+        self._bootstrap_upload(agent, "/root/vessel_guest_command_agent_v33.py")
+        self._pty_guest(
+            f"VESSEL_COMMAND_PORT={self.command_port} "
+            "nohup python3 /root/vessel_guest_command_agent_v33.py "
+            ">/tmp/vessel-command-agent.log 2>&1 </dev/null &",
+            20,
+        )
+        if not self._wait_rpc(20):
+            tail = self._pty_guest("tail -120 /tmp/vessel-command-agent.log 2>/dev/null || true", 20)
+            raise RuntimeError(
+                f"guest command agent did not connect to dynamic host port {self.command_port}: "
+                + tail[-6000:]
+            )
+
+        self.set_progress("venus", 45, "Starting bidirectional Venus dma-buf relay")
+        self._rpc_upload(relay, "/root/guest_relay_wayland.py")
+        check = self.guest(
+            "test -f /root/virtio-wsi-test.json && test -e /dev/umshm && "
+            "test -e /usr/lib/aarch64-linux-gnu/libvulkan_virtio.so && echo VENUS_READY",
+            20,
+        )
+        if "VENUS_READY" not in check:
+            raise RuntimeError("matched system Mesa Venus or /dev/umshm is unavailable")
+
+        self.guest("pkill -f '^python3 /root/guest_relay_wayland.py( |$)' 2>/dev/null || true", 10)
+        self.guest("rm -f /tmp/.venus_test /tmp/vessel-frame-export.sock /tmp/vessel-guest-wayland.log", 10)
+        self.guest(
+            "nohup python3 /root/guest_relay_wayland.py --host 10.0.2.2 --port 5002 "
+            "--unix /tmp/.venus_test --frame-unix /tmp/vessel-frame-export.sock "
+            ">/tmp/vessel-guest-wayland.log 2>&1 </dev/null &",
+            20,
+        )
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            out = self.guest("test -S /tmp/.venus_test && echo WAYLAND_RELAY_READY || true", 10)
+            if "WAYLAND_RELAY_READY" in out:
+                self.set_progress("debian_ready", 55, "Debian + Venus relay ready")
+                return
+            time.sleep(.25)
+        tail = self.guest("tail -120 /tmp/vessel-guest-wayland.log 2>/dev/null || true", 10)
+        raise RuntimeError("Wayland Venus relay did not become ready: " + tail[-6000:])
 
     def _prepare_runtime(self) -> None:
         source = POC / "tools/venus_poc/vessel_wayland_bridge/vessel_wayland_bridge.c"
