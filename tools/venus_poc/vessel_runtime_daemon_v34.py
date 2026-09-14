@@ -14,7 +14,7 @@ import pathlib
 import shlex
 import threading
 import time
-from typing import Any, Callable
+from typing import Any
 
 import vessel_runtime_daemon_v33 as v33
 
@@ -102,7 +102,10 @@ exec /usr/local/bin/vessel-compositor \
 '''
         encoded = base64.b64encode(wrapper.encode()).decode()
         launch = (
-            "pkill -f '[v]essel-compositor' 2>/dev/null || true; "
+            "if [ -s /tmp/vessel-compositor.pid ]; then "
+            "oldpid=$(cat /tmp/vessel-compositor.pid 2>/dev/null || true); "
+            "case \"$oldpid\" in ''|*[!0-9]*) ;; *) kill \"$oldpid\" 2>/dev/null || true ;; esac; "
+            "fi; "
             "rm -f /tmp/vessel-compositor-session.sh /tmp/vessel-compositor.pid; "
             f"printf '%s' {shlex.quote(encoded)} | base64 -d > /root/vessel-compositor-session.sh; "
             "chmod +x /root/vessel-compositor-session.sh; "
@@ -115,7 +118,8 @@ exec /usr/local/bin/vessel-compositor \
         while time.monotonic() < deadline:
             status = self.guest(
                 "test -S /tmp/vessel-runtime/vessel-0 && echo COMPOSITOR_SOCKET_READY || true; "
-                "pgrep -f '[v]essel-compositor' >/dev/null && echo COMPOSITOR_ALIVE || true; "
+                "pid=$(cat /tmp/vessel-compositor.pid 2>/dev/null || true); "
+                "case \"$pid\" in ''|*[!0-9]*) ;; *) kill -0 \"$pid\" 2>/dev/null && echo COMPOSITOR_ALIVE || true ;; esac; "
                 "tail -40 /tmp/vessel-compositor.log 2>/dev/null || true",
                 8,
             )
@@ -134,9 +138,6 @@ exec /usr/local/bin/vessel-compositor \
         self._prepare_runtime()
         self._launch_compositor(width, height)
 
-        # The compositor itself is the desktop/session boundary.  We do not wait
-        # for a client frame here: that would make Android's Start button block
-        # on whichever GUI app happens to launch first.
         self.desktop_ready = True
         self.last_error = ""
         self.append("VESSEL_COMPOSITOR_READY\nNO_DRM_NO_VT_NO_SEATD\n")
@@ -164,8 +165,6 @@ exec /usr/local/bin/vessel-compositor \
     def desktop_action(self, name: str) -> dict[str, Any]:
         display_env = "export XDG_RUNTIME_DIR=/tmp/vessel-runtime WAYLAND_DISPLAY=vessel-0; "
         if name == "terminal":
-            # Launch only if present. GUI packages can be installed normally in
-            # Debian; the compositor does not depend on any desktop environment.
             self.guest(display_env + "command -v foot >/dev/null && nohup foot >/tmp/vessel-terminal.log 2>&1 </dev/null & true", 8)
             return self.state()
         return super().desktop_action(name)
@@ -173,7 +172,13 @@ exec /usr/local/bin/vessel-compositor \
     def stop(self) -> dict[str, Any]:
         if self.guest_ready and self._wait_rpc(.05):
             try:
-                self.guest("pkill -f '[v]essel-compositor' 2>/dev/null || true", 8)
+                self.guest(
+                    "if [ -s /tmp/vessel-compositor.pid ]; then "
+                    "pid=$(cat /tmp/vessel-compositor.pid 2>/dev/null || true); "
+                    "case \"$pid\" in ''|*[!0-9]*) ;; *) kill \"$pid\" 2>/dev/null || true ;; esac; fi; "
+                    "rm -f /tmp/vessel-compositor.pid",
+                    8,
+                )
             except Exception:
                 pass
         return super().stop()
