@@ -53,11 +53,20 @@ jobs:
         run: |
           set -euxo pipefail
           grep -F 'v31.COMMAND_PORT = 0' tools/venus_poc/vessel_runtime_daemon_v33.py
-          grep -F 'getpeername' /dev/null 2>/dev/null || true
           grep -F 'getsockname()[1]' tools/venus_poc/vessel_runtime_daemon_v33.py
           grep -F 'VESSEL_COMMAND_PORT=' tools/venus_poc/vessel_runtime_daemon_v33.py
           grep -F 'VESSEL_COMMAND_PORT' tools/venus_poc/guest_command_agent_v33.py
           ! grep -F 'PORT = 47640' tools/venus_poc/guest_command_agent_v33.py
+      - name: Verify rootless VT-free compositor session
+        run: |
+          set -euxo pipefail
+          grep -F 'LIBSEAT_BACKEND=noop' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'runuser -u vessel' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'useradd --create-home --shell /bin/bash vessel' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'chgrp vessel /dev/input/event' tools/venus_poc/vessel_runtime_daemon_v33.py
+          grep -F 'VK_DRIVER_FILES=/tmp/vessel-virtio-wsi-test.json' tools/venus_poc/vessel_runtime_daemon_v33.py
+          ! grep -F 'seatd-launch -- sway' tools/venus_poc/vessel_runtime_daemon_v33.py
+          ! grep -F 'SEATD_VTBOUND' tools/venus_poc/vessel_runtime_daemon_v33.py
       - name: Syntax-check runtime
         run: |
           set -euxo pipefail
@@ -77,10 +86,11 @@ jobs:
             set -euxo pipefail
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              build-essential pkg-config libwayland-dev wayland-protocols sway seatd foot
+              build-essential pkg-config libwayland-dev wayland-protocols sway foot passwd util-linux
             command -v sway
             sway --version
-            command -v seatd-launch
+            command -v runuser
+            command -v useradd
             rm -rf /tmp/vessel-wayland-build
             mkdir -p /tmp/vessel-wayland-build
             cd /tmp/vessel-wayland-build
