@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'v39-self-contained-dmabuf-r3' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'v39-self-contained-dmabuf-r4' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'vhost-user-gpu-dmabuf-same-uid-v1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'softwareFallback", false' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           ! grep -R -E 'VesselFrameTcpBridge|47635|TermuxUmlController|com\.termux\.permission\.RUN_COMMAND' \
