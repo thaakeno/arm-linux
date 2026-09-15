@@ -1,4 +1,4 @@
-name: Vessel Weston 16 native Vulkan protocol 37 APK
+name: Vessel VirtIO GPU protocol 38 APK
 
 on:
   push:
@@ -11,73 +11,25 @@ on:
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
       - 'gradle.properties'
-      - 'tools/venus_poc/vessel_runtime_daemon_v37.py'
-      - 'tools/venus_poc/guest_input_direct_v34.py'
-      - 'tools/venus_poc/guest_relay_wayland.py'
-      - 'tools/venus_poc/host_relay_wayland.py'
+      - 'tools/venus_poc/vessel_runtime_daemon_v38.py'
+      - 'tools/venus_poc/vhost_gpu_display_frontend.py'
+      - 'tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py'
+      - 'tools/venus_poc/build_vhost_device_gpu_termux.sh'
+      - 'tools/venus_poc/build_vhost_device_gpu_termux_raw.sh'
+      - 'tools/venus_poc/run_vessel_virtio_gpu.sh'
       - 'tools/venus_poc/host_input_bridge.py'
-      - 'tools/venus_poc/build_weston16_vulkan.sh'
-      - 'tools/venus_poc/run_venus_wayland.sh'
-      - 'tools/venus_poc/vessel_wayland_bridge/**'
       - '.github/workflows/vessel-native-wayland.yml'
   workflow_dispatch:
 
 concurrency:
-  group: vessel-weston-vulkan-${{ github.ref }}
+  group: vessel-virtio-gpu-v38-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  native-vulkan-build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: false
-
-      - name: Verify GPU-only protocol 37 invariants
-        run: |
-          set -euxo pipefail
-          python3 -m py_compile \
-            tools/venus_poc/vessel_runtime_daemon_v37.py \
-            tools/venus_poc/guest_input_direct_v34.py \
-            tools/venus_poc/guest_relay_wayland.py \
-            tools/venus_poc/host_relay_wayland.py \
-            tools/venus_poc/host_input_bridge.py
-          bash -n tools/venus_poc/build_weston16_vulkan.sh
-          bash -n tools/venus_poc/run_venus_wayland.sh
-          grep -F 'PROTOCOL_VERSION = 37' tools/venus_poc/vessel_runtime_daemon_v37.py
-          grep -F 'v37-weston16-native-vulkan-gpu-only' tools/venus_poc/vessel_runtime_daemon_v37.py
-          grep -F 'weston16-vulkan-venus-android-surface-v3' tools/venus_poc/vessel_runtime_daemon_v37.py
-          grep -F -- '--backend=wayland --renderer=vulkan' tools/venus_poc/vessel_runtime_daemon_v37.py
-          grep -F '"softwareFallback": False' tools/venus_poc/vessel_runtime_daemon_v37.py
-          grep -F '"translationLayer": "none"' tools/venus_poc/vessel_runtime_daemon_v37.py
-          grep -F '"gpuOnly": True' tools/venus_poc/vessel_runtime_daemon_v37.py
-          ! grep -E 'MESA_LOADER_DRIVER_OVERRIDE|GALLIUM_DRIVER|--use-pixman|renderer=gl' tools/venus_poc/vessel_runtime_daemon_v37.py
-          ! grep -F 'host_frame_damage_relay.py" \\' tools/venus_poc/run_venus_wayland.sh
-          grep -F 'software/SHM display fallback disabled' tools/venus_poc/run_venus_wayland.sh
-
-      - name: Build Weston 16 Vulkan components
-        run: |
-          set -euxo pipefail
-          docker run --rm -v "$PWD:/src:ro" -w /src debian:12-slim bash -lc '
-            set -euxo pipefail
-            export VESSEL_WESTON_PREFIX=/opt/vessel-weston16
-            export VESSEL_BUILD_JOBS=2
-            bash /src/tools/venus_poc/build_weston16_vulkan.sh
-
-            /opt/vessel-weston16/bin/weston --version | grep -F "16.0.0"
-            find /opt/vessel-weston16 -name vulkan-renderer.so -type f -print -quit | grep -q .
-            find /opt/vessel-weston16 -name wayland-backend.so -type f -print -quit | grep -q .
-            ! find /opt/vessel-weston16 -name gl-renderer.so -type f -print -quit | grep -q .
-          '
-
   build:
-    needs: native-vulkan-build
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -85,37 +37,64 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
+
+      - name: Verify protocol 38 runtime
+        run: |
+          set -euxo pipefail
+          python3 -m py_compile \
+            tools/venus_poc/vessel_runtime_daemon_v38.py \
+            tools/venus_poc/vhost_gpu_display_frontend.py \
+            tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py \
+            tools/venus_poc/host_input_bridge.py
+          bash -n tools/venus_poc/run_vessel_virtio_gpu.sh
+          bash -n tools/venus_poc/build_vhost_device_gpu_termux_raw.sh
+          grep -F 'PROTOCOL_VERSION = 38' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'v38-virtio-gpu-virgl-adreno' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'virtio-gpu-rgb-loopback-android-vulkan-v1' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'VIRTIO_GPU_DRM_READY' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'VIRTIO_GPU_FRAME_REACHED_VESSEL' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'VESSEL_RAW_SCANOUT_V1' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
+          grep -F '127.0.0.1' tools/venus_poc/vhost_gpu_display_frontend.py
+          grep -F '47635' tools/venus_poc/vhost_gpu_display_frontend.py
+          grep -F 'virtio_uml.device=' tools/venus_poc/run_vessel_virtio_gpu.sh
+
+      - name: Verify Android protocol 38 integration
+        run: |
+          set -euxo pipefail
+          grep -F 'REQUIRED_PROTOCOL = 38' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'v38-virtio-gpu-virgl-adreno' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'vessel_runtime_daemon_v38.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'VesselFrameTcpBridge.start()' app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt
+          grep -F 'private const val PORT = 47635' app/src/main/java/com/example/dreamlinux/VesselFrameTcpBridge.kt
+          grep -F 'presenter.startsWith("presenting-")' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'VirtIO GPU · VirGL · Adreno' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          grep -F 'keepScreenOn = false' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -F 'FIFO' app/src/main/cpp/vessel_wayland_presenter_v3.cpp
+          ! grep -E 'git (clone|fetch)|reset --hard|clean -ffd' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          ! grep -F 'Weston 16' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt app/src/main/java/com/example/dreamlinux/VmSessionService.kt app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+
       - uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: temurin
+
       - uses: android-actions/setup-android@v3
+
       - name: Install SDK and NDK
         run: |
           yes | sdkmanager --licenses || true
           sdkmanager --install "platforms;android-36" "ndk;29.0.14206865" "build-tools;36.0.0"
-      - name: Verify Android protocol 37 and truthful UI
-        run: |
-          set -euxo pipefail
-          grep -F 'REQUIRED_PROTOCOL = 37' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'v37-weston16-native-vulkan-gpu-only' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'weston16-vulkan-venus-android-surface-v3' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'vessel_runtime_daemon_v37.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'Weston 16 native Vulkan' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
-          grep -F 'Weston 16 desktop' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
-          grep -F 'keepScreenOn = false' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
-          grep -F 'FIFO' app/src/main/cpp/vessel_wayland_presenter_v3.cpp
-          ! grep -F 'KDE Plasma' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
-          ! grep -E 'Zink|Pixman|software fallback' app/src/main/java/com/example/dreamlinux/VesselActivity.kt app/src/main/java/com/example/dreamlinux/VmSessionService.kt app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+
       - name: Build, test and lint Vessel app
         run: |
           set -euxo pipefail
           chmod +x gradlew
           ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon --no-configuration-cache
+
       - name: Upload Vessel APK
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-protocol37-native-vulkan-debug
+          name: vessel-protocol38-virtio-gpu-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
