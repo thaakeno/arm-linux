@@ -2,66 +2,52 @@ package com.example.dreamlinux
 
 import android.view.Surface
 
-/**
- * Native Vulkan presenter for Vessel's Android SurfaceView.
- *
- * Protocol 38 keeps Linux rendering on virtio-gpu/VirGL/ANGLE/Adreno. The
- * cross-app frame stream enters Vessel over loopback TCP and is proxied from
- * inside this UID to the native presenter. The native side performs the final
- * Vulkan upload/blit/present to SurfaceFlinger.
- *
- * A successfully presented frame is latched independently from the temporary
- * SurfaceView attachment. Tab changes and activity backgrounding are allowed to
- * detach the Android Surface without downgrading the already-proven Linux boot
- * pipeline back to 96%. The native presenter retains the latest frame and
- * replays it when a new Surface is attached.
- */
+/** Same-UID vhost-user-gpu frontend. Only DMA-BUF scanout is accepted. */
 object VesselWaylandPresenter {
-    @Volatile private var everPresentedFrame = false
+    @Volatile private var started = false
+    @Volatile private var everPresented = false
 
-    init {
-        System.loadLibrary("vessel_wayland_presenter")
-        nativeStart()
-        VesselFrameTcpBridge.start()
-    }
+    init { System.loadLibrary("vessel_wayland_presenter") }
 
+    @JvmStatic private external fun nativeConfigure(path: String, width: Int, height: Int, dpi: Int, refresh: Float)
     @JvmStatic private external fun nativeStart()
     @JvmStatic private external fun nativeStop()
     @JvmStatic private external fun nativeAttachSurface(surface: Surface)
     @JvmStatic private external fun nativeDetachSurface()
     @JvmStatic private external fun nativeStatus(): String
+    @JvmStatic private external fun nativeCursorX(): Int
+    @JvmStatic private external fun nativeCursorY(): Int
+    @JvmStatic private external fun nativeCursorHotX(): Int
+    @JvmStatic private external fun nativeCursorHotY(): Int
+    @JvmStatic private external fun nativeCursorVisible(): Boolean
+    @JvmStatic private external fun nativeCursorSerial(): Long
+    @JvmStatic private external fun nativeGuestWidth(): Int
+    @JvmStatic private external fun nativeGuestHeight(): Int
+    @JvmStatic private external fun nativeCursorPixels(): IntArray
+
+    @Synchronized
+    fun configure(path: String, width: Int, height: Int, dpi: Int, refresh: Float) {
+        nativeConfigure(path, width, height, dpi, refresh)
+        if (!started) { nativeStart(); started = true }
+    }
 
     fun attach(surface: Surface) = nativeAttachSurface(surface)
     fun detach() = nativeDetachSurface()
-
     fun status(): String {
-        val raw = runCatching { nativeStatus() }
-            .getOrElse { "presenter-error:${it.message}" }
-        if (raw.startsWith("presenting-")) {
-            everPresentedFrame = true
-            return raw
-        }
-        return if (
-            everPresentedFrame && (
-                raw.startsWith("surface-") ||
-                    raw.startsWith("waiting-for-surface") ||
-                    raw.startsWith("ready:")
-                )
-        ) {
-            "presenting-retained:$raw"
-        } else {
-            raw
-        }
+        if (!started) return "not-started"
+        val s = runCatching { nativeStatus() }.getOrElse { "presenter-error:${it.message}" }
+        if (s.startsWith("presenting-dmabuf")) everPresented = true
+        return if (everPresented && (s == "surface-detached" || s == "waiting-for-surface")) "presenting-retained:$s" else s
     }
-
-    /** A fresh host frame stream means a fresh presentation generation. */
-    fun resetPresentationLatch() {
-        everPresentedFrame = false
-    }
-
-    fun shutdown() {
-        everPresentedFrame = false
-        VesselFrameTcpBridge.stop()
-        nativeStop()
-    }
+    fun resetPresentationLatch() { everPresented = false }
+    fun cursorX() = nativeCursorX()
+    fun cursorY() = nativeCursorY()
+    fun cursorHotX() = nativeCursorHotX()
+    fun cursorHotY() = nativeCursorHotY()
+    fun cursorVisible() = nativeCursorVisible()
+    fun cursorSerial() = nativeCursorSerial()
+    fun guestWidth() = nativeGuestWidth()
+    fun guestHeight() = nativeGuestHeight()
+    fun cursorPixels() = nativeCursorPixels()
+    fun shutdown() { if (started) nativeStop(); started = false; everPresented = false }
 }
