@@ -57,6 +57,7 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
             "gpuOnly": True,
             "softwareFallback": False,
             "vncPort": -1,
+            "frameContentValidated": bool(self.desktop_ready),
             "desktopWorkerAlive": bool(self._desktop_worker and self._desktop_worker.is_alive()),
             "displayLog": self._tail(DISPLAY_LOG, 7000),
             "gpuLog": self._tail(GPU_LOG, 7000),
@@ -122,6 +123,7 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
         height = max(540, min(height, 1600))
         self._ensure_kmscube()
 
+        self.desktop_ready = False
         self.set_progress("display_start", 75, "Starting accelerated DRM/KMS scanout")
         # Debian's kmscube treats POLLIN/HUP on stdin as "user interrupted".
         # /dev/null is therefore wrong for a daemonized launch because EOF is
@@ -142,7 +144,7 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
             20,
         )
 
-        self.set_progress("display_frame", 88, "Waiting for a real VirtIO GPU frame")
+        self.set_progress("display_frame", 88, "Waiting for a non-black VirtIO GPU frame")
         deadline = time.monotonic() + 75
         while time.monotonic() < deadline:
             guest = self.guest(
@@ -157,16 +159,20 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
                 )
                 raise RuntimeError("kmscube exited before scanout:\n" + failure_log[-6000:])
             display = self._tail(DISPLAY_LOG, 12000)
+            # Raw-scanout v2 never forwards an all-black readback. Therefore a
+            # raw frame that reached the Android bridge is also our content
+            # validation milestone, not just a transport milestone.
             if "raw frame scanout=" in display and "presenter=yes" in display:
                 self.desktop_ready = True
                 self.last_error = ""
                 self.append("VIRTIO_GPU_FRAME_REACHED_VESSEL\n")
-                self.set_progress("desktop_ready", 100, "GPU frame reached Vessel presenter")
+                self.append("VIRTIO_GPU_VALIDATED_FRAME_REACHED_VESSEL\n")
+                self.set_progress("frame_validated", 96, "Validated non-black GPU frame reached Vessel")
                 return self.state()
             time.sleep(.25)
 
         raise RuntimeError(
-            "No VirtIO GPU frame reached Vessel within 75s.\n"
+            "No non-black VirtIO GPU frame reached Vessel within 75s.\n"
             + "=== display ===\n" + self._tail(DISPLAY_LOG, 10000)
             + "\n=== gpu ===\n" + self._tail(GPU_LOG, 10000)
         )
