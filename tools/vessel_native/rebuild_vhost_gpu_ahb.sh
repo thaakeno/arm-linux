@@ -90,12 +90,24 @@ done < <(patchelf --print-needed "$OUT/libvessel_vhost_gpu.so")
 patchelf --print-needed "$OUT/libvessel_vhost_gpu.so" | grep -Fq 'libvessel_ahb_bridge.so'
 strings "$OUT/libvessel_vhost_gpu.so" | grep -Fq 'Vessel Android HardwareBuffer scanout'
 
-# Keep the runtime manifest truthful for the APK produced by this workflow.
+# Recreate the runtime manifest from the actual files every build. The fast
+# native cache intentionally does not cache app assets, so relying on an old
+# runtime-build.txt made cached builds fail before Gradle even started.
 MANIFEST="$ROOT/app/src/main/assets/vessel/runtime-build.txt"
-sed -i 's/^runtime=.*/runtime=v39-self-contained-ahb-virtio-input-r4/' "$MANIFEST"
-sed -i '/^display_bridge=/d' "$MANIFEST"
-echo 'display_bridge=android-hardware-buffer-zero-copy-v1' >> "$MANIFEST"
-sed -i "s/^vhost_gpu_sha256=.*/vhost_gpu_sha256=$(sha256sum "$OUT/libvessel_vhost_gpu.so" | awk '{print $1}')/" "$MANIFEST"
+mkdir -p "$(dirname "$MANIFEST")"
+ANGLE_PACKAGE="$(tail -1 "$WORK/pkg-meta/angle-android.txt" 2>/dev/null || echo cached)"
+VIRGL_PACKAGE="$(tail -1 "$WORK/pkg-meta/virglrenderer-android.txt" 2>/dev/null || echo cached)"
+{
+  echo protocol=39
+  echo runtime=v39-self-contained-ahb-virtio-input-r4
+  echo "kernel_sha256=$(sha256sum "$OUT/libvessel_uml.so" | awk '{print $1}')"
+  echo "vhost_gpu_sha256=$(sha256sum "$OUT/libvessel_vhost_gpu.so" | awk '{print $1}')"
+  echo "vhost_input_sha256=$(sha256sum "$OUT/libvessel_vhost_input.so" | awk '{print $1}')"
+  echo "angle_package=$ANGLE_PACKAGE"
+  echo "virgl_package=$VIRGL_PACKAGE"
+  echo rootfs=external:Download/LinuxPC/Vessel-Debian/debian-docker.ext4
+  echo display_bridge=android-hardware-buffer-zero-copy-v1
+} > "$MANIFEST"
 
 echo "[vessel-ahb] Android HardwareBuffer runtime ready"
 file "$OUT/libvessel_ahb_bridge.so" "$OUT/libvessel_vhost_gpu.so"
