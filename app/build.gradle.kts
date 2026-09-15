@@ -74,7 +74,12 @@ android {
       resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     }
     ndkVersion = "29.0.14206865"
-    externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
+    externalNativeBuild {
+      cmake {
+        path = file("src/main/cpp/CMakeLists.txt")
+        arguments += "-DANDROID_STL=c++_shared"
+      }
+    }
 }
 
 kotlin { jvmToolchain(17) }
