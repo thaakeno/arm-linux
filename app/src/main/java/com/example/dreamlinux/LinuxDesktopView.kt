@@ -55,11 +55,12 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     override fun onAttachedToWindow(){super.onAttachedToWindow();active=this}
     override fun onDetachedFromWindow(){releaseDrag();if(active===this)active=null;VesselWaylandPresenter.detach();super.onDetachedFromWindow()}
     override fun surfaceCreated(h:SurfaceHolder){surfaceView.requestFocus();VesselWaylandPresenter.attach(h.surface)}
-    override fun surfaceChanged(h:SurfaceHolder,format:Int,w:Int,ht:Int){val refresh=surfaceView.display?.refreshRate?:60f;val dpi=resources.displayMetrics.densityDpi;if(Build.VERSION.SDK_INT>=30)runCatching{h.surface.setFrameRate(refresh,Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)};VmSessionService.active?.configureDisplay(w,ht,dpi,refresh);VesselWaylandPresenter.attach(h.surface)}
+    override fun surfaceChanged(h:SurfaceHolder,format:Int,w:Int,ht:Int){val refresh=display?.refreshRate?:60f;val dpi=resources.displayMetrics.densityDpi;if(Build.VERSION.SDK_INT>=30)runCatching{h.surface.setFrameRate(refresh,Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)};VmSessionService.active?.configureDisplay(w,ht,dpi,refresh);VesselWaylandPresenter.attach(h.surface)}
     override fun surfaceDestroyed(h:SurfaceHolder){releaseDrag();VesselWaylandPresenter.detach()}
 
     fun setPointerMode(m:PointerMode){if(pointerMode!=m)releaseDrag();pointerMode=m}
     fun showKeyboard(){surfaceView.requestFocus();surfaceView.post{(context.getSystemService(Context.INPUT_METHOD_SERVICE)as?InputMethodManager)?.showSoftInput(surfaceView,InputMethodManager.SHOW_IMPLICIT)}}
+    fun tapKey(code:Int){tap(code)}
     private fun mapped(x:Float,y:Float):Pair<Float,Float>{val gw=VesselWaylandPresenter.guestWidth().coerceAtLeast(1);val gh=VesselWaylandPresenter.guestHeight().coerceAtLeast(1);val scale=min(width.toFloat()/gw,height.toFloat()/gh);val ox=(width-gw*scale)/2f;val oy=(height-gh*scale)/2f;return (((x-ox)/(gw*scale)).coerceIn(0f,1f)) to (((y-oy)/(gh*scale)).coerceIn(0f,1f))}
     private fun touch(e:MotionEvent):Boolean{if(width<=0||height<=0)return true;surfaceView.requestFocus();if(pointerMode==PointerMode.DIRECT){releaseDrag();val(x,y)=mapped(e.x,e.y);when(e.actionMasked){MotionEvent.ACTION_DOWN,MotionEvent.ACTION_MOVE->VesselInputClient.absolute(x,y,true);MotionEvent.ACTION_UP,MotionEvent.ACTION_CANCEL->VesselInputClient.absolute(x,y,false)};return true}
         when(e.actionMasked){
