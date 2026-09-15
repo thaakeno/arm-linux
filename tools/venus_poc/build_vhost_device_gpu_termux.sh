@@ -64,7 +64,7 @@ VIRGL_LIB="$(find "$VIRGL_PREFIX/lib" -maxdepth 1 -type f -name 'libvirglrendere
 
 VIRGL_INCLUDE="$INSTALL/include"
 VIRGL_PUBLIC="$VIRGL_INCLUDE/virgl"
-mkdir -p "$WORK" "$INSTALL/bin" "$INSTALL/lib/pkgconfig" "$INSTALL/angle-shim" "$VIRGL_PUBLIC"
+mkdir -p "$WORK" "$INSTALL/bin" "$INSTALL/lib/pkgconfig" "$VIRGL_PUBLIC"
 
 # Termux's runtime-only virglrenderer install has the .so but not the public
 # development headers/pkg-config metadata. Fetch the matching 1.3.0 source and
@@ -124,24 +124,18 @@ printf '#include <virgl/virglrenderer.h>\n' | \
 
 echo "[vhost-gpu-build] virgl headers staged: $VIRGL_PUBLIC"
 
-# The Termux libepoxy patch normally gets its ANGLE path from
-# virgl_test_server_android --angle-vulkan. vhost-device-gpu embeds the
-# library instead, so provide the conventional SONAMEs through a tiny private
-# runtime shim and put it first in LD_LIBRARY_PATH.
-link_angle() {
-  local conventional="$1" angle_name="$2"
-  local target="$ANGLE_PREFIX/$angle_name"
-  [ -f "$target" ] || {
-    echo "[vhost-gpu-build] ANGLE library missing: $target" >&2
+# ANGLE is selected at runtime through Termux libepoxy's
+# epoxy_set_library_path() hook, which opens the real *_angle.so files by
+# absolute path. Do not alias those DSOs to Android framework SONAMEs such as
+# libEGL.so or libGLESv1_CM.so: Bionic's VERNEED resolver checks the child's
+# DT_SONAME, so a filename alias to libGLESv1_CM_angle.so can break
+# libandroid_runtime.so before EGL even initializes.
+for angle_lib in libEGL_angle.so libGLESv2_angle.so; do
+  [ -f "$ANGLE_PREFIX/$angle_lib" ] || {
+    echo "[vhost-gpu-build] ANGLE library missing: $ANGLE_PREFIX/$angle_lib" >&2
     exit 1
   }
-  ln -sfn "$target" "$INSTALL/angle-shim/$conventional"
-}
-link_angle libEGL.so libEGL_angle.so
-link_angle libGLESv2.so libGLESv2_angle.so
-if [ -f "$ANGLE_PREFIX/libGLESv1_CM_angle.so" ]; then
-  link_angle libGLESv1_CM.so libGLESv1_CM_angle.so
-fi
+done
 
 SRC="$WORK/vhost-device"
 if [ ! -d "$SRC/.git" ]; then
@@ -227,12 +221,13 @@ install -m0755 "$BIN" "$INSTALL/bin/vhost-device-gpu"
 
 cat >"$INSTALL/env.sh" <<EOF
 export VESSEL_VHOST_GPU_PREFIX="$INSTALL"
-export LD_LIBRARY_PATH="$INSTALL/angle-shim:$VIRGL_PREFIX/lib:\${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$VIRGL_PREFIX/lib:\${LD_LIBRARY_PATH:-}"
 EOF
 
-# Smoke-test dynamic loading and CLI parsing without opening a GPU socket.
+# Smoke-test dynamic loading and CLI parsing without injecting fake Android GL
+# SONAMEs. The runtime selects ANGLE explicitly through epoxy_set_library_path.
 set +e
-LD_LIBRARY_PATH="$INSTALL/angle-shim:$VIRGL_PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+LD_LIBRARY_PATH="$VIRGL_PREFIX/lib:${LD_LIBRARY_PATH:-}" \
   "$INSTALL/bin/vhost-device-gpu" --version
 rc=$?
 set -e
