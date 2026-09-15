@@ -20,12 +20,17 @@ download_verified(){
   mv "$out.tmp" "$out"
 }
 
-KERNEL_ZIP="$WORK/vessel-uml-smp-arm64.zip"
-download_verified "https://github.com/thaakeno/arm-linux/releases/download/vessel-virtio-gpu-kernel-latest/vessel-uml-smp-arm64.zip" "a2d5422b5aab6593bb5a8b8f567414abce9e0665ad93199d110622494af5b0d4" "$KERNEL_ZIP"
-mkdir -p "$WORK/kernel"; unzip -q "$KERNEL_ZIP" -d "$WORK/kernel"
-KERNEL="$(find "$WORK/kernel" -type f -name linux-umshm -print -quit)"
-STUB="$(find "$WORK/kernel" -type f -name stub_exe-umshm -print -quit)"
-[ -n "$KERNEL" ] && [ -n "$STUB" ] || { echo "patched UML release is incomplete" >&2; exit 3; }
+# Build the exact UML kernel used by this APK instead of downloading a rolling
+# release. This prevents the app and kernel capabilities from drifting apart.
+KERNEL_WORK="$WORK/kernel-build"
+VESSEL_KERNEL_WORK="$KERNEL_WORK" NDK="$NDK" JOBS="${JOBS:-4}" bash "$ROOT/tools/venus_poc/build_uml_smp_android.sh"
+KERNEL="$KERNEL_WORK/artifacts/linux-umshm"
+STUB="$KERNEL_WORK/artifacts/stub_exe-umshm"
+KCONFIG="$KERNEL_WORK/artifacts/vessel-uml-smp.config"
+[ -s "$KERNEL" ] && [ -s "$STUB" ] || { echo "rebuilt UML kernel is incomplete" >&2; exit 3; }
+grep -qx 'CONFIG_VIRTIO_INPUT=y' "$KCONFIG"
+grep -qx 'CONFIG_VIRTIO_UML=y' "$KCONFIG"
+grep -qx 'CONFIG_DRM_VIRTIO_GPU=y' "$KCONFIG"
 install -m0755 "$KERNEL" "$OUT/libvessel_uml.so"
 install -m0755 "$STUB" "$OUT/libvessel_stub.so"
 strings "$OUT/libvessel_uml.so" | grep -Fq 'Vessel vhost-user-gpu display relay attached'
@@ -95,6 +100,23 @@ Libs: -L\${libdir} -lvessel_virglrenderer
 Cflags: -I\${includedir}
 EOF
 
+rustup target add aarch64-linux-android
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/bin/aarch64-linux-android29-clang"
+export CC_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android29-clang"
+export CXX_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android29-clang++"
+export AR_aarch64_linux_android="$TOOLCHAIN/bin/llvm-ar"
+export RUSTFLAGS="-C link-arg=-Wl,-rpath,\$ORIGIN"
+
+# Android-owned vhost-user virtio-input backend. This consumes local Vessel
+# input packets and exposes real Linux virtio-input devices; guest networking is
+# not involved in input delivery.
+INPUT_TARGET="$WORK/vessel-input-target"
+cargo build --release --target aarch64-linux-android --target-dir "$INPUT_TARGET" --manifest-path "$ROOT/tools/vessel_native/vhost-device-vessel-input/Cargo.toml"
+INPUT_BIN="$INPUT_TARGET/aarch64-linux-android/release/vhost-device-vessel-input"
+[ -x "$INPUT_BIN" ] || { echo "Vessel virtio-input backend missing" >&2; exit 5; }
+install -m0755 "$INPUT_BIN" "$OUT/libvessel_vhost_input.so"
+patchelf --set-rpath '$ORIGIN' "$OUT/libvessel_vhost_input.so"
+
 VHOST="$WORK/vhost-device"
 git clone --filter=blob:none https://github.com/rust-vmm/vhost-device.git "$VHOST"
 git -C "$VHOST" checkout 20fa14c4c56e40a12104794a934dd70dc7642ff2
@@ -110,16 +132,10 @@ new='''            .use_virgl(true)\n            .use_venus(false)\n            
 if s.count(old)!=1: raise SystemExit('unexpected VirGL flags layout')
 vir.write_text(s.replace(old,new,1))
 PY
-rustup target add aarch64-linux-android
 export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH="$WORK/pkgconfig"
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/bin/aarch64-linux-android29-clang"
-export CC_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android29-clang"
-export CXX_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android29-clang++"
-export AR_aarch64_linux_android="$TOOLCHAIN/bin/llvm-ar"
 export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android29 --sysroot=$TOOLCHAIN/sysroot -I$INCLUDE_ROOT"
 CLANG_SO="$(find /usr/lib -name 'libclang.so*' -print -quit 2>/dev/null || true)"; [ -n "$CLANG_SO" ] || { echo "libclang not found" >&2; exit 5; }
 export LIBCLANG_PATH="$(dirname "$CLANG_SO")"
-export RUSTFLAGS="-C link-arg=-Wl,-rpath,\$ORIGIN"
 (cd "$VHOST"; cargo build --locked --release --target aarch64-linux-android -p vhost-device-gpu --no-default-features --features backend-virgl)
 VHOST_BIN="$VHOST/target/aarch64-linux-android/release/vhost-device-gpu"; [ -x "$VHOST_BIN" ] || exit 5
 install -m0755 "$VHOST_BIN" "$OUT/libvessel_vhost_gpu.so"; patchelf --set-rpath '$ORIGIN' "$OUT/libvessel_vhost_gpu.so"
@@ -133,9 +149,10 @@ for f in "$OUT"/*.so; do
 done
 mkdir -p "$ROOT/app/src/main/assets/vessel"
 {
-  echo protocol=39; echo runtime=v39-self-contained-dmabuf-r2
+  echo protocol=39; echo runtime=v39-self-contained-dmabuf-virtio-input-r1
   echo "kernel_sha256=$(sha256sum "$OUT/libvessel_uml.so" | awk '{print $1}')"
-  echo "vhost_sha256=$(sha256sum "$OUT/libvessel_vhost_gpu.so" | awk '{print $1}')"
+  echo "vhost_gpu_sha256=$(sha256sum "$OUT/libvessel_vhost_gpu.so" | awk '{print $1}')"
+  echo "vhost_input_sha256=$(sha256sum "$OUT/libvessel_vhost_input.so" | awk '{print $1}')"
   echo "angle_package=$(tail -1 "$WORK/pkg-meta/angle-android.txt")"
   echo "virgl_package=$(tail -1 "$WORK/pkg-meta/virglrenderer-android.txt")"
   echo rootfs=external:Download/LinuxPC/Vessel-Debian/debian-docker.ext4
