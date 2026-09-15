@@ -1,5 +1,6 @@
 package com.example.dreamlinux
 
+import android.app.ActivityManager
 import android.content.Context
 import android.os.Environment
 import kotlinx.coroutines.Dispatchers
@@ -33,7 +34,7 @@ class VesselRuntimeController(
 ) {
     companion object {
         const val PROTOCOL = 39
-        const val REVISION = "v39-self-contained-dmabuf-r2"
+        const val REVISION = "v39-self-contained-dmabuf-r3"
         const val DISPLAY_TRANSPORT = "vhost-user-gpu-dmabuf-same-uid-v1"
         private const val ROOTFS_URL = "https://github.com/zalexdev/linux-um-arm64/releases/download/prebuilt-20260816/debian-docker.ext4.gz"
         private const val ROOTFS_SHA256 = "2807979f76021fadf1f76f0c827fbe1eab4df51e33bfeca0c840c5181c610be3"
@@ -48,6 +49,17 @@ class VesselRuntimeController(
         "LinuxPC/Vessel-Debian",
     )
     private val disk = File(machineDir, "debian-docker.ext4")
+    private val persistentLog = File(machineDir, "vessel-runtime.log")
+
+    val guestMemoryMb: Int by lazy {
+        val info = ActivityManager.MemoryInfo()
+        context.getSystemService(ActivityManager::class.java)?.getMemoryInfo(info)
+        val totalMb = (info.totalMem / (1024L * 1024L)).toInt().coerceAtLeast(6144)
+        // UML now lives in Vessel's own UID, so do not let an 8 GiB guest make
+        // Android's LMKD kill the UI process. Leave >=4 GiB for Android/GPU and
+        // cap this first self-contained runtime at 6 GiB.
+        (totalMb - 4096).coerceIn(3072, 6144)
+    }
 
     private val umlBin get() = File(nativeDir, "libvessel_uml.so")
     private val stubBin get() = File(nativeDir, "libvessel_stub.so")
@@ -130,6 +142,15 @@ class VesselRuntimeController(
         synchronized(logLock) {
             log.append(text)
             if (log.length > 300_000) log.delete(0, log.length - 240_000)
+            if (machineDir.isDirectory) {
+                runCatching {
+                    FileOutputStream(persistentLog, true).bufferedWriter().use { it.write(text) }
+                    if (persistentLog.length() > 2_000_000L) {
+                        val tail = persistentLog.readText().takeLast(1_000_000)
+                        persistentLog.writeText(tail)
+                    }
+                }
+            }
         }
     }
 
@@ -149,6 +170,7 @@ class VesselRuntimeController(
         .put("vncPort", -1)
         .put("runtimeDir", runtimeDir.absolutePath)
         .put("machineDir", machineDir.absolutePath)
+        .put("guestMemoryMb", guestMemoryMb)
         .put("running", running)
         .put("guestReady", guestReady)
         .put("desktopReady", desktopReady)
@@ -288,27 +310,30 @@ class VesselRuntimeController(
     fun input(type: String, values: Map<String, Any>) { sendInput(type, values) }
 
     private fun probeInputDelivery() {
-        repeat(100) {
-            if (inputHello) return@repeat
+        var connected = inputHello
+        var tries = 0
+        while (!connected && tries++ < 100) {
             Thread.sleep(50)
+            connected = inputHello
         }
-        check(inputHello) { "Guest input channel did not connect" }
+        check(connected) { "Guest input channel did not connect" }
         val seq = sendInput("ping", emptyMap())
-        repeat(100) {
-            if (lastInputAck >= seq) return
-            Thread.sleep(20)
-        }
-        error("Guest input channel connected but did not ACK events")
+        tries = 0
+        while (lastInputAck < seq && tries++ < 100) Thread.sleep(20)
+        check(lastInputAck >= seq) { "Guest input channel connected but did not ACK events" }
     }
 
     private fun startGpu() {
         runCatching { gpuProcess?.destroyForcibly() }
         gpuSocket.delete()
-        repeat(100) {
-            if (displaySocket.exists()) return@repeat
+        var presenterReady = displaySocket.exists()
+        var tries = 0
+        while (!presenterReady && tries++ < 100) {
             Thread.sleep(20)
+            presenterReady = displaySocket.exists()
         }
-        check(displaySocket.exists()) { "Native vhost-user-gpu display socket did not start" }
+        check(presenterReady) { "Native vhost-user-gpu display socket did not start: ${VesselWaylandPresenter.status()}" }
+        append("[host] starting vhost-device-gpu; display=${displaySocket.absolutePath}\n")
         val pb = ProcessBuilder(
             gpuBin.absolutePath,
             "--socket-path", gpuSocket.absolutePath,
@@ -327,26 +352,29 @@ class VesselRuntimeController(
         val p = pb.start()
         gpuProcess = p
         Thread({ p.inputStream.bufferedReader().forEachLine { append("[gpu] $it\n") } }, "vessel-gpu-log").apply { isDaemon = true; start() }
-        repeat(150) {
-            if (gpuSocket.exists()) return
-            if (!p.isAlive) error("vhost-device-gpu exited during startup")
+        tries = 0
+        while (!gpuSocket.exists() && tries++ < 150) {
+            if (!p.isAlive) error("vhost-device-gpu exited during startup rc=${runCatching { p.exitValue() }.getOrDefault(-1)}")
             Thread.sleep(40)
         }
-        error("vhost-device-gpu socket did not appear")
+        check(gpuSocket.exists()) { "vhost-device-gpu socket did not appear" }
+        append("[host] vhost-device-gpu ready pid=${p.pid()}\n")
     }
 
     private fun startUml() {
         runCatching { umlProcess?.destroyForcibly() }
+        append("[host] starting UML with ${guestMemoryMb} MiB RAM, 6 vCPUs\n")
         val cmd = listOf(
             umnetBin.absolutePath, "--passt", passtBin.absolutePath, "--dns", "1.1.1.1", "--",
             umlBin.absolutePath,
-            "mem=8192M", "ncpus=6", "seccomp=on",
+            "mem=${guestMemoryMb}M", "ncpus=6", "seccomp=on",
             "ubd0=${disk.absolutePath}", "root=/dev/ubda", "rw", "init=/umarm-init",
             "stub_exe=${stubBin.absolutePath}", "virtio_uml.device=${gpuSocket.absolutePath}:16",
             "panic=-1", "con=null", "con0=fd:0,fd:1", "console=tty0",
         )
         val p = ProcessBuilder(cmd).directory(machineDir).redirectErrorStream(true).start()
         umlProcess = p
+        append("[host] UML launcher pid=${p.pid()}\n")
         consoleWriter = BufferedWriter(OutputStreamWriter(p.outputStream, Charsets.UTF_8), 32 * 1024)
         Thread({
             BufferedReader(InputStreamReader(p.inputStream, Charsets.UTF_8), 64 * 1024).use { reader ->
@@ -365,6 +393,8 @@ class VesselRuntimeController(
                     }
                 }
             }
+            val rc = runCatching { p.waitFor() }.getOrDefault(-1)
+            append("[host] UML launcher exited rc=$rc\n")
             running = false
         }, "vessel-uml-console").apply { isDaemon = true; start() }
     }
@@ -481,10 +511,13 @@ class VesselRuntimeController(
         try {
             assertAssets()
             ensureDisk()
+            persistentLog.writeText("Vessel ${REVISION} startup\n")
+            append("[host] machine=${machineDir.absolutePath}\n")
+            append("[host] presenter=${VesselWaylandPresenter.status()}\n")
             startInputServer()
             progress("gpu", 30, "Starting native VirtIO GPU")
             startGpu()
-            progress("uml", 36, "Booting Debian ARM64")
+            progress("uml", 36, "Booting Debian ARM64 · ${guestMemoryMb} MiB")
             startUml()
             startedAt = android.os.SystemClock.elapsedRealtime()
             running = true
@@ -494,27 +527,29 @@ class VesselRuntimeController(
             progress("input", 48, "Starting verified evdev/libinput devices")
             uploadInputAgent()
             var inputReady = false
-            repeat(50) {
-                if (guestBlocking("grep -q 'Vessel Trackpad' /proc/bus/input/devices && grep -q 'Vessel Touchscreen' /proc/bus/input/devices", 5).first == 0) {
-                    inputReady = true
-                    return@repeat
-                }
-                Thread.sleep(100)
+            var tries = 0
+            while (!inputReady && tries++ < 50) {
+                inputReady = guestBlocking("grep -q 'Vessel Trackpad' /proc/bus/input/devices && grep -q 'Vessel Touchscreen' /proc/bus/input/devices", 5).first == 0
+                if (!inputReady) Thread.sleep(100)
             }
             check(inputReady) { "Vessel evdev input devices did not appear" }
             ensurePlasma()
             launchDesktop()
             progress("frame", 88, "Waiting for direct DMA-BUF scanout")
-            repeat(240) {
+            tries = 0
+            while (tries++ < 240) {
                 val ps = VesselWaylandPresenter.status()
                 if (ps.startsWith("presenting-dmabuf")) {
                     desktopReady = true
                     progress("ready", 100, "Plasma visible through direct DMA-BUF")
                     return@withContext baseState().put("presenter", ps)
                 }
+                if (ps.contains("missing-") || ps.contains("failed") || ps.contains("rejected")) {
+                    error("Native presenter failed: $ps")
+                }
                 Thread.sleep(50)
             }
-            error("Plasma started but no DMA-BUF frame reached Vessel")
+            error("Plasma started but no DMA-BUF frame reached Vessel; presenter=${VesselWaylandPresenter.status()}")
         } catch (t: Throwable) {
             lastError = t.message ?: t.javaClass.simpleName
             append("[error] $lastError\n")
