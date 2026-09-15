@@ -96,15 +96,17 @@ jobs:
           fi
 
           rm -rf /tmp/vessel-prev /tmp/vessel-prev-apk
-          mkdir -p /tmp/vessel-prev /tmp/vessel-prev-apk app/src/main/jniLibs/arm64-v8a
+          mkdir -p /tmp/vessel-prev /tmp/vessel-prev-apk app/src/main/jniLibs/arm64-v8a app/src/main/assets/vessel
           gh run download "$PREV_RUN" -n vessel-protocol39-self-contained-arm64 -D /tmp/vessel-prev
           PREV_APK="$(find /tmp/vessel-prev -name '*.apk' -print -quit)"
           [ -n "$PREV_APK" ] || exit 0
-          unzip -q "$PREV_APK" 'lib/arm64-v8a/*' -d /tmp/vessel-prev-apk
+          unzip -q "$PREV_APK" 'lib/arm64-v8a/*' 'assets/vessel/runtime-build.txt' -d /tmp/vessel-prev-apk
           cp -a /tmp/vessel-prev-apk/lib/arm64-v8a/. app/src/main/jniLibs/arm64-v8a/
+          cp /tmp/vessel-prev-apk/assets/vessel/runtime-build.txt app/src/main/assets/vessel/runtime-build.txt
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_uml.so
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_virglrenderer.so
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_epoxy.so
+          test -s app/src/main/assets/vessel/runtime-build.txt
           echo "seeded=true" >> "$GITHUB_OUTPUT"
           echo "Seeded unchanged expensive runtime from verified run $PREV_RUN ($PREV_SHA)."
 
