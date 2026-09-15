@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Vessel host-side vhost-user-gpu display frontend.
 
-The virtio-gpu backend (vhost-device-gpu) owns rendering.  This process plays
-QEMU's tiny display-server role for the vhost-user-gpu side channel: it provides
-one display mode, receives scanout/damage messages, and forwards dma-buf frames
-to Vessel's existing Android Vulkan presenter.
+The virtio-gpu backend owns rendering. This process plays QEMU's display-server
+role for the vhost-user-gpu side channel and forwards standard RGB scanout
+updates over Android loopback TCP to Vessel. The Android app bridges that TCP
+stream into its native Vulkan presenter from inside the Vessel UID.
 
-The UML kernel connects to <gpu socket>.display and passes that connected fd to
-the backend with VHOST_USER_GPU_SET_SOCKET.  After that handoff this process is
-talking directly to the GPU backend.
+3D rendering remains guest Mesa/VirGL -> host virglrenderer -> ANGLE/Vulkan ->
+Adreno. Only the final cross-app presentation hop is copied, because Android
+SELinux blocks SCM_RIGHTS directly from the Termux app UID to Vessel.
 """
 from __future__ import annotations
 
@@ -18,10 +18,8 @@ import os
 import socket
 import struct
 import sys
-import time
 from dataclasses import dataclass
 
-# vhost-user-gpu protocol.  Native byte order, fixed 12-byte header.
 GPU_HDR = struct.Struct("=III")
 GPU_REPLY = 0x4
 GPU_GET_PROTOCOL_FEATURES = 1
@@ -46,24 +44,19 @@ UPDATE = struct.Struct("=IIIII")
 SCANOUT = struct.Struct("=III")
 DMABUF = struct.Struct("=IIIIIIIIII")
 DMABUF2 = struct.Struct("=IIIIIIIIIIQ")
-CURSOR_POS = struct.Struct("=III")
-CURSOR_UPDATE = struct.Struct("=IIIII")
-
-# virtio_gpu_ctrl_hdr: u32 type, u32 flags, u64 fence, u32 ctx, u8 ring, pad[3]
 VIRTIO_CTRL = struct.Struct("=IIQIB3s")
-RECT = struct.Struct("=IIII")
-DISPLAY_ONE = struct.Struct("=IIIIII")  # rect + enabled + flags
+DISPLAY_ONE = struct.Struct("=IIIIII")
 MAX_SCANOUTS = 16
 DISPLAY_INFO_SIZE = VIRTIO_CTRL.size + DISPLAY_ONE.size * MAX_SCANOUTS
 EDID_SIZE = VIRTIO_CTRL.size + 8 + 1024
 
-# Existing Vessel Android frame transport.
 VESSEL_FRAME_MAGIC = 0x31574656
 VESSEL_IMPORT = 1
 VESSEL_FRAME = 2
 VESSEL_SHM_DAMAGE = 4
 VESSEL_FRAME_MSG = struct.Struct("=IIIIIIIIQQ")
-ANDROID_FRAME_SOCKET = "\0vessel-wayland-v1"
+ANDROID_FRAME_HOST = "127.0.0.1"
+ANDROID_FRAME_PORT = 47635
 
 
 def recvn(sock: socket.socket, n: int) -> bytes:
@@ -77,8 +70,6 @@ def recvn(sock: socket.socket, n: int) -> bytes:
 
 
 def recv_gpu_message(sock: socket.socket) -> tuple[int, int, bytes, list[int]]:
-    # SCM_RIGHTS is attached to the beginning of a stream record.  Read the
-    # protocol header with recvmsg so we never lose an attached dma-buf fd.
     header = bytearray()
     fds: list[int] = []
     ancbuf = socket.CMSG_SPACE(8 * array.array("i").itemsize)
@@ -113,14 +104,8 @@ def close_fds(fds: list[int]) -> None:
 
 
 def make_edid(width: int, height: int) -> bytes:
-    """Return a conservative 128-byte EDID containing one detailed mode.
-
-    It is intentionally minimal.  The Linux virtio-gpu driver mainly needs a
-    coherent preferred mode; checksum correctness keeps user-space happy.
-    """
     edid = bytearray(128)
     edid[0:8] = b"\x00\xff\xff\xff\xff\xff\xff\x00"
-    # Manufacturer VSL, product 1.
     edid[8:10] = (0x5A73).to_bytes(2, "big")
     edid[10:12] = (1).to_bytes(2, "little")
     edid[16] = 1
@@ -132,7 +117,6 @@ def make_edid(width: int, height: int) -> bytes:
     edid[22] = max(1, min(255, round(height / 40)))
     edid[23] = 120
     edid[24] = 0x78
-    # Detailed timing: 60 Hz-ish, with conservative blanking.
     hblank = max(160, width // 5)
     vblank = max(30, height // 20)
     pixel_clock_10khz = min(65535, max(2500, int((width + hblank) * (height + vblank) * 60 / 10000)))
@@ -145,7 +129,6 @@ def make_edid(width: int, height: int) -> bytes:
     edid[d+6] = vblank & 0xFF
     edid[d+7] = ((height >> 8) << 4) | ((vblank >> 8) & 0xF)
     edid[d+17] = 0x1A
-    # Monitor name descriptor.
     n = 72
     edid[n:n+5] = b"\x00\x00\x00\xfc\x00"
     name = b"Vessel GPU\n"
@@ -163,16 +146,17 @@ class AndroidPresenter:
     def connect(self) -> bool:
         if self.sock is not None:
             return True
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         try:
-            s.connect(ANDROID_FRAME_SOCKET)
+            s.connect((ANDROID_FRAME_HOST, ANDROID_FRAME_PORT))
         except OSError:
             s.close()
             if self.required:
                 raise
             return False
         self.sock = s
-        print("[vugpu-display] connected Vessel Android Vulkan presenter", flush=True)
+        print("[vugpu-display] connected Vessel Android frame bridge 127.0.0.1:47635", flush=True)
         return True
 
     def drop(self) -> None:
@@ -184,23 +168,9 @@ class AndroidPresenter:
             self.sock = None
 
     def import_dmabuf(self, message: bytes, fd: int) -> bool:
-        for attempt in range(2):
-            try:
-                if not self.connect():
-                    return False
-                assert self.sock is not None
-                anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]).tobytes())]
-                sent = self.sock.sendmsg([message], anc)
-                if sent != len(message):
-                    raise RuntimeError(f"short presenter import {sent}/{len(message)}")
-                return True
-            except (OSError, RuntimeError):
-                self.drop()
-                if attempt or not self.required:
-                    if self.required:
-                        raise
-                    return False
-                time.sleep(0.03)
+        del message, fd
+        # Cross-app TCP cannot carry SCM_RIGHTS. Vessel's v38 backend is patched
+        # to use standard GPU_UPDATE RGB messages instead of this path.
         return False
 
     def frame(self, message: bytes) -> bool:
@@ -217,7 +187,6 @@ class AndroidPresenter:
                     if self.required:
                         raise
                     return False
-                time.sleep(0.03)
         return False
 
     def shm_damage(self, message: bytes, pixels: bytes) -> bool:
@@ -248,11 +217,8 @@ class Frontend:
 
     def display_info(self) -> bytes:
         out = bytearray(DISPLAY_INFO_SIZE)
-        # ctrl header remains zeroed, as expected by vhost-user-gpu frontends.
         first = VIRTIO_CTRL.size
-        out[first:first + DISPLAY_ONE.size] = DISPLAY_ONE.pack(
-            0, 0, self.width, self.height, 1, 0
-        )
+        out[first:first + DISPLAY_ONE.size] = DISPLAY_ONE.pack(0, 0, self.width, self.height, 1, 0)
         return bytes(out)
 
     def edid_reply(self) -> bytes:
@@ -281,83 +247,34 @@ class Frontend:
                 raise RuntimeError(f"bad DMABUF_SCANOUT size {len(payload)}")
             vals = DMABUF.unpack(payload)
             modifier = 0
-
-        (scanout_id, x, y, width, height, fd_width, fd_height,
-         stride, fd_flags, fourcc) = vals
+        (scanout_id, x, y, width, height, fd_width, fd_height, stride, fd_flags, fourcc) = vals
         del x, y, fd_flags
-
         if width == 0 or height == 0:
             self.scanouts.pop(scanout_id, None)
             close_fds(fds)
-            print(f"[vugpu-display] scanout {scanout_id} disabled", flush=True)
             return
-
         if len(fds) != 1:
             close_fds(fds)
             raise RuntimeError(f"scanout {scanout_id} expected one dma-buf fd, got {len(fds)}")
-
         fd = fds[0]
         serial = self.next_serial()
-        state = ScanoutState(
-            width=width,
-            height=height,
-            fd_width=fd_width,
-            fd_height=fd_height,
-            stride=stride,
-            fourcc=fourcc,
-            modifier=modifier,
-            serial=serial,
-        )
+        state = ScanoutState(width, height, fd_width, fd_height, stride, fourcc, modifier, serial, False)
         self.scanouts[scanout_id] = state
-        msg = VESSEL_FRAME_MSG.pack(
-            VESSEL_FRAME_MAGIC,
-            VESSEL_IMPORT,
-            fd_width or width,
-            fd_height or height,
-            fourcc,
-            stride,
-            0,
-            0,
-            modifier,
-            serial,
-        )
         try:
-            state.imported = self.presenter.import_dmabuf(msg, fd)
-        finally:
             os.close(fd)
+        finally:
+            pass
         print(
-            f"[vugpu-display] dmabuf scanout={scanout_id} {width}x{height} "
-            f"buffer={fd_width}x{fd_height} stride={stride} fourcc={fourcc:08x} "
-            f"modifier={modifier:x} presenter={'yes' if state.imported else 'not-connected'}",
+            f"[vugpu-display] unexpected dmabuf scanout={scanout_id} modifier={modifier:x}; "
+            "v38 raw-scanout backend is required",
             flush=True,
         )
 
     def handle_dmabuf_update(self, payload: bytes) -> None:
         if len(payload) != UPDATE.size:
-            raise RuntimeError(f"bad DMABUF_UPDATE size {len(payload)}")
+            raise RuntimeError("bad DMABUF_UPDATE size")
         scanout_id, x, y, width, height = UPDATE.unpack(payload)
-        state = self.scanouts.get(scanout_id)
-        if state is None:
-            print(f"[vugpu-display] update for unknown scanout {scanout_id}", flush=True)
-            return
-        if state.imported:
-            msg = VESSEL_FRAME_MSG.pack(
-                VESSEL_FRAME_MAGIC,
-                VESSEL_FRAME,
-                state.fd_width or state.width,
-                state.fd_height or state.height,
-                state.fourcc,
-                state.stride,
-                0,
-                0,
-                state.modifier,
-                state.serial,
-            )
-            self.presenter.frame(msg)
-        print(
-            f"[vugpu-display] frame scanout={scanout_id} damage={width}x{height}+{x}+{y}",
-            flush=True,
-        )
+        print(f"[vugpu-display] ignored unexpected dmabuf update scanout={scanout_id} {width}x{height}+{x}+{y}", flush=True)
 
     def handle_raw_update(self, payload: bytes) -> None:
         if len(payload) < UPDATE.size:
@@ -369,24 +286,25 @@ class Frontend:
         full_height = state.height if state and state.height else self.height
         expected = width * height * 4
         if len(pixels) != expected:
-            print(
-                f"[vugpu-display] raw update bytes={len(pixels)} expected={expected}; forwarding anyway",
-                flush=True,
-            )
-        # Same bounded-damage framing already understood by Vessel's presenter.
+            raise RuntimeError(f"raw update bytes={len(pixels)} expected={expected}")
         msg = VESSEL_FRAME_MSG.pack(
             VESSEL_FRAME_MAGIC,
             VESSEL_SHM_DAMAGE,
             full_width,
             full_height,
-            0x34325258,  # DRM_FORMAT_XRGB8888 / XR24
+            0x34325258,
             width * 4,
             x,
             y,
             ((height & 0xFFFFFFFF) << 32) | (width & 0xFFFFFFFF),
             0,
         )
-        self.presenter.shm_damage(msg, pixels)
+        presented = self.presenter.shm_damage(msg, pixels)
+        print(
+            f"[vugpu-display] raw frame scanout={scanout_id} damage={width}x{height}+{x}+{y} "
+            f"presenter={'yes' if presented else 'not-connected'}",
+            flush=True,
+        )
 
     def run(self, conn: socket.socket) -> None:
         while True:
@@ -394,7 +312,6 @@ class Frontend:
             if flags & GPU_REPLY:
                 close_fds(fds)
                 raise RuntimeError(f"unexpected reply from GPU backend request={request}")
-
             if request == GPU_GET_PROTOCOL_FEATURES:
                 close_fds(fds)
                 send_reply(conn, request, U64.pack(GPU_FEATURES))
@@ -428,7 +345,6 @@ class Frontend:
                 self.handle_raw_update(payload)
             elif request in (GPU_CURSOR_POS, GPU_CURSOR_POS_HIDE, GPU_CURSOR_UPDATE):
                 close_fds(fds)
-                # Cursor is intentionally left to Android/UI composition for now.
             else:
                 close_fds(fds)
                 raise RuntimeError(f"unsupported vhost-user-gpu request {request}")
@@ -447,16 +363,11 @@ def make_listener(path: str) -> socket.socket:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--socket", required=True, help="vhost-user GPU display sidecar socket")
+    ap.add_argument("--socket", required=True)
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
-    ap.add_argument(
-        "--require-android-presenter",
-        action="store_true",
-        help="fail if the Vessel Android Vulkan presenter is not connected",
-    )
+    ap.add_argument("--require-android-presenter", action="store_true")
     args = ap.parse_args()
-
     if args.width <= 0 or args.height <= 0:
         raise SystemExit("width/height must be positive")
 
@@ -464,7 +375,7 @@ def main() -> None:
     presenter = AndroidPresenter(args.require_android_presenter)
     print(
         f"[vugpu-display] listening {args.socket} mode={args.width}x{args.height} "
-        f"presenter={'required' if args.require_android_presenter else 'optional'}",
+        f"android=127.0.0.1:{ANDROID_FRAME_PORT}",
         flush=True,
     )
     try:
