@@ -1,5 +1,7 @@
 package com.example.dreamlinux
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
@@ -134,6 +136,12 @@ class VesselActivity : ComponentActivity() {
             return
         }
         VmSessionService.active?.startVm()
+    }
+
+    private fun copyRuntimeLog(text: String) {
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        clipboard?.setPrimaryClip(ClipData.newPlainText("Vessel runtime log", text))
+        Toast.makeText(this, "Runtime log copied", Toast.LENGTH_SHORT).show()
     }
 
     @Composable
@@ -621,16 +629,36 @@ class VesselActivity : ComponentActivity() {
     @Composable
     private fun LogCard(state: SessionState) {
         if (state.console.isBlank()) return
-        ElevatedCard(shape = RoundedCornerShape(18.dp)) {
-            Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                Text("Runtime log", fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(6.dp))
-                SelectionContainer {
-                    Text(
-                        state.console.takeLast(12_000),
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.labelSmall,
-                    )
+        val vertical = rememberScrollState()
+        val horizontal = rememberScrollState()
+        ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
+            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Runtime log", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                    OutlinedButton(onClick = { copyRuntimeLog(state.console) }) {
+                        Text("Copy logs")
+                    }
+                }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xff050706),
+                ) {
+                    Box(Modifier.fillMaxWidth().height(280.dp)) {
+                        SelectionContainer {
+                            Text(
+                                state.console.takeLast(40_000),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(12.dp)
+                                    .verticalScroll(vertical)
+                                    .horizontalScroll(horizontal),
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.labelSmall,
+                                softWrap = false,
+                            )
+                        }
+                    }
                 }
             }
         }
