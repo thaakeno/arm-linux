@@ -133,7 +133,7 @@ class VesselRuntimeController(
         }
     }
 
-    private fun logTail(): String = synchronized(logLock) { log.takeLast(180_000) }
+    private fun logTail(): String = synchronized(logLock) { log.takeLast(180_000).toString() }
 
     private fun baseState(ok: Boolean = true): JSONObject = JSONObject()
         .put("ok", ok)
