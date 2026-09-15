@@ -25,7 +25,7 @@ if [ "$(uname -o 2>/dev/null || true)" != "Android" ] && [ ! -d /data/data/com.t
   exit 1
 fi
 
-# Do not run a full pkg update on every retry.  Install only tools that are
+# Do not run a full pkg update on every retry. Install only tools that are
 # actually missing; Cargo's target directory is persistent so failed builds
 # resume from the already-compiled crates.
 missing_pkgs=()
@@ -45,8 +45,8 @@ fi
 
 for cmd in cargo clang git curl tar pkg-config make; do need "$cmd"; done
 
-# Reuse Vessel's known-good Android virglrenderer build.  It is patched for
-# ANGLE and Venus and already works on this phone.  Build it only if missing.
+# Reuse Vessel's known-good Android virglrenderer build. It is patched for
+# ANGLE and already works on this phone. Build it only if missing.
 if ! find "$VIRGL_PREFIX/lib" -maxdepth 1 -type f -name 'libvirglrenderer.so*' -print -quit 2>/dev/null | grep -q .; then
   echo "[vhost-gpu-build] Android virglrenderer not installed; building it first..."
   bash "$ROOT/tools/venus_poc/build_virglrenderer_android_thread.sh"
@@ -67,7 +67,7 @@ VIRGL_PUBLIC="$VIRGL_INCLUDE/virgl"
 mkdir -p "$WORK" "$INSTALL/bin" "$INSTALL/lib/pkgconfig" "$INSTALL/angle-shim" "$VIRGL_PUBLIC"
 
 # Termux's runtime-only virglrenderer install has the .so but not the public
-# development headers/pkg-config metadata.  Fetch the matching 1.3.0 source and
+# development headers/pkg-config metadata. Fetch the matching 1.3.0 source and
 # recreate the normal installed header layout expected by virglrenderer-sys:
 #   <includedir>/virgl/virglrenderer.h
 #   <includedir>/virgl/virgl-version.h
@@ -125,7 +125,7 @@ printf '#include <virgl/virglrenderer.h>\n' | \
 echo "[vhost-gpu-build] virgl headers staged: $VIRGL_PUBLIC"
 
 # The Termux libepoxy patch normally gets its ANGLE path from
-# virgl_test_server_android --angle-vulkan.  vhost-device-gpu embeds the
+# virgl_test_server_android --angle-vulkan. vhost-device-gpu embeds the
 # library instead, so provide the conventional SONAMEs through a tiny private
 # runtime shim and put it first in LD_LIBRARY_PATH.
 link_angle() {
@@ -152,8 +152,8 @@ git -C "$SRC" reset --hard "$VHOST_COMMIT"
 git -C "$SRC" clean -ffd
 
 # vhost-device-gpu 0.2.0 advertises RESOURCE_BLOB even though the command is
-# currently an explicit panic in device.rs.  Modern Mesa may then select that
-# unsupported path.  For Vessel's first VirGL backend use the classic 3D
+# currently an explicit panic in device.rs. Modern Mesa may then select that
+# unsupported path. For Vessel's first VirGL backend use the classic 3D
 # resource path and advertise only features the daemon actually implements.
 python - "$SRC/vhost-device-gpu/src/device.rs" <<'PY'
 from pathlib import Path
@@ -171,12 +171,36 @@ if "            | (1 << VIRTIO_GPU_F_RESOURCE_BLOB)" in p.read_text():
 print("[vhost-gpu-build] disabled unsupported RESOURCE_BLOB advertisement")
 PY
 
+# Upstream vhost-device-gpu currently initializes virglrenderer with Venus and
+# external-blob support unconditionally, even when only the virgl/virgl2
+# capsets are selected. That contradicts its own no-RESOURCE_BLOB limitation
+# and can make the renderer worker die on the very first control-queue command.
+# Vessel's first backend is intentionally classic VirGL only: guest OpenGL ->
+# VirGL -> host GLES/ANGLE -> Vulkan/Adreno. Keep Venus disabled until the
+# vhost-user blob path exists end-to-end.
+python - "$SRC/vhost-device-gpu/src/backend/virgl.rs" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+old = """            .use_virgl(true)\n            .use_venus(true)\n            .use_egl(config.flags().use_egl)\n            .use_gles(config.flags().use_gles)\n            .use_glx(config.flags().use_glx)\n            .use_surfaceless(config.flags().use_surfaceless)\n            .use_external_blob(true)\n"""
+new = """            .use_virgl(true)\n            .use_venus(false)\n            .use_egl(config.flags().use_egl)\n            .use_gles(config.flags().use_gles)\n            .use_glx(config.flags().use_glx)\n            .use_surfaceless(config.flags().use_surfaceless)\n            .use_external_blob(false)\n"""
+if old not in s:
+    raise SystemExit("unexpected VirglRendererFlags formatting")
+s = s.replace(old, new, 1)
+p.write_text(s)
+final = p.read_text()
+if ".use_venus(false)" not in final or ".use_external_blob(false)" not in final:
+    raise SystemExit("classic VirGL renderer patch failed")
+print("[vhost-gpu-build] forced classic VirGL renderer (Venus/external blobs disabled)")
+PY
+
 export PKG_CONFIG_PATH="$INSTALL/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 export BINDGEN_EXTRA_CLANG_ARGS="-I$VIRGL_INCLUDE ${BINDGEN_EXTRA_CLANG_ARGS:-}"
 export LIBRARY_PATH="$VIRGL_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export RUSTFLAGS="-C link-arg=-Wl,-rpath,$VIRGL_PREFIX/lib ${RUSTFLAGS:-}"
 
-# Bindgen needs libclang.  Clang's Termux package normally provides it; locate
+# Bindgen needs libclang. Clang's Termux package normally provides it; locate
 # it explicitly when possible so the build does not depend on shell defaults.
 LIBCLANG_SO="$(find "$PREFIX/lib" -maxdepth 3 -type f -name 'libclang.so*' -print -quit 2>/dev/null || true)"
 if [ -n "$LIBCLANG_SO" ]; then
