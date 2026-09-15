@@ -21,7 +21,7 @@ class TermuxUmlController(private val context: Context) {
         const val CONTROL_PORT = 47631
         const val VNC_PORT = -1
         const val REQUIRED_PROTOCOL = 38
-        private const val REQUIRED_RUNTIME_REVISION = "v38-virtio-gpu-plasma-r1"
+        private const val REQUIRED_RUNTIME_REVISION = "v38-virtio-gpu-plasma-r2"
         private const val DISPLAY_TRANSPORT = "virtio-gpu-rgb-loopback-android-vulkan-v1"
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
