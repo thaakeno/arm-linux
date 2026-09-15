@@ -52,8 +52,11 @@ jobs:
           grep -F 'v38-virtio-gpu-virgl-adreno' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'virtio-gpu-rgb-loopback-android-vulkan-v1' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'VIRTIO_GPU_DRM_READY' tools/venus_poc/vessel_runtime_daemon_v38.py
-          grep -F 'VIRTIO_GPU_FRAME_REACHED_VESSEL' tools/venus_poc/vessel_runtime_daemon_v38.py
-          grep -F 'VESSEL_RAW_SCANOUT_V1' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
+          grep -F 'VIRTIO_GPU_VALIDATED_FRAME_REACHED_VESSEL' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'VESSEL_RAW_SCANOUT_V2' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
+          grep -F 'stride = width.checked_mul(4)' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
+          grep -F 'has_visible_rgb' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
+          grep -F '.vessel-raw-scanout-v2' tools/venus_poc/run_vessel_virtio_gpu.sh tools/venus_poc/build_vhost_device_gpu_termux_raw.sh
           grep -F '127.0.0.1' tools/venus_poc/vhost_gpu_display_frontend.py
           grep -F '47635' tools/venus_poc/vhost_gpu_display_frontend.py
           grep -F 'virtio_uml.device=' tools/venus_poc/run_vessel_virtio_gpu.sh
@@ -66,7 +69,8 @@ jobs:
           grep -F 'vessel_runtime_daemon_v38.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'VesselFrameTcpBridge.start()' app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt
           grep -F 'private const val PORT = 47635' app/src/main/java/com/example/dreamlinux/VesselFrameTcpBridge.kt
-          grep -F 'presenter.startsWith("presenting-")' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'frameValidated && presenter.startsWith("presenting-")' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'state.progressPercent}%' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'VirtIO GPU · VirGL · Adreno' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'keepScreenOn = false' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           grep -F 'FIFO' app/src/main/cpp/vessel_wayland_presenter_v3.cpp
