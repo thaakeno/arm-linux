@@ -17,6 +17,11 @@ ZIP_URL="https://github.com/$REPO_SLUG/releases/download/$RELEASE_TAG/vessel-uml
 TMP="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/vessel-vugpu-install.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
+fail() {
+  echo "[vessel-vugpu-install] ERROR: $*" >&2
+  exit 1
+}
+
 if [ ! -d "$UML_DIR" ]; then
   echo "[vessel-vugpu-install] existing Vessel UML directory missing: $UML_DIR" >&2
   echo "[vessel-vugpu-install] this installer upgrades the existing real-Linux runtime; it does not create a new PRoot/chroot." >&2
@@ -24,7 +29,7 @@ if [ ! -d "$UML_DIR" ]; then
 fi
 
 for f in "$UML_DIR/umnet" "$UML_DIR/passt" "$UML_DIR/debian-docker.ext4"; do
-  [ -e "$f" ] || { echo "[vessel-vugpu-install] missing existing runtime file: $f" >&2; exit 1; }
+  [ -e "$f" ] || fail "missing existing runtime file: $f"
 done
 
 command -v curl >/dev/null 2>&1 || pkg install -y curl
@@ -33,6 +38,8 @@ command -v unzip >/dev/null 2>&1 || pkg install -y unzip
 ARCHIVE="$TMP/vessel-uml-smp-arm64.zip"
 echo "[vessel-vugpu-install] downloading CI kernel: $RELEASE_TAG"
 curl -fL --retry 4 --retry-delay 2 -o "$ARCHIVE" "$ZIP_URL"
+
+echo "[vessel-vugpu-install] extracting + verifying kernel artifact"
 unzip -q "$ARCHIVE" -d "$TMP/kernel"
 
 KERNEL="$(find "$TMP/kernel" -type f -name linux-umshm -print -quit)"
@@ -47,20 +54,28 @@ for f in "$KERNEL" "$STUB" "$CONFIG" "$CHECKSUMS"; do
   }
 done
 
-grep -qx 'CONFIG_VIRTIO_UML=y' "$CONFIG"
-grep -qx 'CONFIG_DRM_VIRTIO_GPU=y' "$CONFIG"
-grep -qx 'CONFIG_DRM_VIRTIO_GPU_KMS=y' "$CONFIG"
-grep -Fq 'VHOST_USER_GPU_SET_SOCKET=33' "$CHECKSUMS"
-strings "$KERNEL" | grep -Fq 'Vessel vhost-user-gpu display relay attached'
+grep -qx 'CONFIG_VIRTIO_UML=y' "$CONFIG" || fail 'kernel config lacks CONFIG_VIRTIO_UML=y'
+grep -qx 'CONFIG_DRM_VIRTIO_GPU=y' "$CONFIG" || fail 'kernel config lacks CONFIG_DRM_VIRTIO_GPU=y'
+grep -qx 'CONFIG_DRM_VIRTIO_GPU_KMS=y' "$CONFIG" || fail 'kernel config lacks CONFIG_DRM_VIRTIO_GPU_KMS=y'
+grep -Fq 'VHOST_USER_GPU_SET_SOCKET=33' "$CHECKSUMS" || fail 'artifact metadata lacks VHOST_USER_GPU_SET_SOCKET=33'
+
+# Do not use `strings | grep -q` here with `set -o pipefail`: grep exits as soon
+# as it finds the marker, strings receives SIGPIPE, and the otherwise-successful
+# verification becomes exit 141.  Search the binary directly instead.
+grep -aFq 'Vessel vhost-user-gpu display relay attached' "$KERNEL" || \
+  fail 'kernel binary lacks Vessel vhost-user-gpu display handoff marker'
 
 # Verify the artifact hashes before replacing the local executable.  The file
 # names in CI are absolute/relative to its artifact folder, so compare hashes by
 # basename instead of depending on the original path prefix.
 want_kernel="$(awk '$2 ~ /linux-umshm$/ {print $1; exit}' "$CHECKSUMS")"
 want_stub="$(awk '$2 ~ /stub_exe-umshm$/ {print $1; exit}' "$CHECKSUMS")"
-[ -n "$want_kernel" ] && [ -n "$want_stub" ]
-[ "$(sha256sum "$KERNEL" | awk '{print $1}')" = "$want_kernel" ]
-[ "$(sha256sum "$STUB" | awk '{print $1}')" = "$want_stub" ]
+[ -n "$want_kernel" ] || fail 'missing linux-umshm checksum'
+[ -n "$want_stub" ] || fail 'missing stub_exe-umshm checksum'
+[ "$(sha256sum "$KERNEL" | awk '{print $1}')" = "$want_kernel" ] || fail 'linux-umshm SHA256 mismatch'
+[ "$(sha256sum "$STUB" | awk '{print $1}')" = "$want_stub" ] || fail 'stub_exe-umshm SHA256 mismatch'
+
+echo "[vessel-vugpu-install] artifact verified"
 
 # Keep one rollback copy.  Never touch the persistent ext4 disk.
 if [ -e "$UML_DIR/linux-umshm" ] && [ ! -e "$UML_DIR/linux-umshm.pre-vugpu" ]; then
