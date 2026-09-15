@@ -9,14 +9,17 @@ WORK="${VESSEL_NATIVE_WORK:-$ROOT/.vessel-native-build}"
 OUT="$ROOT/app/src/main/jniLibs/arm64-v8a"
 VHOST="$WORK/vhost-device"
 INCLUDE_ROOT="$WORK/include"
+CARGO_TARGET_DIR="$WORK/vhost-device-target"
 
-[ -d "$VHOST/.git" ] || { echo "run build_runtime_bundle_ci.sh first" >&2; exit 2; }
+[ -d "$VHOST/.git" ] || { echo "prepare/build the native runtime first" >&2; exit 2; }
 [ -s "$OUT/libvessel_virglrenderer.so" ] || exit 2
 [ -s "$OUT/libvessel_epoxy.so" ] || exit 2
 [ -d "$INCLUDE_ROOT/virgl" ] || exit 2
+mkdir -p "$CARGO_TARGET_DIR"
 
 echo "[vessel-ahb] building GPU-only Android HardwareBuffer bridge"
 CXX="$TOOLCHAIN/bin/aarch64-linux-android29-clang++"
+NM="$TOOLCHAIN/bin/llvm-nm"
 "$CXX" --sysroot="$TOOLCHAIN/sysroot" -std=c++17 -fPIC -shared \
   -Wall -Wextra -Werror \
   -I"$INCLUDE_ROOT" \
@@ -25,6 +28,15 @@ CXX="$TOOLCHAIN/bin/aarch64-linux-android29-clang++"
   -lvessel_virglrenderer -lvessel_epoxy -landroid -llog \
   -o "$OUT/libvessel_ahb_bridge.so"
 patchelf --set-rpath '$ORIGIN' "$OUT/libvessel_ahb_bridge.so"
+
+# Catch the exact Android runtime failure r4 exposed: the C virglrenderer API
+# must remain an unmangled C symbol when referenced from our C++ bridge.
+"$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge.so" | grep -Fq 'virgl_renderer_resource_get_info'
+if "$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge.so" | grep -Fq '_Z32virgl_renderer_resource_get_info'; then
+  echo "AHardwareBuffer bridge references C++-mangled virgl_renderer_resource_get_info" >&2
+  exit 5
+fi
+"$NM" -D "$OUT/libvessel_virglrenderer.so" | grep -Fq 'virgl_renderer_resource_get_info'
 
 # Rebuild vhost-device-gpu from its pinned source with the Android-native
 # scanout path. The normal vhost-user-gpu side channel stays active for EDID
@@ -62,9 +74,10 @@ CLANG_SO="$(find /usr/lib -name 'libclang.so*' -print -quit 2>/dev/null || true)
 [ -n "$CLANG_SO" ] || { echo "libclang not found" >&2; exit 5; }
 export LIBCLANG_PATH="$(dirname "$CLANG_SO")"
 export RUSTFLAGS="-C link-arg=-Wl,-rpath,\$ORIGIN -L native=$OUT -l dylib=vessel_ahb_bridge"
+export CARGO_TARGET_DIR
 
 (cd "$VHOST"; cargo build --locked --release --target aarch64-linux-android -p vhost-device-gpu --no-default-features --features backend-virgl)
-VHOST_BIN="$VHOST/target/aarch64-linux-android/release/vhost-device-gpu"
+VHOST_BIN="$CARGO_TARGET_DIR/aarch64-linux-android/release/vhost-device-gpu"
 [ -x "$VHOST_BIN" ] || exit 5
 install -m0755 "$VHOST_BIN" "$OUT/libvessel_vhost_gpu.so"
 patchelf --set-rpath '$ORIGIN' "$OUT/libvessel_vhost_gpu.so"
