@@ -92,12 +92,12 @@ struct InputSender {
         std::lock_guard<std::mutex> g(lock);
         if (!connectOne(which)) return false;
         const size_t bytes = count * sizeof(WireEvent);
-        ssize_t sent = send(fds[which], events, bytes, MSG_NOSIGNAL);
+        ssize_t sent = ::send(fds[which], events, bytes, MSG_NOSIGNAL);
         if (sent == static_cast<ssize_t>(bytes)) return true;
         if (fds[which] >= 0) close(fds[which]);
         fds[which] = -1;
         if (!connectOne(which)) return false;
-        sent = send(fds[which], events, bytes, MSG_NOSIGNAL);
+        sent = ::send(fds[which], events, bytes, MSG_NOSIGNAL);
         if (sent != static_cast<ssize_t>(bytes)) {
             status = std::string("send-failed:") + std::strerror(errno);
             if (fds[which] >= 0) close(fds[which]);
@@ -107,7 +107,7 @@ struct InputSender {
         return true;
     }
 
-    bool send(int which, std::initializer_list<WireEvent> body) {
+    bool sendEvents(int which, std::initializer_list<WireEvent> body) {
         std::vector<WireEvent> packet(body);
         packet.push_back(WireEvent{EV_SYN, SYN_REPORT, 0});
         return sendPacket(which, packet.data(), packet.size());
@@ -136,7 +136,7 @@ Java_com_example_dreamlinux_VesselVirtioInput_nativeConfigure(
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_example_dreamlinux_VesselVirtioInput_nativeAbsolute(
     JNIEnv*, jclass, jint x, jint y, jboolean down) {
-    return gInput.send(TOUCH, {
+    return gInput.sendEvents(TOUCH, {
         WireEvent{EV_ABS, ABS_X, bits(x)},
         WireEvent{EV_ABS, ABS_Y, bits(y)},
         WireEvent{EV_KEY, 0x14a, down ? 1u : 0u},
@@ -146,7 +146,7 @@ Java_com_example_dreamlinux_VesselVirtioInput_nativeAbsolute(
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_example_dreamlinux_VesselVirtioInput_nativeRelative(
     JNIEnv*, jclass, jint dx, jint dy) {
-    return gInput.send(POINTER, {
+    return gInput.sendEvents(POINTER, {
         WireEvent{EV_REL, REL_X, bits(dx)},
         WireEvent{EV_REL, REL_Y, bits(dy)},
     }) ? JNI_TRUE : JNI_FALSE;
@@ -155,7 +155,7 @@ Java_com_example_dreamlinux_VesselVirtioInput_nativeRelative(
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_example_dreamlinux_VesselVirtioInput_nativeButton(
     JNIEnv*, jclass, jint code, jboolean down) {
-    return gInput.send(POINTER, {
+    return gInput.sendEvents(POINTER, {
         WireEvent{EV_KEY, static_cast<uint16_t>(code), down ? 1u : 0u},
     }) ? JNI_TRUE : JNI_FALSE;
 }
@@ -163,7 +163,7 @@ Java_com_example_dreamlinux_VesselVirtioInput_nativeButton(
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_example_dreamlinux_VesselVirtioInput_nativeScroll(
     JNIEnv*, jclass, jint x, jint y) {
-    return gInput.send(POINTER, {
+    return gInput.sendEvents(POINTER, {
         WireEvent{EV_REL, REL_HWHEEL, bits(x)},
         WireEvent{EV_REL, REL_WHEEL, bits(y)},
     }) ? JNI_TRUE : JNI_FALSE;
@@ -172,7 +172,7 @@ Java_com_example_dreamlinux_VesselVirtioInput_nativeScroll(
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_example_dreamlinux_VesselVirtioInput_nativeKey(
     JNIEnv*, jclass, jint code, jboolean down) {
-    return gInput.send(KEYBOARD, {
+    return gInput.sendEvents(KEYBOARD, {
         WireEvent{EV_KEY, static_cast<uint16_t>(code), down ? 1u : 0u},
     }) ? JNI_TRUE : JNI_FALSE;
 }
