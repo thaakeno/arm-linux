@@ -125,9 +125,17 @@ done
 }
 
 ANGLE_PREFIX="$PREFIX/opt/angle-android/vulkan"
-ANGLE_SHIM="$GPU_PREFIX/angle-shim"
 VIRGL_LIB="$PREFIX/opt/virglrenderer-android/lib"
-export LD_LIBRARY_PATH="$ANGLE_SHIM:$VIRGL_LIB:${LD_LIBRARY_PATH:-}"
+
+# Do NOT put ANGLE symlink aliases named libEGL.so/libGLESv*.so in
+# LD_LIBRARY_PATH. Android's version linker matches VERNEED entries against the
+# dependency's real DT_SONAME. An alias such as libGLESv1_CM.so ->
+# libGLESv1_CM_angle.so therefore poisons dependencies of libandroid_runtime.so:
+# it asks for SONAME libGLESv1_CM.so but sees libGLESv1_CM_angle.so and aborts.
+# libepoxy selects the real *_angle.so files by absolute path below, while
+# Android framework dependencies remain free to resolve their proper system GL
+# libraries and SONAMEs.
+export LD_LIBRARY_PATH="$VIRGL_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export EGL_PLATFORM="${EGL_PLATFORM:-surfaceless}"
 export RUST_LOG="${RUST_LOG:-debug}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
@@ -236,7 +244,7 @@ echo "[vessel-vugpu] vhost-user virtio-gpu backend ready: $GPU_SOCK"
 echo "[vessel-vugpu] GPU display relay ready: $GPU_DISPLAY_SOCK"
 echo "[vessel-vugpu] GPU log:     $GPU_LOG"
 echo "[vessel-vugpu] display log: $DISPLAY_LOG"
-echo "[vessel-vugpu] ANGLE path:  $ANGLE_PREFIX"
+echo "[vessel-vugpu] ANGLE path:  $ANGLE_PREFIX (direct libepoxy selection; no SONAME aliases)"
 echo "[vessel-vugpu] booting REAL Debian UML with $VESSEL_VCPUS vCPUs / ${VESSEL_MEM_MB} MiB"
 echo "[vessel-vugpu] guest should expose /dev/dri/card0 and /dev/dri/renderD128"
 
