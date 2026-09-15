@@ -13,15 +13,16 @@ import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.Socket
 
-/** Android-side controller for Vessel's rootless UML + Venus + Weston 16 Vulkan runtime. */
+/** Android-side controller for Vessel's rootless UML + VirtIO GPU runtime. */
 class TermuxUmlController(private val context: Context) {
     companion object {
         const val TERMUX_PACKAGE = "com.termux"
         const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
         const val CONTROL_PORT = 47631
         const val VNC_PORT = -1
-        const val REQUIRED_PROTOCOL = 37
-        private const val REQUIRED_RUNTIME_REVISION = "v37-weston16-native-vulkan-gpu-only"
+        const val REQUIRED_PROTOCOL = 38
+        private const val REQUIRED_RUNTIME_REVISION = "v38-virtio-gpu-virgl-adreno"
+        private const val DISPLAY_TRANSPORT = "virtio-gpu-rgb-loopback-android-vulkan-v1"
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
         private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
@@ -29,7 +30,6 @@ class TermuxUmlController(private val context: Context) {
         private const val EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
         private const val EXTRA_WORKDIR = "com.termux.RUN_COMMAND_WORKDIR"
         private const val EXTRA_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
-        private const val DISPLAY_TRANSPORT = "weston16-vulkan-venus-android-surface-v3"
     }
 
     fun isTermuxInstalled(): Boolean = try {
@@ -42,6 +42,10 @@ class TermuxUmlController(private val context: Context) {
     fun hasRunCommandPermission(): Boolean =
         context.checkSelfPermission(RUN_COMMAND_PERMISSION) == PackageManager.PERMISSION_GRANTED
 
+    /**
+     * Start only the already-installed Vessel runtime. The Android app never
+     * clones, fetches, resets, cleans or otherwise mutates the user's repo.
+     */
     private fun launchDaemon() {
         check(isTermuxInstalled()) { "Termux is not installed" }
         check(hasRunCommandPermission()) { "Grant Vessel the Run commands in Termux permission" }
@@ -49,8 +53,18 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 37 Weston 16 native Vulkan GPU-only runtime"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 38 VirtIO GPU / VirGL / Adreno"
               set -e
+
+              RUNTIME=~/vessel-poc-runtime
+              test -d "${'$'}RUNTIME" || {
+                echo "Vessel runtime missing: ${'$'}RUNTIME" >&2
+                echo "Update/install the runtime manually; Vessel will never git-fetch it for you." >&2
+                exit 70
+              }
+              test -f "${'$'}RUNTIME/tools/venus_poc/vessel_runtime_daemon_v38.py"
+              test -f "${'$'}RUNTIME/tools/venus_poc/run_vessel_virtio_gpu.sh"
+              test -f "${'$'}RUNTIME/tools/venus_poc/vhost_gpu_display_frontend.py"
 
               DAEMON_RE='^([^ ]*/)?python(3)?[[:space:]]+[^ ]*/vessel_runtime_daemon(_v[0-9]+)?\.py([[:space:]].*)?${'$'}'
               OLD_PIDS="${'$'}(pgrep -f "${'$'}DAEMON_RE" 2>/dev/null || true)"
@@ -65,32 +79,11 @@ class TermuxUmlController(private val context: Context) {
                 [ -z "${'$'}REMAINING" ] || kill -KILL ${'$'}REMAINING 2>/dev/null || true
               fi
 
-              if [ ! -d ~/venus-poc/.git ]; then
-                rm -rf ~/venus-poc
-                git clone --filter=blob:none --no-checkout https://github.com/thaakeno/arm-linux.git ~/venus-poc
-              fi
-              cd ~/venus-poc
-              git fetch --prune origin arch/vessel-wlroots-final
-
-              if [ ! -e ~/vessel-poc-runtime/.git ]; then
-                rm -rf ~/vessel-poc-runtime
-                git worktree add --detach ~/vessel-poc-runtime origin/arch/vessel-wlroots-final
-              else
-                git -C ~/vessel-poc-runtime reset --hard origin/arch/vessel-wlroots-final
-                git -C ~/vessel-poc-runtime clean -ffd
-              fi
-
-              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v37.py
-              test -f ~/vessel-poc-runtime/tools/venus_poc/build_weston16_vulkan.sh
-              test -f ~/vessel-poc-runtime/tools/venus_poc/vessel_wayland_bridge/vessel_transport_host.c
-              test -f ~/vessel-poc-runtime/tools/venus_poc/guest_input_direct_v34.py
-              test -f ~/vessel-poc-runtime/tools/venus_poc/run_venus_wayland.sh
-              export VESSEL_POC_DIR=~/vessel-poc-runtime
+              export VESSEL_POC_DIR="${'$'}RUNTIME"
+              export VESSEL_UML_DIR=~/venus-wsi-local
               export VESSEL_MEM_MB=8192
-              export ENABLE_X11=0
-              export VESSEL_GPU_ONLY=1
-              export VESSEL_ANDROID_PACKAGE=${'$'}(if [ "${BuildConfig.LOCAL_TEST}" = "true" ]; then echo com.example.dreamlinux.localvessel; else echo com.example.dreamlinux; fi)
-              exec python ~/vessel-poc-runtime/tools/venus_poc/vessel_runtime_daemon_v37.py
+              export VESSEL_VCPUS=6
+              exec python "${'$'}RUNTIME/tools/venus_poc/vessel_runtime_daemon_v38.py"
             } >> "${'$'}LOG" 2>&1
         """.trimIndent()
         val intent = Intent().apply {
@@ -125,7 +118,7 @@ class TermuxUmlController(private val context: Context) {
             obj.optString("displayTransport") == DISPLAY_TRANSPORT &&
             obj.optBoolean("gpuOnly", false) &&
             !obj.optBoolean("softwareFallback", true) &&
-            obj.optString("translationLayer") == "none" &&
+            obj.optString("translationLayer") == "VirGL" &&
             obj.optInt("vncPort", -1) == -1
 
     private fun requireOk(action: String, obj: JSONObject): JSONObject {
@@ -136,11 +129,12 @@ class TermuxUmlController(private val context: Context) {
             throw IllegalStateException(reason)
         }
         if (!isNativeProtocol(obj)) {
-            throw IllegalStateException("$action returned a stale or non-GPU-only Vessel runtime")
+            throw IllegalStateException("$action returned a stale Vessel runtime; protocol 38 is required")
         }
         return obj
     }
 
+    /** Called only by explicit start/actions, never just because the app opened. */
     suspend fun ensureDaemon(): JSONObject = withContext(Dispatchers.IO) {
         val existing = runCatching {
             requestBlocking(JSONObject().put("action", "status"), 900)
@@ -150,6 +144,7 @@ class TermuxUmlController(private val context: Context) {
             runCatching { requestBlocking(JSONObject().put("action", "stop"), 15_000) }
             delay(250)
         }
+
         launchDaemon()
         var last: Throwable? = null
         repeat(240) {
@@ -162,24 +157,25 @@ class TermuxUmlController(private val context: Context) {
             }
         }
         throw IllegalStateException(
-            "Vessel protocol 37 native Vulkan runtime did not start. In Termux run: cat ~/vessel-daemon.log",
+            "Vessel protocol 38 runtime did not start. Update ~/vessel-poc-runtime manually, then check ~/vessel-daemon.log",
             last,
         )
     }
 
+    /** Passive status probe: never starts or updates anything. */
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
         val status = requestBlocking(JSONObject().put("action", "status"), 1_500)
-        if (!isNativeProtocol(status)) return@withContext ensureDaemon()
+        if (!isNativeProtocol(status)) throw IllegalStateException("stale Vessel runtime")
         status
     }
 
     suspend fun start(): JSONObject = withContext(Dispatchers.IO) {
         ensureDaemon()
-        requireOk("Start Debian", requestBlocking(JSONObject().put("action", "start").put("timeout", 80), 95_000))
+        requireOk("Start Debian", requestBlocking(JSONObject().put("action", "start").put("timeout", 100), 115_000))
     }
 
     suspend fun stop(): JSONObject = withContext(Dispatchers.IO) {
-        runCatching { requestBlocking(JSONObject().put("action", "stop"), 12_000) }.getOrElse {
+        runCatching { requestBlocking(JSONObject().put("action", "stop"), 15_000) }.getOrElse {
             JSONObject()
                 .put("ok", true)
                 .put("protocolVersion", REQUIRED_PROTOCOL)
@@ -187,7 +183,7 @@ class TermuxUmlController(private val context: Context) {
                 .put("displayTransport", DISPLAY_TRANSPORT)
                 .put("gpuOnly", true)
                 .put("softwareFallback", false)
-                .put("translationLayer", "none")
+                .put("translationLayer", "VirGL")
                 .put("vncPort", -1)
                 .put("running", false)
                 .put("guestReady", false)
@@ -198,10 +194,10 @@ class TermuxUmlController(private val context: Context) {
     suspend fun startDesktop(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) {
         ensureDaemon()
         requireOk(
-            "Start desktop",
+            "Start display",
             requestBlocking(
                 JSONObject().put("action", "desktop").put("width", width).put("height", height).put("dpi", dpi),
-                32 * 60 * 1_000,
+                20 * 60 * 1_000,
             ),
         )
     }
@@ -209,10 +205,10 @@ class TermuxUmlController(private val context: Context) {
     suspend fun startDesktopAsync(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) {
         ensureDaemon()
         requireOk(
-            "Start desktop",
+            "Start display",
             requestBlocking(
                 JSONObject().put("action", "desktopAsync").put("width", width).put("height", height).put("dpi", dpi),
-                6_000,
+                8_000,
             ),
         )
     }
@@ -228,8 +224,8 @@ class TermuxUmlController(private val context: Context) {
     suspend fun desktopAction(name: String): JSONObject = withContext(Dispatchers.IO) {
         ensureDaemon()
         requireOk(
-            "Desktop action",
-            requestBlocking(JSONObject().put("action", "desktopAction").put("name", name), 12_000),
+            "Display action",
+            requestBlocking(JSONObject().put("action", "desktopAction").put("name", name), 90_000),
         )
     }
 }
