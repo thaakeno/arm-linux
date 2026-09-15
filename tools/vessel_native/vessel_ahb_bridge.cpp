@@ -84,6 +84,15 @@ bool send_all(int fd, const void* data, size_t size) {
     return true;
 }
 
+bool recv_ack(int fd) {
+    uint8_t ack = 0;
+    while (true) {
+        const ssize_t n = recv(fd, &ack, sizeof(ack), MSG_WAITALL);
+        if (n < 0 && errno == EINTR) continue;
+        return n == static_cast<ssize_t>(sizeof(ack)) && ack == 1;
+    }
+}
+
 void close_socket() {
     if (g_socket >= 0) close(g_socket);
     g_socket = -1;
@@ -182,7 +191,9 @@ bool allocate_scanout(ScanoutState& state, uint32_t width, uint32_t height) {
     }
 
     GLint old_texture = 0;
+    GLint old_draw = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &old_texture);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw);
     glGenTextures(1, &state.texture);
     glBindTexture(GL_TEXTURE_2D, state.texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -192,6 +203,7 @@ bool allocate_scanout(ScanoutState& state, uint32_t width, uint32_t height) {
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state.draw_fbo);
     glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, state.texture, 0);
     const GLenum fbo_status = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(old_draw));
     glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(old_texture));
     if (fbo_status != GL_FRAMEBUFFER_COMPLETE) {
         loge("AHardwareBuffer framebuffer is incomplete: " + std::to_string(fbo_status));
@@ -252,7 +264,8 @@ bool send_scanout(uint32_t scanout_id, ScanoutState& state) {
     if (!connect_socket()) return false;
     const AhbMessage message{MAGIC, VERSION, MSG_SCANOUT, scanout_id, state.width, state.height};
     if (!send_all(g_socket, &message, sizeof(message)) ||
-        AHardwareBuffer_sendHandleToUnixSocket(state.buffer, g_socket) != 0) {
+        AHardwareBuffer_sendHandleToUnixSocket(state.buffer, g_socket) != 0 ||
+        !recv_ack(g_socket)) {
         close_socket();
         return false;
     }
@@ -264,7 +277,7 @@ bool send_update(uint32_t scanout_id, ScanoutState& state) {
     if (!connect_socket()) return false;
     if (!state.handle_sent) return send_scanout(scanout_id, state);
     const AhbMessage message{MAGIC, VERSION, MSG_UPDATE, scanout_id, state.width, state.height};
-    if (!send_all(g_socket, &message, sizeof(message))) {
+    if (!send_all(g_socket, &message, sizeof(message)) || !recv_ack(g_socket)) {
         close_socket();
         if (!connect_socket()) return false;
         return send_scanout(scanout_id, state);
@@ -305,7 +318,7 @@ extern "C" int vessel_ahb_disable(uint32_t scanout_id) {
     if (scanout_id >= MAX_SCANOUTS) return EINVAL;
     if (connect_socket()) {
         const AhbMessage message{MAGIC, VERSION, MSG_DISABLE, scanout_id, 0, 0};
-        if (!send_all(g_socket, &message, sizeof(message))) close_socket();
+        if (!send_all(g_socket, &message, sizeof(message)) || !recv_ack(g_socket)) close_socket();
     }
     destroy_scanout(g_scanouts[scanout_id]);
     return 0;
