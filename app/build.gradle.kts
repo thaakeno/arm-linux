@@ -18,7 +18,9 @@ android {
         applicationId = if (localTest) "com.example.dreamlinux.localvessel" else "com.example.dreamlinux"
         manifestPlaceholders["appLabel"] = if (localTest) "Vessel Local" else "Vessel"
         buildConfigField("boolean", "LOCAL_TEST", localTest.toString())
-        minSdk = 29
+        // The self-contained runtime persists its machine under Download/LinuxPC
+        // and intentionally uses Android's all-files app storage model, which starts at API 30.
+        minSdk = 30
         targetSdk = 36
         versionCode = 3000 + buildRevision
         versionName = "2.0.0-alpha1"
