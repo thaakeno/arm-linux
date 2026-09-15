@@ -39,11 +39,11 @@ object VesselHostDebug {
     }
 
     fun runHostInfo() = run(
-        """printf 'Vessel host debug\n\n'; id; uname -a; printf '\nAndroid: '; getprop ro.build.version.release; printf '\nABI: '; getprop ro.product.cpu.abi; printf '\n\nNative libraries:\n'; ls -lh \"\$VESSEL_LIBDIR\"/libvessel* 2>&1; printf '\nRuntime directory:\n'; ls -lah \"\$VESSEL_RUNDIR\" 2>&1"""
+        """printf 'Vessel host debug\n\n'; id; uname -a; printf '\nAndroid: '; getprop ro.build.version.release; printf '\nABI: '; getprop ro.product.cpu.abi; printf '\n\nNative libraries:\n'; ls -lh "${'$'}VESSEL_LIBDIR"/libvessel* 2>&1; printf '\nRuntime directory:\n'; ls -lah "${'$'}VESSEL_RUNDIR" 2>&1"""
     )
 
     fun runGpuLinkerCheck() = run(
-        """printf 'Launching vhost-device-gpu --help to force Android linker resolution...\n'; \"\$VESSEL_LIBDIR/libvessel_vhost_gpu.so\" --help 2>&1"""
+        """printf 'Launching vhost-device-gpu --help to force Android linker resolution...\n'; "${'$'}VESSEL_LIBDIR/libvessel_vhost_gpu.so" --help 2>&1"""
     )
 
     fun run(command: String, timeoutSeconds: Long = 30) {
