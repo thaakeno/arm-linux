@@ -41,8 +41,17 @@ if text.count(const_anchor) != 1:
     raise SystemExit("unexpected virgl capset constants")
 text = text.replace(const_anchor, const_anchor + ffi, 1)
 
-set_start = text.index("    fn set_scanout(\n")
-flush_start = text.index("    fn flush_resource(\n", set_start)
+# Match function-name anchors rather than a particular rustfmt signature layout.
+# In the pinned vhost-device revision set_scanout is multiline while
+# flush_resource is intentionally kept on one line.
+set_anchor = "    fn set_scanout("
+flush_anchor = "    fn flush_resource("
+blob_anchor = "    fn resource_create_blob("
+if text.count(set_anchor) != 1 or text.count(flush_anchor) != 1 or text.count(blob_anchor) != 1:
+    raise SystemExit("unexpected virgl Renderer method layout")
+
+set_start = text.index(set_anchor)
+flush_start = text.index(flush_anchor, set_start)
 new_set = r'''    fn set_scanout(
         &mut self,
         scanout_id: u32,
@@ -116,8 +125,8 @@ new_set = r'''    fn set_scanout(
 '''
 text = text[:set_start] + new_set + text[flush_start:]
 
-flush_start = text.index("    fn flush_resource(\n")
-blob_start = text.index("    fn resource_create_blob(\n", flush_start)
+flush_start = text.index(flush_anchor)
+blob_start = text.index(blob_anchor, flush_start)
 new_flush = r'''    fn flush_resource(&mut self, resource_id: u32, _rect: virtio_gpu_rect) -> VirtioGpuResult {
         if self.gpu_backend.is_none() || resource_id == 0 {
             return Ok(OkNoData);
@@ -163,7 +172,7 @@ for needle in (
 
 # The standard vhost-user-gpu display channel remains for EDID/cursor control,
 # but the scanout hot path must no longer depend on EGL DMA-BUF export.
-set_block = final[final.index("    fn set_scanout(\n"):final.index("    fn flush_resource(\n")]
+set_block = final[final.index(set_anchor):final.index(flush_anchor)]
 if "export_resource_dmabuf" in set_block or "set_dmabuf_scanout" in set_block:
     raise SystemExit("legacy DMA-BUF export/send survived in set_scanout")
 
