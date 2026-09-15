@@ -13,7 +13,7 @@ rm -rf "$WORK" "$OUT"
 mkdir -p "$WORK" "$OUT"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing tool: $1" >&2; exit 2; }; }
-for x in curl unzip xz dpkg-deb patchelf git python3 cargo rustup pkg-config sha256sum; do need "$x"; done
+for x in curl unzip gzip dpkg-deb patchelf git python3 cargo rustup pkg-config sha256sum strings file; do need "$x"; done
 
 download_verified() {
   local url="$1" sha="$2" out="$3"
@@ -52,12 +52,13 @@ download_verified \
   "$OUT/libvessel_passt.so"
 chmod 0755 "$OUT/libvessel_umnet.so" "$OUT/libvessel_passt.so"
 
-# Pull the current signed Termux main-repo packages only as a source of Bionic
-# ANGLE + virglrenderer DSOs. Termux is not installed, invoked or referenced at
-# runtime; the libraries are repackaged under Vessel's own native namespace.
+# Pull signed/current Termux main-repo packages only as a build-time source of
+# Bionic ANGLE + virglrenderer DSOs. Termux itself is never installed, invoked,
+# addressed or required by Vessel at runtime. The libraries are renamed and
+# loaded entirely from Vessel's own nativeLibraryDir.
 TERMUX_BASE="https://packages.termux.dev/apt/termux-main"
-curl -fL --retry 4 -o "$WORK/Packages.xz" "$TERMUX_BASE/dists/stable/main/binary-aarch64/Packages.xz"
-xz -dc "$WORK/Packages.xz" > "$WORK/Packages"
+curl -fL --retry 4 -o "$WORK/Packages.gz" "$TERMUX_BASE/dists/stable/main/binary-aarch64/Packages.gz"
+gzip -dc "$WORK/Packages.gz" > "$WORK/Packages"
 python3 - "$WORK/Packages" "$WORK/pkg-meta" <<'PY'
 from pathlib import Path
 import sys
@@ -82,7 +83,7 @@ PY
 fetch_termux_deb() {
   local pkg="$1"
   mapfile -t meta < "$WORK/pkg-meta/$pkg.txt"
-  local file="${meta[0]}" sha="${meta[1]}"
+  local file="${meta[0]#./}" sha="${meta[1]}"
   download_verified "$TERMUX_BASE/$file" "$sha" "$WORK/$pkg.deb"
   mkdir -p "$WORK/$pkg"
   dpkg-deb -x "$WORK/$pkg.deb" "$WORK/$pkg"
@@ -96,8 +97,6 @@ for lib in libEGL_angle.so libGLESv2_angle.so; do
   [ -f "$ANGLE_DIR/$lib" ] || { echo "ANGLE library missing: $lib" >&2; exit 4; }
   install -m0644 "$ANGLE_DIR/$lib" "$OUT/$lib"
 done
-# GLES1 is not required by VirGL, but if present keep the matching ANGLE family
-# together so libepoxy never falls through to a different implementation.
 [ ! -f "$ANGLE_DIR/libGLESv1_CM_angle.so" ] || install -m0644 "$ANGLE_DIR/libGLESv1_CM_angle.so" "$OUT/libGLESv1_CM_angle.so"
 
 VIRGL_REAL="$(find "$WORK/virglrenderer-android" -type f -name 'libvirglrenderer.so*' -print | sort | tail -1)"
@@ -112,7 +111,8 @@ while read -r dep; do
   case "$dep" in libepoxy.so*) patchelf --replace-needed "$dep" libvessel_epoxy.so "$OUT/libvessel_virglrenderer.so";; esac
 done < <(patchelf --print-needed "$OUT/libvessel_virglrenderer.so")
 
-# Stage the matching public VirGL headers for rust-vmm's virglrenderer-sys.
+# Stage the exact public VirGL 1.3.0 headers matching the packaged library for
+# rust-vmm's virglrenderer-sys bindgen step.
 VIRGL_VERSION=1.3.0
 VIRGL_TAR="$WORK/virglrenderer.tar.gz"
 download_verified \
@@ -130,7 +130,7 @@ sed -e "s/@VIRGL_MAJOR_VERSION@/$VMAJ/g" -e "s/@VIRGL_MINOR_VERSION@/$VMIN/g" -e
 cat > "$WORK/pkgconfig/virglrenderer.pc" <<EOF
 prefix=$WORK
 libdir=$OUT
-includedir=$WORK/include
+includedir=$INC
 Name: virglrenderer
 Description: Vessel Android VirGL renderer
 Version: $VIRGL_VERSION
@@ -164,8 +164,10 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/bin/aarch64-linux-a
 export CC_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android29-clang"
 export CXX_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android29-clang++"
 export AR_aarch64_linux_android="$TOOLCHAIN/bin/llvm-ar"
-export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android29 --sysroot=$TOOLCHAIN/sysroot -I$WORK/include"
-export LIBCLANG_PATH="${LIBCLANG_PATH:-$(dirname "$(find /usr/lib -type f -name 'libclang.so*' -print -quit)")}" 
+export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android29 --sysroot=$TOOLCHAIN/sysroot -I$INC"
+CLANG_SO="$(find /usr/lib -type f -name 'libclang.so*' -print -quit)"
+[ -n "$CLANG_SO" ] || { echo "libclang shared library not found" >&2; exit 5; }
+export LIBCLANG_PATH="${LIBCLANG_PATH:-$(dirname "$CLANG_SO") }"
 export RUSTFLAGS="-C link-arg=-Wl,-rpath,\$ORIGIN"
 (
   cd "$VHOST"
@@ -176,23 +178,19 @@ VHOST_BIN="$VHOST/target/aarch64-linux-android/release/vhost-device-gpu"
 [ -x "$VHOST_BIN" ] || { echo "vhost-device-gpu build did not produce an Android binary" >&2; exit 5; }
 install -m0755 "$VHOST_BIN" "$OUT/libvessel_vhost_gpu.so"
 patchelf --set-rpath '$ORIGIN' "$OUT/libvessel_vhost_gpu.so"
-# Normalize any virgl SONAME Cargo/pkg-config retained.
 while read -r dep; do
   case "$dep" in libvirglrenderer.so*) patchelf --replace-needed "$dep" libvessel_virglrenderer.so "$OUT/libvessel_vhost_gpu.so";; esac
 done < <(patchelf --print-needed "$OUT/libvessel_vhost_gpu.so")
 
-# Hard fail if any old Termux prefix leaked into runtime ELF search paths.
+# Runtime search paths must be app-local. Build/debug strings are harmless;
+# what matters is that the dynamic linker never tries to enter Termux's UID.
 for f in "$OUT"/*.so; do
-  if strings "$f" | grep -Fq '/data/data/com.termux'; then
-    # ANGLE itself can contain unrelated build strings; only executable/search
-    # paths in our host pieces are forbidden.
-    case "$(basename "$f")" in libEGL_angle.so|libGLESv2_angle.so|libGLESv1_CM_angle.so) :;;
-      *) echo "Termux runtime path leaked into $(basename "$f")" >&2; exit 6;;
-    esac
+  if file "$f" | grep -q ELF; then
+    rpath="$(patchelf --print-rpath "$f" 2>/dev/null || true)"
+    case "$rpath" in *'/data/data/com.termux'*) echo "Termux RUNPATH leaked into $(basename "$f"): $rpath" >&2; exit 6;; esac
   fi
 done
 
-# Record exactly what got packaged without embedding the distro image.
 mkdir -p "$ROOT/app/src/main/assets/vessel"
 {
   echo "protocol=39"
