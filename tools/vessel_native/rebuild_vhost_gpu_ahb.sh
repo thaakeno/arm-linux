@@ -14,6 +14,8 @@ CARGO_TARGET_DIR="$WORK/vhost-device-target"
 [ -d "$VHOST/.git" ] || { echo "prepare/build the native runtime first" >&2; exit 2; }
 [ -s "$OUT/libvessel_virglrenderer.so" ] || exit 2
 [ -s "$OUT/libvessel_epoxy.so" ] || exit 2
+[ -s "$OUT/libEGL_angle.so" ] || { echo "bundled ANGLE EGL is missing" >&2; exit 2; }
+[ -s "$OUT/libGLESv2_angle.so" ] || { echo "bundled ANGLE GLES is missing" >&2; exit 2; }
 [ -d "$INCLUDE_ROOT/virgl" ] || exit 2
 mkdir -p "$CARGO_TARGET_DIR"
 
@@ -25,9 +27,37 @@ NM="$TOOLCHAIN/bin/llvm-nm"
   -I"$INCLUDE_ROOT" \
   "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp" \
   -L"$OUT" -Wl,-soname,libvessel_ahb_bridge.so -Wl,-rpath,'$ORIGIN' \
-  -lvessel_virglrenderer -lvessel_epoxy -landroid -llog \
+  -lvessel_virglrenderer -lEGL_angle -lGLESv2_angle -landroid -llog \
   -o "$OUT/libvessel_ahb_bridge.so"
 patchelf --set-rpath '$ORIGIN' "$OUT/libvessel_ahb_bridge.so"
+
+# VirGL itself dispatches through the bundled libepoxy -> ANGLE path. The AHB
+# bridge used to call raw EGL/GLES symbols without linking the ANGLE DSOs, so
+# Android resolved those calls through a different EGL implementation and
+# eglGetCurrentDisplay()/eglGetCurrentContext() returned EGL_NO_DISPLAY /
+# EGL_NO_CONTEXT even though VirGL's ANGLE context was current. Require the
+# bridge to bind to the exact same bundled ANGLE libraries as VirGL.
+BRIDGE_NEEDED="$(patchelf --print-needed "$OUT/libvessel_ahb_bridge.so")"
+grep -Fxq 'libEGL_angle.so' <<<"$BRIDGE_NEEDED"
+grep -Fxq 'libGLESv2_angle.so' <<<"$BRIDGE_NEEDED"
+if grep -Eq '^(libEGL\.so|libGLESv2\.so)$' <<<"$BRIDGE_NEEDED"; then
+  echo "AHardwareBuffer bridge accidentally depends on Android system EGL/GLES" >&2
+  printf '%s\n' "$BRIDGE_NEEDED" >&2
+  exit 5
+fi
+for sym in eglGetCurrentDisplay eglGetCurrentContext eglGetError eglGetProcAddress; do
+  "$NM" -D "$OUT/libEGL_angle.so" | grep -Eq " [TW] ${sym}$" || {
+    echo "bundled ANGLE EGL is missing $sym" >&2
+    exit 5
+  }
+done
+for sym in glBindFramebuffer glBlitFramebuffer glCheckFramebufferStatus glFinish glGenFramebuffers glGetError; do
+  "$NM" -D "$OUT/libGLESv2_angle.so" | grep -Eq " [TW] ${sym}$" || {
+    echo "bundled ANGLE GLES is missing $sym" >&2
+    exit 5
+  }
+done
+echo "[vessel-ahb] bridge EGL/GLES dispatch pinned to bundled ANGLE"
 
 # Catch the exact Android runtime failure r4 exposed: the C virglrenderer API
 # must remain an unmangled C symbol when referenced from our C++ bridge.
