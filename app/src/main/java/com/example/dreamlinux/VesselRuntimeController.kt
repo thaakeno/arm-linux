@@ -55,9 +55,6 @@ class VesselRuntimeController(
         val info = ActivityManager.MemoryInfo()
         context.getSystemService(ActivityManager::class.java)?.getMemoryInfo(info)
         val totalMb = (info.totalMem / (1024L * 1024L)).toInt().coerceAtLeast(6144)
-        // UML now lives in Vessel's own UID, so do not let an 8 GiB guest make
-        // Android's LMKD kill the UI process. Leave >=4 GiB for Android/GPU and
-        // cap this first self-contained runtime at 6 GiB.
         (totalMb - 4096).coerceIn(3072, 6144)
     }
 
@@ -358,7 +355,7 @@ class VesselRuntimeController(
             Thread.sleep(40)
         }
         check(gpuSocket.exists()) { "vhost-device-gpu socket did not appear" }
-        append("[host] vhost-device-gpu ready pid=${p.pid()}\n")
+        append("[host] vhost-device-gpu ready\n")
     }
 
     private fun startUml() {
@@ -374,7 +371,7 @@ class VesselRuntimeController(
         )
         val p = ProcessBuilder(cmd).directory(machineDir).redirectErrorStream(true).start()
         umlProcess = p
-        append("[host] UML launcher pid=${p.pid()}\n")
+        append("[host] UML launcher started\n")
         consoleWriter = BufferedWriter(OutputStreamWriter(p.outputStream, Charsets.UTF_8), 32 * 1024)
         Thread({
             BufferedReader(InputStreamReader(p.inputStream, Charsets.UTF_8), 64 * 1024).use { reader ->
