@@ -404,7 +404,7 @@ class VesselActivity : ComponentActivity() {
                     modifier=Modifier.weight(1f),
                     singleLine=true,
                     label={Text(if(hostMode)"Host command" else "Debian command")},
-                    placeholder={Text(if(hostMode)"echo $VESSEL_LIBDIR" else "uname -a")},
+                    placeholder={Text(if(hostMode)"echo \$VESSEL_LIBDIR" else "uname -a")},
                 )
                 Button(
                     onClick={
