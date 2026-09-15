@@ -39,7 +39,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Verify protocol 38 Plasma runtime
+      - name: Verify protocol 38 Plasma direct-DRM runtime
         run: |
           set -euxo pipefail
           python3 -m py_compile \
@@ -51,19 +51,26 @@ jobs:
           bash -n tools/venus_poc/run_vessel_virtio_gpu.sh
           bash -n tools/venus_poc/build_vhost_device_gpu_termux_raw.sh
           grep -F 'PROTOCOL_VERSION = 38' tools/venus_poc/vessel_runtime_daemon_v38.py
-          grep -F 'v38-virtio-gpu-plasma-r2' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'v38-virtio-gpu-plasma-r3' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'virtio-gpu-rgb-loopback-android-vulkan-v1' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'VIRTIO_GPU_DRM_READY' tools/venus_poc/vessel_runtime_daemon_v38.py
-          grep -F 'KWIN_DRM_PLASMA_READY' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'KWIN_X11_DRM_PLASMA_READY' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'VIRTIO_GPU_VALIDATED_FRAME_REACHED_VESSEL' tools/venus_poc/vessel_runtime_daemon_v38.py
-          grep -F 'exec startplasma-wayland' tools/venus_poc/vessel_runtime_daemon_v38.py
-          grep -F 'KWIN_DRM_DEVICES=/dev/dri/card0' tools/venus_poc/vessel_runtime_daemon_v38.py
-          grep -F 'unset DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'exec startplasma-x11' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'xserver-xorg-core' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'Driver \\"modesetting\\"' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'kmsdev' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F '/dev/dri/card0' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'Xorg :0 -ac -noreset -nolisten tcp -novtswitch -sharevts vt1' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'LIBGL_ALWAYS_SOFTWARE=0' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'GALLIUM_DRIVER=virgl' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'SOFTWARE_RENDERER_REJECTED' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'libinput list-devices' tools/venus_poc/vessel_runtime_daemon_v38.py
+          ! grep -E '/lib/elogind|pam_elogind|exec startplasma-wayland|command -v kwin_wayland|pkill .*kwin_wayland' tools/venus_poc/vessel_runtime_daemon_v38.py
+          ! grep -E 'command -v kmscube|pkill -x kmscube|kmscube[[:space:]]+-D' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'UI_SET_PROPBIT' tools/venus_poc/guest_command_agent_v38.py
           grep -F 'INPUT_PROP_DIRECT' tools/venus_poc/guest_command_agent_v38.py
           grep -F 'INPUT_PROP_POINTER' tools/venus_poc/guest_command_agent_v38.py
-          ! grep -E 'command -v kmscube|pkill -x kmscube|kmscube[[:space:]]+-D' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'VESSEL_RAW_SCANOUT_V2' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
           grep -F 'stride = width.checked_mul(4)' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
           grep -F 'has_visible_rgb' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
@@ -76,7 +83,8 @@ jobs:
         run: |
           set -euxo pipefail
           grep -F 'REQUIRED_PROTOCOL = 38' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'v38-virtio-gpu-plasma-r2' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'v38-virtio-gpu-plasma-r3' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'direct DRM / VirtIO GPU / VirGL / Adreno' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'guest_command_agent_v38.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'vessel_runtime_daemon_v38.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'resetPresentationLatch()' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
