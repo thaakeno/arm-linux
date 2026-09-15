@@ -19,9 +19,8 @@ import kotlin.math.abs
  * Compatibility class name for the Compose desktop page.
  *
  * This is NOT a VNC/framebuffer/screenshot view. It owns the real Android
- * Surface consumed by VesselWaylandPresenter. Wayland dma-bufs are imported by
- * Vulkan, wl_shm clients use damage-only Vulkan uploads, and Android input is
- * routed directly into the compositor's wl_seat/text-input-v3 path.
+ * Surface consumed by VesselWaylandPresenter. Android input is forwarded to
+ * Linux /dev/uinput devices and consumed by KWin through evdev/libinput.
  */
 class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder.Callback {
     enum class PointerMode { DIRECT, TRACKPAD }
@@ -29,6 +28,8 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
     companion object {
         @Volatile var active: VncFramebufferView? = null
         private const val BTN_LEFT = 0x110
+        private const val BTN_RIGHT = 0x111
+        private const val BTN_MIDDLE = 0x112
     }
 
     @Volatile private var pointerMode = PointerMode.DIRECT
@@ -37,6 +38,9 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
     private var downX = 0f
     private var downY = 0f
     private var downAt = 0L
+    private var maxPointerCount = 1
+    private var gestureTravel = 0f
+    private var lastScrollX = 0f
     private var lastScrollY = 0f
 
     private val surfaceView = object : SurfaceView(context) {
@@ -63,9 +67,8 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
         }
     }.apply {
         // SurfaceView owns a separate Surface layer behind the app window. Its
-        // View placeholder must stay transparent so Android can punch the hole
-        // that exposes the Vulkan Surface. Painting this View black can cover a
-        // correctly-presenting Surface and look exactly like a GPU black screen.
+        // View placeholder must stay transparent so Android exposes the Vulkan
+        // Surface instead of covering a valid Linux frame with black.
         setBackgroundColor(Color.TRANSPARENT)
         holder.addCallback(this@VncFramebufferView)
         isFocusable = true
@@ -77,8 +80,6 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
     }
 
     init {
-        // Keep only the parent black so there is a clean placeholder before the
-        // Surface is attached; do not paint over the SurfaceView itself.
         setBackgroundColor(Color.BLACK)
         addView(surfaceView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
     }
@@ -128,50 +129,97 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
                 downX = event.x
                 downY = event.y
                 downAt = SystemClock.uptimeMillis()
+                maxPointerCount = 1
+                gestureTravel = 0f
+                lastScrollX = event.x
                 lastScrollY = event.y
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
-                lastScrollY = (0 until event.pointerCount).sumOf { event.getY(it).toDouble() }.toFloat() / event.pointerCount
+                maxPointerCount = maxOf(maxPointerCount, event.pointerCount)
+                lastScrollX = averageX(event)
+                lastScrollY = averageY(event)
             }
             MotionEvent.ACTION_MOVE -> {
+                maxPointerCount = maxOf(maxPointerCount, event.pointerCount)
                 if (event.pointerCount >= 2) {
-                    val avgY = (0 until event.pointerCount).sumOf { event.getY(it).toDouble() }.toFloat() / event.pointerCount
-                    val delta = avgY - lastScrollY
-                    if (abs(delta) >= 3f) VesselInputClient.scroll(0, (-delta / 8f).toInt())
+                    val avgX = averageX(event)
+                    val avgY = averageY(event)
+                    val dx = avgX - lastScrollX
+                    val dy = avgY - lastScrollY
+                    gestureTravel += abs(dx) + abs(dy)
+                    // Android gestures are pixel deltas; Linux receives real
+                    // REL_WHEEL/HWHEEL events through the uinput pointer.
+                    VesselInputClient.scrollPrecise(-dx / 8f, -dy / 8f)
+                    lastScrollX = avgX
                     lastScrollY = avgY
                 } else {
-                    VesselInputClient.relative(event.x - lastX, event.y - lastY)
+                    val dx = event.x - lastX
+                    val dy = event.y - lastY
+                    gestureTravel += abs(dx) + abs(dy)
+                    VesselInputClient.relative(dx, dy)
                     lastX = event.x
                     lastY = event.y
                 }
             }
-            MotionEvent.ACTION_UP -> {
-                val density = resources.displayMetrics.density
-                val moved = abs(event.x - downX) + abs(event.y - downY)
-                if (SystemClock.uptimeMillis() - downAt < 350L && moved < 14f * density) {
-                    VesselInputClient.button(BTN_LEFT, true)
-                    VesselInputClient.button(BTN_LEFT, false)
+            MotionEvent.ACTION_POINTER_UP -> {
+                maxPointerCount = maxOf(maxPointerCount, event.pointerCount)
+                val remaining = (0 until event.pointerCount).filter { it != event.actionIndex }
+                if (remaining.isNotEmpty()) {
+                    lastX = event.getX(remaining[0])
+                    lastY = event.getY(remaining[0])
+                    lastScrollX = remaining.sumOf { event.getX(it).toDouble() }.toFloat() / remaining.size
+                    lastScrollY = remaining.sumOf { event.getY(it).toDouble() }.toFloat() / remaining.size
                 }
             }
+            MotionEvent.ACTION_UP -> {
+                val density = resources.displayMetrics.density
+                val directTravel = abs(event.x - downX) + abs(event.y - downY)
+                val moved = maxOf(gestureTravel, directTravel)
+                if (SystemClock.uptimeMillis() - downAt < 350L && moved < 14f * density) {
+                    val button = if (maxPointerCount >= 2) BTN_RIGHT else BTN_LEFT
+                    VesselInputClient.button(button, true)
+                    VesselInputClient.button(button, false)
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> Unit
         }
         return true
     }
 
+    private fun averageX(event: MotionEvent): Float =
+        (0 until event.pointerCount).sumOf { event.getX(it).toDouble() }.toFloat() / event.pointerCount
+
+    private fun averageY(event: MotionEvent): Float =
+        (0 until event.pointerCount).sumOf { event.getY(it).toDouble() }.toFloat() / event.pointerCount
+
     private fun handleGenericMotion(event: MotionEvent): Boolean {
-        if (event.actionMasked == MotionEvent.ACTION_SCROLL) {
-            VesselInputClient.scroll(
-                event.getAxisValue(MotionEvent.AXIS_HSCROLL).toInt(),
-                event.getAxisValue(MotionEvent.AXIS_VSCROLL).toInt(),
-            )
-            return true
-        }
-        if (event.actionMasked == MotionEvent.ACTION_HOVER_MOVE && width > 0 && height > 0) {
-            VesselInputClient.absolute(
-                (event.x / width.toFloat()).coerceIn(0f, 1f),
-                (event.y / height.toFloat()).coerceIn(0f, 1f),
-                false,
-            )
-            return true
+        when (event.actionMasked) {
+            MotionEvent.ACTION_SCROLL -> {
+                VesselInputClient.scrollPrecise(
+                    event.getAxisValue(MotionEvent.AXIS_HSCROLL),
+                    event.getAxisValue(MotionEvent.AXIS_VSCROLL),
+                )
+                return true
+            }
+            MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE -> {
+                val button = when (event.actionButton) {
+                    MotionEvent.BUTTON_PRIMARY -> BTN_LEFT
+                    MotionEvent.BUTTON_SECONDARY -> BTN_RIGHT
+                    MotionEvent.BUTTON_TERTIARY -> BTN_MIDDLE
+                    else -> return false
+                }
+                VesselInputClient.button(button, event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS)
+                return true
+            }
+            MotionEvent.ACTION_HOVER_MOVE -> {
+                if (width <= 0 || height <= 0) return true
+                VesselInputClient.absolute(
+                    (event.x / width.toFloat()).coerceIn(0f, 1f),
+                    (event.y / height.toFloat()).coerceIn(0f, 1f),
+                    false,
+                )
+                return true
+            }
         }
         return false
     }
