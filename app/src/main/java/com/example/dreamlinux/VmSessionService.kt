@@ -102,7 +102,11 @@ class VmSessionService:Service(){
         )
     }
 
-    private suspend fun refreshState(){refreshAvailability();if(!state.value.running)return;runCatching{runtime.status()}.onSuccess(::applyState)}
+    private suspend fun refreshState(){
+        refreshAvailability()
+        if(!state.value.running&&!state.value.busy)return
+        runCatching{runtime.status()}.onSuccess(::applyState)
+    }
 
     fun configureDisplay(width:Int,height:Int,densityDpi:Int,rate:Float){
         val changed=width!=w||height!=h||densityDpi!=dpi||kotlin.math.abs(rate-refresh)>0.5f
@@ -123,7 +127,11 @@ class VmSessionService:Service(){
                 val o=runtime.startDesktop()
                 launch(Dispatchers.Main){applyState(o)}
             }catch(t:Throwable){
-                launch(Dispatchers.Main){state.value=state.value.copy(lastError=t.message?:t.javaClass.simpleName,message=t.message?:"Startup failed")}
+                val snapshot=runCatching{runtime.status()}.getOrNull()
+                launch(Dispatchers.Main){
+                    if(snapshot!=null)applyState(snapshot)
+                    state.value=state.value.copy(lastError=t.message?:t.javaClass.simpleName,message=t.message?:"Startup failed")
+                }
             }finally{
                 launch(Dispatchers.Main){state.value=state.value.copy(busy=false)}
             }
