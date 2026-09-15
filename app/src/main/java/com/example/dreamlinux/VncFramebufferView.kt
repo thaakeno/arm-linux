@@ -62,7 +62,11 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
             }
         }
     }.apply {
-        setBackgroundColor(Color.BLACK)
+        // SurfaceView owns a separate Surface layer behind the app window. Its
+        // View placeholder must stay transparent so Android can punch the hole
+        // that exposes the Vulkan Surface. Painting this View black can cover a
+        // correctly-presenting Surface and look exactly like a GPU black screen.
+        setBackgroundColor(Color.TRANSPARENT)
         holder.addCallback(this@VncFramebufferView)
         isFocusable = true
         isFocusableInTouchMode = true
@@ -73,6 +77,8 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
     }
 
     init {
+        // Keep only the parent black so there is a clean placeholder before the
+        // Surface is attached; do not paint over the SurfaceView itself.
         setBackgroundColor(Color.BLACK)
         addView(surfaceView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
     }
