@@ -56,14 +56,13 @@ class VmSessionService:Service(){
     override fun onCreate(){super.onCreate();active=this
         runtime=VesselRuntimeController(this){phase,pct,detail->state.value=state.value.copy(stage=phase,progressPercent=pct,progressDetail=detail,message=detail)}
         runtime.configureDisplay(w,h,dpi,refresh)
-        VesselInputClient.bind(runtime)
         val nm=getSystemService(NotificationManager::class.java);nm.createNotificationChannel(NotificationChannel("vessel-runtime","Vessel Linux runtime",NotificationManager.IMPORTANCE_LOW))
         val pi=PendingIntent.getActivity(this,0,Intent(this,VesselActivity::class.java),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         startForeground(1,NotificationCompat.Builder(this,"vessel-runtime").setSmallIcon(android.R.drawable.ic_menu_manage).setContentTitle("Vessel").setContentText("Self-contained ARM64 Linux runtime").setOngoing(true).setContentIntent(pi).build())
         refreshAvailability();scope.launch{while(isActive){refreshState();delay(if(state.value.running||state.value.busy)300 else 1500)}}
     }
     override fun onStartCommand(i:Intent?,f:Int,id:Int):Int{refreshAvailability();return START_STICKY}
-    override fun onDestroy(){if(active===this)active=null;VesselInputClient.bind(null);scope.cancel();VesselWaylandPresenter.shutdown();super.onDestroy()}
+    override fun onDestroy(){if(active===this)active=null;scope.cancel();VesselWaylandPresenter.shutdown();super.onDestroy()}
     override fun onBind(i:Intent?):IBinder?=null
 
     fun refreshAvailability(){
