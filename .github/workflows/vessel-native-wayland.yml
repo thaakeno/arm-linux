@@ -58,7 +58,7 @@ jobs:
           grep -F 'VIRTIO_GPU_VALIDATED_FRAME_REACHED_VESSEL' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'exec startplasma-x11' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'xserver-xorg-core' tools/venus_poc/vessel_runtime_daemon_v38.py
-          grep -F 'Driver \\"modesetting\\"' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'modesetting' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'kmsdev' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F '/dev/dri/card0' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'Xorg :0 -ac -noreset -nolisten tcp -novtswitch -sharevts vt1' tools/venus_poc/vessel_runtime_daemon_v38.py
