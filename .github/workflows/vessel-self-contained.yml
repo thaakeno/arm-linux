@@ -103,6 +103,12 @@ jobs:
           unzip -q "$PREV_APK" 'lib/arm64-v8a/*' 'assets/vessel/runtime-build.txt' -d /tmp/vessel-prev-apk
           cp -a /tmp/vessel-prev-apk/lib/arm64-v8a/. app/src/main/jniLibs/arm64-v8a/
           cp /tmp/vessel-prev-apk/assets/vessel/runtime-build.txt app/src/main/assets/vessel/runtime-build.txt
+          chmod 0755 \
+            app/src/main/jniLibs/arm64-v8a/libvessel_uml.so \
+            app/src/main/jniLibs/arm64-v8a/libvessel_stub.so \
+            app/src/main/jniLibs/arm64-v8a/libvessel_umnet.so \
+            app/src/main/jniLibs/arm64-v8a/libvessel_passt.so \
+            app/src/main/jniLibs/arm64-v8a/libvessel_vhost_input.so
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_uml.so
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_virglrenderer.so
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_epoxy.so
