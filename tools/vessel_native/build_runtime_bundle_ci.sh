@@ -77,14 +77,17 @@ while read -r dep; do case "$dep" in libepoxy.so*) patchelf --replace-needed "$d
 VIRGL_VERSION=1.3.0; VIRGL_TAR="$WORK/virglrenderer.tar.gz"
 download_verified "https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/virglrenderer-$VIRGL_VERSION/virglrenderer-virglrenderer-$VIRGL_VERSION.tar.gz" "56170f8caa1bb642a2624b649e3bcca095ec2834814e5c308efc8a85a709e4ce" "$VIRGL_TAR"
 tar -xzf "$VIRGL_TAR" -C "$WORK"
-VIRGL_SRC="$WORK/virglrenderer-virglrenderer-$VIRGL_VERSION"; INC="$WORK/include/virgl"
-mkdir -p "$INC" "$WORK/pkgconfig"; install -m0644 "$VIRGL_SRC/src/virglrenderer.h" "$INC/virglrenderer.h"
+VIRGL_SRC="$WORK/virglrenderer-virglrenderer-$VIRGL_VERSION"
+INCLUDE_ROOT="$WORK/include"
+INC="$INCLUDE_ROOT/virgl"
+mkdir -p "$INC" "$WORK/pkgconfig"
+install -m0644 "$VIRGL_SRC/src/virglrenderer.h" "$INC/virglrenderer.h"
 IFS=. read -r VMAJ VMIN VMIC <<< "$VIRGL_VERSION"
 sed -e "s/@VIRGL_MAJOR_VERSION@/$VMAJ/g" -e "s/@VIRGL_MINOR_VERSION@/$VMIN/g" -e "s/@VIRGL_MICRO_VERSION@/$VMIC/g" "$VIRGL_SRC/src/virgl-version.h.meson" > "$INC/virgl-version.h"
 cat > "$WORK/pkgconfig/virglrenderer.pc" <<EOF
 prefix=$WORK
 libdir=$OUT
-includedir=$INC
+includedir=$INCLUDE_ROOT
 Name: virglrenderer
 Description: Vessel Android VirGL renderer
 Version: $VIRGL_VERSION
@@ -113,7 +116,7 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/bin/aarch64-linux-a
 export CC_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android29-clang"
 export CXX_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android29-clang++"
 export AR_aarch64_linux_android="$TOOLCHAIN/bin/llvm-ar"
-export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android29 --sysroot=$TOOLCHAIN/sysroot -I$INC"
+export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android29 --sysroot=$TOOLCHAIN/sysroot -I$INCLUDE_ROOT"
 CLANG_SO="$(find /usr/lib -name 'libclang.so*' -print -quit 2>/dev/null || true)"; [ -n "$CLANG_SO" ] || { echo "libclang not found" >&2; exit 5; }
 export LIBCLANG_PATH="$(dirname "$CLANG_SO")"
 export RUSTFLAGS="-C link-arg=-Wl,-rpath,\$ORIGIN"
