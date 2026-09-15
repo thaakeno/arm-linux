@@ -174,6 +174,8 @@ class VmSessionService : Service() {
                 "Debian disk is already in use by another UML process"
             e.contains("virtio-gpu DRM renderer", ignoreCase = true) ->
                 "VirtIO GPU did not initialize inside Debian"
+            e.contains("No non-black VirtIO GPU frame", ignoreCase = true) ->
+                "GPU rendered, but only blank scanouts reached Vessel"
             e.contains("No VirtIO GPU frame", ignoreCase = true) ->
                 "GPU rendered, but no frame reached Vessel"
             e.contains("kmscube", ignoreCase = true) ->
@@ -214,13 +216,22 @@ class VmSessionService : Service() {
         val running = obj.optBoolean("running", false)
         val guest = obj.optBoolean("guestReady", false)
         val frameReached = obj.optBoolean("desktopReady", false)
+        val frameValidated = obj.optBoolean("frameContentValidated", frameReached)
         val phase = obj.optString("progressPhase", state.value.progressPhase)
         val candidateError = obj.optString("error").ifBlank { obj.optString("lastError") }
         val rawError = if (!ok || phase == "error") candidateError else ""
         val error = shortError(rawError)
         val presenter = VesselWaylandPresenter.status()
-        val actuallyPresented = presenter.startsWith("presenting-")
-        val percent = obj.optInt("progressPercent", state.value.progressPercent)
+        // Do not call a black/blank Surface "VISIBLE" just because Vulkan
+        // successfully presented something. Protocol 38 v2 only marks the
+        // runtime frame ready after non-black RGB content was read back.
+        val actuallyPresented = frameValidated && presenter.startsWith("presenting-")
+        val runtimePercent = obj.optInt("progressPercent", state.value.progressPercent)
+        val percent = when {
+            actuallyPresented -> 100
+            runtimePercent in 0..100 -> minOf(runtimePercent, 99)
+            else -> runtimePercent
+        }
         val rawDetail = obj.optString("progressDetail", state.value.progressDetail).ifBlank { state.value.progressDetail }
         val detail = when (phase) {
             "queued" -> "Starting Vessel VirtIO GPU runtime"
@@ -230,8 +241,15 @@ class VmSessionService : Service() {
             "debian_ready" -> "Debian + VirtIO GPU ready"
             "display_deps" -> "Preparing direct DRM display"
             "display_start" -> "Starting accelerated DRM/KMS scanout"
-            "display_frame" -> "Waiting for GPU frame in Vessel"
-            "desktop_ready" -> if (actuallyPresented) "GPU frame visible on Android Surface" else "GPU frame reached Vessel; open Desktop to present it"
+            "display_frame" -> "Waiting for non-black GPU scanout"
+            "frame_validated" -> if (actuallyPresented)
+                "Validated GPU frame visible on Android Surface"
+            else
+                "Validated GPU frame reached Vessel; waiting for Android present"
+            "desktop_ready" -> if (actuallyPresented)
+                "GPU frame visible on Android Surface"
+            else
+                "GPU frame reached Vessel; open Desktop to present it"
             else -> rawDetail
         }
         val uptime = obj.optLong("uptimeMs", if (running) state.value.uptimeMs else 0L)
@@ -240,7 +258,8 @@ class VmSessionService : Service() {
         val message = when {
             error.isNotBlank() -> error
             actuallyPresented -> "$desktopName visible · ${formatUptime(uptime)}"
-            frameReached -> "GPU frame reached Vessel · open Desktop"
+            frameValidated -> "Validated GPU frame reached Vessel · open Display"
+            frameReached -> "GPU frame reached Vessel · validating pixels"
             detail.isNotBlank() && running -> "$detail · ${formatUptime(uptime)}"
             fallbackMessage != null -> fallbackMessage
             guest -> "Debian ARM64 + VirtIO GPU ready · ${formatUptime(uptime)}"
@@ -253,13 +272,14 @@ class VmSessionService : Service() {
             running = running,
             guestReady = guest,
             displayReady = actuallyPresented,
-            frameReachedApp = frameReached,
+            frameReachedApp = frameValidated,
             debianStarting = running && !guest,
             kdeInstalled = actuallyPresented,
             kdeInstalling = running && !actuallyPresented,
             kdeStage = when {
-                actuallyPresented -> "Android Surface presenting GPU frames"
-                frameReached -> "Frame reached Vessel; waiting for Surface"
+                actuallyPresented -> "Android Surface presenting validated GPU frames"
+                frameValidated -> "Validated frame reached Vessel; waiting for Surface present"
+                frameReached -> "Frame reached Vessel; validating pixels"
                 running -> detail
                 else -> "not started"
             },
@@ -279,6 +299,7 @@ class VmSessionService : Service() {
             uptimeMs = if (running) uptime else 0L,
             stage = when {
                 actuallyPresented -> "display_presented"
+                frameValidated -> "validated_frame_reached_app"
                 frameReached -> "frame_reached_app"
                 phase.isNotBlank() && phase != "idle" -> phase
                 guest -> "debian_ready"
