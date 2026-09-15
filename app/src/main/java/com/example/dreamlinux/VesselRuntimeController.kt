@@ -12,8 +12,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.net.ServerSocket
-import java.net.Socket
 import java.net.URL
 import java.security.MessageDigest
 import java.util.Base64
@@ -24,9 +22,10 @@ import java.util.zip.GZIPInputStream
 import kotlin.math.roundToInt
 
 /**
- * Protocol 39: the complete rootless host runtime lives in Vessel's Android UID.
- * There is no Termux process, cross-app frame relay, VNC, RGB transport or
- * software-render fallback in this controller.
+ * Protocol 39: Vessel owns UML, VirtIO GPU, VirtIO input and presentation in
+ * one Android UID. Input is Android -> native sender -> vhost-user
+ * virtio-input -> Linux evdev/libinput. There is no guest TCP/uinput bridge,
+ * VNC, RGB frame transport, Termux dependency or software-render fallback.
  */
 class VesselRuntimeController(
     private val context: Context,
@@ -34,17 +33,34 @@ class VesselRuntimeController(
 ) {
     companion object {
         const val PROTOCOL = 39
-        const val REVISION = "v39-self-contained-dmabuf-r4"
+        const val REVISION = "v39-self-contained-dmabuf-virtio-input-r1"
         const val DISPLAY_TRANSPORT = "vhost-user-gpu-dmabuf-same-uid-v1"
+        const val INPUT_TRANSPORT = "virtio-input-vhost-user-same-uid-v1"
         private const val ROOTFS_URL = "https://github.com/zalexdev/linux-um-arm64/releases/download/prebuilt-20260816/debian-docker.ext4.gz"
         private const val ROOTFS_SHA256 = "2807979f76021fadf1f76f0c827fbe1eab4df51e33bfeca0c840c5181c610be3"
         private const val GUEST_READY_BANNER = "Type 'exit' to shut the kernel down and return to Android."
+        private const val VIRTIO_GPU_ID = 16
+        private const val VIRTIO_INPUT_ID = 18
     }
+
+    private data class InputBackendSpec(
+        val label: String,
+        val device: String,
+        val vhostSocket: File,
+        val controlSocket: File,
+    )
 
     private val runtimeDir = File(context.filesDir, "vessel-runtime").apply { mkdirs() }
     private val gpuSocket = File(runtimeDir, "vessel-vugpu.sock")
     val displaySocket = File(runtimeDir, "vessel-vugpu.sock.display")
+    private val touchVhostSocket = File(runtimeDir, "vessel-input-touch.sock")
+    private val pointerVhostSocket = File(runtimeDir, "vessel-input-pointer.sock")
+    private val keyboardVhostSocket = File(runtimeDir, "vessel-input-keyboard.sock")
+    private val touchControlSocket = File(runtimeDir, "vessel-input-touch.ctl")
+    private val pointerControlSocket = File(runtimeDir, "vessel-input-pointer.ctl")
+    private val keyboardControlSocket = File(runtimeDir, "vessel-input-keyboard.ctl")
     private val nativeDir = File(context.applicationInfo.nativeLibraryDir)
+
     val machineDir: File = File(
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
         "LinuxPC/Vessel-Debian",
@@ -55,8 +71,8 @@ class VesselRuntimeController(
     val guestMemoryMb: Int by lazy {
         val info = ActivityManager.MemoryInfo()
         context.getSystemService(ActivityManager::class.java)?.getMemoryInfo(info)
-        val totalMb = (info.totalMem / (1024L * 1024L)).toInt().coerceAtLeast(6144)
-        (totalMb - 4096).coerceIn(3072, 6144)
+        val totalMb = (info.totalMem / (1024L * 1024L)).toInt().coerceAtLeast(4096)
+        ((totalMb * 3) / 10).coerceIn(2048, 4096)
     }
 
     private val umlBin get() = File(nativeDir, "libvessel_uml.so")
@@ -64,11 +80,19 @@ class VesselRuntimeController(
     private val umnetBin get() = File(nativeDir, "libvessel_umnet.so")
     private val passtBin get() = File(nativeDir, "libvessel_passt.so")
     private val gpuBin get() = File(nativeDir, "libvessel_vhost_gpu.so")
+    private val inputBin get() = File(nativeDir, "libvessel_vhost_input.so")
     private val virglLib get() = File(nativeDir, "libvessel_virglrenderer.so")
     private val epoxyLib get() = File(nativeDir, "libvessel_epoxy.so")
     private val eglAngle get() = File(nativeDir, "libEGL_angle.so")
     private val glesAngle get() = File(nativeDir, "libGLESv2_angle.so")
     private val angleSelector get() = File(nativeDir, "libvessel_angle_select.so")
+
+    private val inputSpecs: List<InputBackendSpec>
+        get() = listOf(
+            InputBackendSpec("touch", "touch", touchVhostSocket, touchControlSocket),
+            InputBackendSpec("pointer", "pointer", pointerVhostSocket, pointerControlSocket),
+            InputBackendSpec("keyboard", "keyboard", keyboardVhostSocket, keyboardControlSocket),
+        )
 
     @Volatile private var displayWidth = 1280
     @Volatile private var displayHeight = 720
@@ -77,14 +101,17 @@ class VesselRuntimeController(
 
     @Volatile private var gpuProcess: Process? = null
     @Volatile private var umlProcess: Process? = null
+    @Volatile private var inputProcesses: List<Process> = emptyList()
     @Volatile private var running = false
     @Volatile private var guestReady = false
+    @Volatile private var inputReady = false
     @Volatile private var desktopReady = false
     @Volatile private var lastError = ""
     @Volatile private var startedAt = 0L
+    @Volatile private var lastInputFailure = ""
+
     private val logLock = Any()
     private val log = StringBuilder()
-
     private val commandLock = Any()
     private val consoleLock = Any()
     @Volatile private var consoleWriter: BufferedWriter? = null
@@ -94,18 +121,10 @@ class VesselRuntimeController(
     private val commandId = AtomicLong()
     @Volatile private var guestShellReady = CompletableFuture<Unit>()
 
-    private val inputLock = Any()
-    @Volatile private var inputGuest: Socket? = null
-    @Volatile private var inputOut: BufferedWriter? = null
-    @Volatile private var inputServer: ServerSocket? = null
-    @Volatile private var inputHello = false
-    @Volatile private var lastInputAck = 0L
-    private val inputSequence = AtomicLong()
-
     fun hasStorageAccess(): Boolean = Environment.isExternalStorageManager()
 
     private fun runtimeFiles(): List<File> = listOf(
-        umlBin, stubBin, umnetBin, passtBin, gpuBin,
+        umlBin, stubBin, umnetBin, passtBin, gpuBin, inputBin,
         virglLib, epoxyLib, eglAngle, glesAngle, angleSelector,
     )
 
@@ -145,8 +164,7 @@ class VesselRuntimeController(
                 runCatching {
                     FileOutputStream(persistentLog, true).bufferedWriter().use { it.write(text) }
                     if (persistentLog.length() > 2_000_000L) {
-                        val tail = persistentLog.readText().takeLast(1_000_000)
-                        persistentLog.writeText(tail)
+                        persistentLog.writeText(persistentLog.readText().takeLast(1_000_000))
                     }
                 }
             }
@@ -154,13 +172,15 @@ class VesselRuntimeController(
     }
 
     private fun logTail(): String = synchronized(logLock) { log.takeLast(180_000).toString() }
+    private fun inputBackendsAlive(): Boolean = inputProcesses.size == inputSpecs.size && inputProcesses.all { it.isAlive }
 
     private fun baseState(ok: Boolean = true): JSONObject = JSONObject()
         .put("ok", ok)
         .put("protocolVersion", PROTOCOL)
         .put("runtimeRevision", REVISION)
         .put("displayTransport", DISPLAY_TRANSPORT)
-        .put("backend", "UML_VIRTIO_GPU_NATIVE")
+        .put("inputTransport", INPUT_TRANSPORT)
+        .put("backend", "UML_VIRTIO_GPU_VIRTIO_INPUT_NATIVE")
         .put("renderer", "KDE Plasma/Xorg -> Mesa VirGL -> vhost-device-gpu -> virglrenderer -> ANGLE -> Adreno")
         .put("rendererMode", "virgl-opengl")
         .put("translationLayer", "VirGL")
@@ -174,8 +194,8 @@ class VesselRuntimeController(
         .put("guestReady", guestReady)
         .put("desktopReady", desktopReady)
         .put("frameContentValidated", VesselWaylandPresenter.status().startsWith("presenting-dmabuf"))
-        .put("inputConnected", inputHello)
-        .put("inputAck", lastInputAck)
+        .put("inputConnected", inputReady && inputBackendsAlive())
+        .put("inputSender", VesselVirtioInput.status())
         .put("displayWidth", displayWidth)
         .put("displayHeight", displayHeight)
         .put("displayDpi", displayDpi)
@@ -187,6 +207,7 @@ class VesselRuntimeController(
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
         val presenter = VesselWaylandPresenter.status()
         if (presenter.startsWith("presenting-dmabuf")) desktopReady = true
+        if (inputReady && !inputBackendsAlive()) inputReady = false
         baseState().put("presenter", presenter)
     }
 
@@ -230,8 +251,7 @@ class VesselRuntimeController(
                     if (n < 0) break
                     out.write(b, 0, n)
                     done += n
-                    val pct = (4 + (done / 4_000_000L).toInt()).coerceAtMost(24)
-                    progress("disk_download", pct, "Downloading persistent Debian image")
+                    progress("disk_download", (4 + (done / 4_000_000L).toInt()).coerceAtMost(24), "Downloading persistent Debian image")
                 }
             }
         }
@@ -246,80 +266,70 @@ class VesselRuntimeController(
         gz.delete()
     }
 
-    private fun startInputServer() {
-        if (inputServer != null) return
-        val server = ServerSocket(47633, 2, java.net.InetAddress.getByName("127.0.0.1"))
-        inputServer = server
-        Thread({
-            while (!server.isClosed) {
-                try {
-                    val socket = server.accept().apply { tcpNoDelay = true; keepAlive = true }
-                    synchronized(inputLock) {
-                        runCatching { inputGuest?.close() }
-                        inputGuest = socket
-                        inputOut = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8), 16 * 1024)
-                        inputHello = false
-                    }
-                    append("[input] guest uinput channel connected\n")
-                    Thread({
-                        runCatching {
-                            socket.getInputStream().bufferedReader().forEachLine { line ->
-                                when {
-                                    line.startsWith("HELLO") -> {
-                                        inputHello = true
-                                        append("[input] $line\n")
-                                    }
-                                    line.startsWith("ACK ") -> {
-                                        line.substringAfter("ACK ").trim().toLongOrNull()?.let { lastInputAck = maxOf(lastInputAck, it) }
-                                    }
-                                }
-                            }
-                        }
-                        synchronized(inputLock) {
-                            if (inputGuest === socket) {
-                                inputGuest = null
-                                inputOut = null
-                                inputHello = false
-                            }
-                        }
-                    }, "vessel-input-acks").apply { isDaemon = true; start() }
-                } catch (_: Throwable) {
-                    if (!server.isClosed) Thread.sleep(50)
+    private fun stopInputBackends() {
+        inputProcesses.forEach { p -> runCatching { if (p.isAlive) p.destroyForcibly() } }
+        inputProcesses = emptyList()
+        inputReady = false
+        inputSpecs.forEach { spec ->
+            spec.vhostSocket.delete()
+            spec.controlSocket.delete()
+        }
+    }
+
+    private fun startInputBackends() {
+        stopInputBackends()
+        val started = mutableListOf<Process>()
+        try {
+            inputSpecs.forEach { spec ->
+                spec.vhostSocket.delete()
+                spec.controlSocket.delete()
+                append("[input] starting ${spec.label} virtio-input backend\n")
+                val pb = ProcessBuilder(
+                    inputBin.absolutePath,
+                    "--socket-path", spec.vhostSocket.absolutePath,
+                    "--control-path", spec.controlSocket.absolutePath,
+                    "--device", spec.device,
+                ).redirectErrorStream(true)
+                pb.environment()["RUST_LOG"] = "info"
+                val p = pb.start()
+                started += p
+                Thread({
+                    p.inputStream.bufferedReader().forEachLine { append("[input-${spec.label}] $it\n") }
+                }, "vessel-input-${spec.label}-log").apply { isDaemon = true; start() }
+
+                var tries = 0
+                while ((!spec.vhostSocket.exists() || !spec.controlSocket.exists()) && tries++ < 150) {
+                    if (!p.isAlive) error("${spec.label} virtio-input backend exited rc=${runCatching { p.exitValue() }.getOrDefault(-1)}")
+                    Thread.sleep(20)
+                }
+                check(spec.vhostSocket.exists() && spec.controlSocket.exists()) {
+                    "${spec.label} virtio-input sockets did not become ready"
                 }
             }
-        }, "vessel-input-server").apply { isDaemon = true; start() }
+            inputProcesses = started.toList()
+            VesselVirtioInput.configure(
+                touchControlSocket.absolutePath,
+                pointerControlSocket.absolutePath,
+                keyboardControlSocket.absolutePath,
+            )
+            append("[input] native virtio-input backends ready\n")
+        } catch (t: Throwable) {
+            started.forEach { p -> runCatching { if (p.isAlive) p.destroyForcibly() } }
+            stopInputBackends()
+            throw t
+        }
     }
 
-    private fun sendInput(type: String, values: Map<String, Any>): Long {
-        val seq = inputSequence.incrementAndGet()
-        val o = JSONObject().put("t", type).put("seq", seq)
-        values.forEach { (k, v) -> o.put(k, v) }
-        synchronized(inputLock) {
-            val out = inputOut ?: return seq
-            try {
-                out.write(o.toString()); out.newLine(); out.flush()
-            } catch (_: Throwable) {
-                runCatching { inputGuest?.close() }
-                inputGuest = null; inputOut = null; inputHello = false
+    fun input(type: String, values: Map<String, Any>) {
+        if (!running || !inputReady) return
+        if (!VesselVirtioInput.send(type, values)) {
+            inputReady = false
+            val status = VesselVirtioInput.status()
+            if (status != lastInputFailure) {
+                lastInputFailure = status
+                append("[input] native virtio-input send failed: $status\n")
             }
         }
-        return seq
-    }
-
-    fun input(type: String, values: Map<String, Any>) { sendInput(type, values) }
-
-    private fun probeInputDelivery() {
-        var connected = inputHello
-        var tries = 0
-        while (!connected && tries++ < 100) {
-            Thread.sleep(50)
-            connected = inputHello
-        }
-        check(connected) { "Guest input channel did not connect" }
-        val seq = sendInput("ping", emptyMap())
-        tries = 0
-        while (lastInputAck < seq && tries++ < 100) Thread.sleep(20)
-        check(lastInputAck >= seq) { "Guest input channel connected but did not ACK events" }
     }
 
     private fun startGpu() {
@@ -369,7 +379,11 @@ class VesselRuntimeController(
             umlBin.absolutePath,
             "mem=${guestMemoryMb}M", "ncpus=6", "seccomp=on",
             "ubd0=${disk.absolutePath}", "root=/dev/ubda", "rw", "init=/umarm-init",
-            "stub_exe=${stubBin.absolutePath}", "virtio_uml.device=${gpuSocket.absolutePath}:16",
+            "stub_exe=${stubBin.absolutePath}",
+            "virtio_uml.device=${gpuSocket.absolutePath}:$VIRTIO_GPU_ID",
+            "virtio_uml.device=${touchVhostSocket.absolutePath}:$VIRTIO_INPUT_ID",
+            "virtio_uml.device=${pointerVhostSocket.absolutePath}:$VIRTIO_INPUT_ID",
+            "virtio_uml.device=${keyboardVhostSocket.absolutePath}:$VIRTIO_INPUT_ID",
             "panic=-1", "con=null", "con0=fd:0,fd:1", "console=tty0",
         )
         val p = ProcessBuilder(cmd).directory(machineDir).redirectErrorStream(true).start()
@@ -407,6 +421,8 @@ class VesselRuntimeController(
             guestShellReady.completeExceptionally(IllegalStateException("UML exited before guest shell was ready (rc=$rc)"))
             append("[host] UML launcher exited rc=$rc\n")
             running = false
+            guestReady = false
+            inputReady = false
         }, "vessel-uml-console").apply { isDaemon = true; start() }
     }
 
@@ -426,7 +442,9 @@ class VesselRuntimeController(
             check(pendingFuture == null) { "Another guest command is running" }
             val marker = "__VESSEL_${commandId.incrementAndGet()}__"
             future = CompletableFuture()
-            pendingMarker = marker; pendingFuture = future; pendingOutput.setLength(0)
+            pendingMarker = marker
+            pendingFuture = future
+            pendingOutput.setLength(0)
             consoleWriter!!.apply {
                 write("$command\nprintf '$marker:%s\\n' \$?\n")
                 flush()
@@ -437,33 +455,51 @@ class VesselRuntimeController(
         } finally {
             if (!future.isDone) synchronized(consoleLock) {
                 if (pendingFuture === future) {
-                    pendingMarker = null; pendingFuture = null; pendingOutput.setLength(0)
+                    pendingMarker = null
+                    pendingFuture = null
+                    pendingOutput.setLength(0)
                 }
             }
         }
     }
 
-    private fun uploadInputAgent() {
-        val script = context.assets.open("vessel/guest_input_agent.py").bufferedReader().use { it.readText() }
-        val encoded = Base64.getEncoder().encodeToString(script.toByteArray())
-        val cmd = "printf '%s' '$encoded' | base64 -d >/root/vessel-input-agent.py; " +
-            "pkill -f '[v]essel-input-agent.py' 2>/dev/null || true; " +
-            "VESSEL_INPUT_HOST=10.0.2.2 VESSEL_INPUT_PORT=47633 nohup python3 /root/vessel-input-agent.py >/tmp/vessel-input.log 2>&1 </dev/null &"
-        val (rc, out) = guestBlocking(cmd, 30)
-        check(rc == 0) { "input agent failed: $out" }
-        probeInputDelivery()
+    private fun awaitVirtioInputDevices() {
+        check(inputBackendsAlive()) { "VirtIO input backend process exited before guest enumeration" }
+        var ready = false
+        var last = ""
+        var tries = 0
+        while (!ready && tries++ < 100) {
+            val result = guestBlocking(
+                "test -r /proc/bus/input/devices && " +
+                    "grep -Fq 'Vessel Touchscreen' /proc/bus/input/devices && " +
+                    "grep -Fq 'Vessel Trackpad' /proc/bus/input/devices && " +
+                    "grep -Fq 'Vessel Keyboard' /proc/bus/input/devices",
+                5,
+            )
+            ready = result.first == 0
+            last = result.second
+            if (!ready) Thread.sleep(100)
+        }
+        check(ready) { "Linux virtio-input devices did not appear: ${last.takeLast(3000)}" }
+        check(VesselVirtioInput.send("rel", mapOf("dx" to 0, "dy" to 0))) {
+            "Android -> virtio-input control path failed: ${VesselVirtioInput.status()}"
+        }
+        check(inputBackendsAlive()) { "VirtIO input backend exited during input validation" }
+        inputReady = true
+        lastInputFailure = ""
+        append("[input] Linux evdev devices ready; sender=${VesselVirtioInput.status()}\n")
     }
 
     private fun ensurePlasma() {
         progress("plasma", 55, "Checking KDE Plasma desktop")
         val check = guestBlocking(
-            "command -v startplasma-x11 >/dev/null && command -v Xorg >/dev/null && command -v xrandr >/dev/null && (command -v cvt >/dev/null || command -v xcvt >/dev/null) && test -e /usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so",
+            "command -v startplasma-x11 >/dev/null && command -v Xorg >/dev/null && command -v xrandr >/dev/null && command -v xinput >/dev/null && (command -v cvt >/dev/null || command -v xcvt >/dev/null) && test -e /usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so",
             20,
         )
         if (check.first == 0) return
         progress("plasma_install", 56, "Installing KDE Plasma once into persistent disk")
         val cmd = "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y --no-install-recommends " +
-            "plasma-workspace plasma-desktop kwin-x11 xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xcvt"
+            "plasma-workspace plasma-desktop kwin-x11 xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt"
         val (rc, out) = guestBlocking(cmd, 1800)
         check(rc == 0) { "Plasma install failed: ${out.takeLast(12000)}" }
     }
@@ -505,7 +541,10 @@ class VesselRuntimeController(
             "uid=\$(id -u vessel); gid=\$(id -g vessel); mkdir -p /run/user/\$uid; chown \$uid:\$gid /run/user/\$uid; chmod 700 /run/user/\$uid; test -c /dev/tty1 || mknod -m 620 /dev/tty1 c 4 1; " +
             "cat >/etc/X11/xorg.conf.d/99-vessel.conf <<'XEOF'\n" +
             "Section \"ServerFlags\"\n Option \"AutoAddDevices\" \"true\"\n Option \"DontVTSwitch\" \"true\"\nEndSection\n" +
-            "Section \"Device\"\n Identifier \"Vessel GPU\"\n Driver \"modesetting\"\n Option \"kmsdev\" \"/dev/dri/card0\"\n Option \"AccelMethod\" \"glamor\"\n Option \"SWcursor\" \"false\"\nEndSection\nXEOF\n"
+            "Section \"Device\"\n Identifier \"Vessel GPU\"\n Driver \"modesetting\"\n Option \"kmsdev\" \"/dev/dri/card0\"\n Option \"AccelMethod\" \"glamor\"\n Option \"SWcursor\" \"true\"\nEndSection\n" +
+            "Section \"InputClass\"\n Identifier \"Vessel Trackpad\"\n MatchProduct \"Vessel Trackpad\"\n Driver \"libinput\"\nEndSection\n" +
+            "Section \"InputClass\"\n Identifier \"Vessel Touchscreen\"\n MatchProduct \"Vessel Touchscreen\"\n Driver \"libinput\"\nEndSection\n" +
+            "Section \"InputClass\"\n Identifier \"Vessel Keyboard\"\n MatchProduct \"Vessel Keyboard\"\n Driver \"libinput\"\nEndSection\nXEOF\n"
         val (prc, pout) = guestBlocking(prep, 50)
         check(prc == 0) { "desktop prep failed: $pout" }
 
@@ -519,9 +558,13 @@ class VesselRuntimeController(
             "rm -f /tmp/.X0-lock /tmp/.X11-unix/X0; nohup setsid sh -c 'exec </dev/tty1 >/dev/tty1 2>&1; exec env LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl Xorg :0 -ac -noreset -nolisten tcp -novtswitch -sharevts vt1' >/tmp/vessel-xorg.log 2>&1 & echo \$! >/tmp/vessel-xorg.pid; " +
             "for i in \$(seq 1 160); do test -S /tmp/.X11-unix/X0 && break; sleep .1; done; test -S /tmp/.X11-unix/X0; " +
             "DISPLAY=:0 LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl glxinfo -B >/tmp/vessel-glx.log 2>&1; ! grep -Eqi 'llvmpipe|softpipe|swrast|software rasterizer' /tmp/vessel-glx.log; " +
+            "for i in \$(seq 1 50); do DISPLAY=:0 xinput list --name-only >/tmp/vessel-xinput.log 2>&1; grep -Fq 'Vessel Trackpad' /tmp/vessel-xinput.log && grep -Fq 'Vessel Touchscreen' /tmp/vessel-xinput.log && grep -Fq 'Vessel Keyboard' /tmp/vessel-xinput.log && break; sleep .1; done; " +
+            "DISPLAY=:0 xinput list --name-only >/tmp/vessel-xinput.log 2>&1; " +
+            "grep -Fq 'Vessel Trackpad' /tmp/vessel-xinput.log && grep -Fq 'Vessel Touchscreen' /tmp/vessel-xinput.log && grep -Fq 'Vessel Keyboard' /tmp/vessel-xinput.log || { cat /tmp/vessel-xinput.log; exit 43; }; " +
             "nohup su -l vessel -c \"DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/\$(id -u vessel) dbus-run-session -- /usr/local/bin/vessel-plasma-session\" >/tmp/vessel-plasma.log 2>&1 </dev/null &"
         val (rc, out) = guestBlocking(launch, 60)
         check(rc == 0) { "Plasma launch failed: ${out.takeLast(12000)}" }
+        append("[input] Xorg/libinput attached all Vessel devices\n")
         applyDisplayModeBlocking()
     }
 
@@ -534,8 +577,9 @@ class VesselRuntimeController(
             persistentLog.writeText("Vessel ${REVISION} startup\n")
             append("[host] machine=${machineDir.absolutePath}\n")
             append("[host] presenter=${VesselWaylandPresenter.status()}\n")
-            startInputServer()
-            progress("gpu", 30, "Starting native VirtIO GPU")
+            progress("input_backend", 28, "Starting native VirtIO input devices")
+            startInputBackends()
+            progress("gpu", 31, "Starting native VirtIO GPU")
             startGpu()
             progress("uml", 36, "Booting Debian ARM64 · ${guestMemoryMb} MiB")
             startUml()
@@ -546,19 +590,12 @@ class VesselRuntimeController(
             val ready = guestBlocking("stty -echo 2>/dev/null || true; test -c /dev/dri/card0 && test -c /dev/dri/renderD128", 30)
             check(ready.first == 0) { "Debian/VirtIO GPU did not become ready: ${ready.second.takeLast(8000)}" }
             guestReady = true
-            progress("input", 48, "Starting verified evdev/libinput devices")
-            uploadInputAgent()
-            var inputReady = false
-            var tries = 0
-            while (!inputReady && tries++ < 50) {
-                inputReady = guestBlocking("grep -q 'Vessel Trackpad' /proc/bus/input/devices && grep -q 'Vessel Touchscreen' /proc/bus/input/devices", 5).first == 0
-                if (!inputReady) Thread.sleep(100)
-            }
-            check(inputReady) { "Vessel evdev input devices did not appear" }
+            progress("input", 48, "Verifying native VirtIO evdev/libinput devices")
+            awaitVirtioInputDevices()
             ensurePlasma()
             launchDesktop()
             progress("frame", 88, "Waiting for direct DMA-BUF scanout")
-            tries = 0
+            var tries = 0
             while (tries++ < 240) {
                 val ps = VesselWaylandPresenter.status()
                 if (ps.startsWith("presenting-dmabuf")) {
@@ -597,12 +634,14 @@ class VesselRuntimeController(
         }
         runCatching { if (umlProcess?.isAlive == true) umlProcess?.destroyForcibly() }
         runCatching { gpuProcess?.destroyForcibly() }
-        umlProcess = null; gpuProcess = null; consoleWriter = null
-        running = false; guestReady = false; desktopReady = false
-        synchronized(inputLock) {
-            runCatching { inputGuest?.close() }
-            inputGuest = null; inputOut = null; inputHello = false
-        }
+        umlProcess = null
+        gpuProcess = null
+        consoleWriter = null
+        running = false
+        guestReady = false
+        inputReady = false
+        desktopReady = false
+        stopInputBackends()
         gpuSocket.delete()
     }
 
