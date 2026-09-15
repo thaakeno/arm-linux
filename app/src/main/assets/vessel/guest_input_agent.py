@@ -29,7 +29,7 @@ kbd=Dev('Vessel Keyboard',ev=(EV_KEY,),keys=tuple(range(1,256)))
 while True:
  try:
   with socket.create_connection((HOST,PORT),timeout=5) as s:
-   s.settimeout(None); s.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1); f=s.makefile('r',encoding='utf-8',errors='replace'); s.sendall(b'HELLO uinput-v39\n')
+   s.settimeout(None);s.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1);f=s.makefile('r',encoding='utf-8',errors='replace');s.sendall(b'HELLO uinput-v39-r2\n')
    for line in f:
     try:m=json.loads(line)
     except Exception:continue
@@ -52,7 +52,8 @@ while True:
     elif t=='key':
      c=int(m.get('code',0))
      if 0<c<256:kbd.e(EV_KEY,c,1 if m.get('down') else 0)
-    if seq and seq%32==0:
+    # Ping is intentionally side-effect free and proves the Android->guest path.
+    if seq and (t=='ping' or seq%16==0):
      try:s.sendall(('ACK %d\n'%seq).encode())
      except Exception:pass
  except Exception:
