@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-import fcntl,json,os,socket,struct,time
+import fcntl,json,os,shutil,socket,struct,subprocess,time
 HOST=os.environ.get('VESSEL_INPUT_HOST','10.0.2.2'); PORT=int(os.environ.get('VESSEL_INPUT_PORT','47633'))
+LOG='/tmp/vessel-input.log'
 EV_SYN=0;EV_KEY=1;EV_REL=2;EV_ABS=3;SYN_REPORT=0;REL_X=0;REL_Y=1;REL_HWHEEL=6;REL_WHEEL=8;ABS_X=0;ABS_Y=1
 BTN_LEFT=0x110;BTN_RIGHT=0x111;BTN_MIDDLE=0x112;BTN_TOUCH=0x14a;BUS_VIRTUAL=6;PROP_POINTER=0;PROP_DIRECT=1;U=ord('U')
+def log(s):
+ try:
+  with open(LOG,'a',encoding='utf-8') as f:f.write('%.3f %s\n'%(time.monotonic(),s))
+ except Exception:pass
 def ioc(d,t,n,s):return (d<<30)|(s<<16)|(t<<8)|n
 def iow(n):return ioc(1,U,n,4)
 def io(n):return ioc(0,U,n,0)
@@ -23,13 +28,46 @@ class Dev:
   os.write(self.fd,struct.pack('llHHi',0,0,t,c,int(v)))
   if sync:os.write(self.fd,struct.pack('llHHi',0,0,EV_SYN,SYN_REPORT,0))
  def sync(self):self.e(EV_SYN,SYN_REPORT,0,False)
-touch=Dev('Vessel Touchscreen',ev=(EV_KEY,EV_ABS),keys=(BTN_TOUCH,),abss=(ABS_X,ABS_Y),props=(PROP_DIRECT,),amax={ABS_X:32767,ABS_Y:32767})
-ptr=Dev('Vessel Trackpad',ev=(EV_KEY,EV_REL),keys=(BTN_LEFT,BTN_RIGHT,BTN_MIDDLE),rels=(REL_X,REL_Y,REL_WHEEL,REL_HWHEEL),props=(PROP_POINTER,))
-kbd=Dev('Vessel Keyboard',ev=(EV_KEY,),keys=tuple(range(1,256)))
+def setup_network():
+ if not HOST.startswith('10.0.2.'):
+  return
+ ifaces=[x for x in os.listdir('/sys/class/net') if x!='lo']
+ if not ifaces:
+  raise RuntimeError('no UML network interface found')
+ iface=ifaces[0]
+ ip=shutil.which('ip')
+ if not ip:
+  for p in ('/usr/sbin/ip','/sbin/ip','/usr/bin/ip','/bin/ip'):
+   if os.path.exists(p):ip=p;break
+ if not ip:
+  raise RuntimeError('iproute2/ip command missing in guest')
+ cmds=(
+  [ip,'link','set','dev',iface,'up'],
+  [ip,'addr','replace','10.0.2.15/24','dev',iface],
+  [ip,'route','replace','default','via','10.0.2.2','dev',iface],
+ )
+ for cmd in cmds:
+  cp=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+  if cp.returncode:raise RuntimeError('%s rc=%d %s'%(' '.join(cmd),cp.returncode,cp.stdout.strip()))
+ try:
+  with open('/etc/resolv.conf','w',encoding='utf-8') as f:f.write('nameserver 1.1.1.1\nnameserver 8.8.8.8\n')
+ except Exception as e:log('resolv.conf warning: %r'%e)
+ log('network ready iface=%s addr=10.0.2.15 gateway=10.0.2.2'%iface)
+try:
+ open(LOG,'w').close()
+ setup_network()
+ touch=Dev('Vessel Touchscreen',ev=(EV_KEY,EV_ABS),keys=(BTN_TOUCH,),abss=(ABS_X,ABS_Y),props=(PROP_DIRECT,),amax={ABS_X:32767,ABS_Y:32767})
+ ptr=Dev('Vessel Trackpad',ev=(EV_KEY,EV_REL),keys=(BTN_LEFT,BTN_RIGHT,BTN_MIDDLE),rels=(REL_X,REL_Y,REL_WHEEL,REL_HWHEEL),props=(PROP_POINTER,))
+ kbd=Dev('Vessel Keyboard',ev=(EV_KEY,),keys=tuple(range(1,256)))
+ log('uinput devices ready: touchscreen + trackpad + keyboard')
+except Exception as e:
+ log('startup failed: %s: %s'%(type(e).__name__,e))
+ raise
 while True:
  try:
+  log('connecting to %s:%d'%(HOST,PORT))
   with socket.create_connection((HOST,PORT),timeout=5) as s:
-   s.settimeout(None);s.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1);f=s.makefile('r',encoding='utf-8',errors='replace');s.sendall(b'HELLO uinput-v39-r2\n')
+   s.settimeout(None);s.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1);f=s.makefile('r',encoding='utf-8',errors='replace');s.sendall(b'HELLO uinput-v39-r3\n');log('connected to Vessel input server')
    for line in f:
     try:m=json.loads(line)
     except Exception:continue
@@ -52,9 +90,8 @@ while True:
     elif t=='key':
      c=int(m.get('code',0))
      if 0<c<256:kbd.e(EV_KEY,c,1 if m.get('down') else 0)
-    # Ping is intentionally side-effect free and proves the Android->guest path.
     if seq and (t=='ping' or seq%16==0):
      try:s.sendall(('ACK %d\n'%seq).encode())
      except Exception:pass
- except Exception:
-  time.sleep(.1)
+ except Exception as e:
+  log('connect/reconnect failed: %s: %s'%(type(e).__name__,e));time.sleep(.1)
