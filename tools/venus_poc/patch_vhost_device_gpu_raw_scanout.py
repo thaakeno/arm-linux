@@ -11,8 +11,8 @@ root = pathlib.Path(sys.argv[1])
 path = root / "vhost-device-gpu/src/backend/virgl.rs"
 text = path.read_text()
 
-if "VESSEL_RAW_SCANOUT_V1" in text:
-    print("[vhost-gpu-patch] raw scanout patch already applied")
+if "VESSEL_RAW_SCANOUT_V2" in text:
+    print("[vhost-gpu-patch] raw scanout v2 patch already applied")
     raise SystemExit(0)
 
 old_import = """        VhostUserGpuCursorPos, VhostUserGpuDMABUFScanout, VhostUserGpuDMABUFScanout2,\n        VhostUserGpuEdidRequest, VhostUserGpuUpdate,\n"""
@@ -26,7 +26,7 @@ end = text.find("    fn resource_create_blob(\n", start)
 if start < 0 or end < 0:
     raise SystemExit("could not locate VirGL scanout methods")
 
-replacement = r'''    // VESSEL_RAW_SCANOUT_V1
+replacement = r'''    // VESSEL_RAW_SCANOUT_V2
     // Android app sandboxes cannot receive SCM_RIGHTS directly from Termux.
     // Keep 3D rendering fully accelerated in virglrenderer/ANGLE/Adreno, but
     // use the standard vhost-user-gpu software scanout messages for the final
@@ -105,13 +105,28 @@ replacement = r'''    // VESSEL_RAW_SCANOUT_V1
             .clone();
         let width = resource.virgl_resource.width;
         let height = resource.virgl_resource.height;
-        let bytes = (width as usize)
+        let stride = width.checked_mul(4).ok_or(ErrUnspec)?;
+        let bytes = (stride as usize)
             .checked_mul(height as usize)
-            .and_then(|n| n.checked_mul(4))
             .ok_or(ErrUnspec)?;
         let mut data = vec![0u8; bytes];
 
-        let transfer = Transfer3DDesc::new_2d(0, 0, width, height, 0);
+        // virglrenderer needs an explicit readback stride here. Leaving stride
+        // at zero produced successful transfers containing only black pixels on
+        // the Android/ANGLE backend. This matches the working libkrun scanout
+        // readback path: ctx 0, tightly packed width*4 rows, layer_stride 0.
+        let transfer = Transfer3DDesc {
+            x: 0,
+            y: 0,
+            z: 0,
+            w: width,
+            h: height,
+            d: 1,
+            level: 0,
+            stride,
+            layer_stride: 0,
+            offset: 0,
+        };
         self.renderer
             .transfer_read(
                 resource_id,
@@ -120,6 +135,20 @@ replacement = r'''    // VESSEL_RAW_SCANOUT_V1
                 Some(IoSliceMut::new(&mut data)),
             )
             .map_err(|_| ErrUnspec)?;
+
+        // Ignore genuinely blank readbacks. In v1 these were forwarded to the
+        // Android presenter and made Vessel report VISIBLE while showing a black
+        // Surface. We only advance the display pipeline once RGB content exists.
+        // Byte 3 is intentionally ignored because XRGB may keep it non-zero even
+        // for a visually black pixel.
+        let has_visible_rgb = data
+            .chunks_exact(4)
+            .step_by(32)
+            .any(|px| px[0] != 0 || px[1] != 0 || px[2] != 0);
+        if !has_visible_rgb {
+            trace!("Vessel raw scanout readback is still black resource={resource_id} {width}x{height}");
+            return Ok(OkNoData);
+        }
 
         for scanout_id in resource.scanouts.iter_enabled() {
             gpu_backend
@@ -147,7 +176,14 @@ text = text[:start] + replacement + text[end:]
 path.write_text(text)
 
 final = path.read_text()
-for needle in ("VESSEL_RAW_SCANOUT_V1", "VhostUserGpuScanout", ".update_scanout(", ".transfer_read("):
+for needle in (
+    "VESSEL_RAW_SCANOUT_V2",
+    "VhostUserGpuScanout",
+    ".update_scanout(",
+    ".transfer_read(",
+    "stride = width.checked_mul(4)",
+    "has_visible_rgb",
+):
     if needle not in final:
-        raise SystemExit(f"raw scanout patch verification failed: {needle}")
-print("[vhost-gpu-patch] enabled standard raw scanout transport")
+        raise SystemExit(f"raw scanout v2 patch verification failed: {needle}")
+print("[vhost-gpu-patch] enabled raw scanout v2 with explicit readback stride + black-frame suppression")
