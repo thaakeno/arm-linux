@@ -1,0 +1,18 @@
+[package]
+name = "vhost-device-vessel-input"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "Vessel native Android to virtio-input vhost-user backend"
+
+[dependencies]
+env_logger = "0.11"
+libc = "0.2"
+log = "0.4"
+thiserror = "2.0"
+vhost = { version = "0.17", features = ["vhost-user-backend"] }
+vhost-user-backend = "0.23"
+virtio-bindings = "0.2.5"
+virtio-queue = "0.18"
+vm-memory = { version = "0.18.0", features = ["backend-mmap", "backend-atomic"] }
+vmm-sys-util = "0.15"
