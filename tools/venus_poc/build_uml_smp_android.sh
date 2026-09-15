@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Rebuild the exact UML/arm64 base used by Vessel with umshm/Venus, SMP,
-# /dev/uinput, and the standard virtio-gpu DRM frontend carried over
-# VIRTIO_UML/vhost-user.  Vessel additionally patches the generic UML
+# virtio-input, and the standard virtio-gpu DRM frontend carried over
+# VIRTIO_UML/vhost-user. Vessel additionally patches the generic UML
 # vhost-user transport with the standard VHOST_USER_GPU_SET_SOCKET handoff
 # required by vhost-user-gpu backends.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -28,14 +28,12 @@ python3 "$ROOT/tools/venus_poc/fix_umshm_nonblock.py" "$SRC"
 python3 "$ROOT/tools/venus_poc/fix_umshm_ptrace_fds.py" "$SRC"
 python3 "$ROOT/tools/venus_poc/patch_virtio_uml_vhost_gpu.py" "$SRC"
 
-# UML's pristine arm64 defconfig starts with UML_DMA_EMULATION=n.  That makes
-# UML select NO_DMA during the harness' initial `make defconfig`.  Enabling DMA
+# UML's pristine arm64 defconfig starts with UML_DMA_EMULATION=n. That makes
+# UML select NO_DMA during the harness' initial `make defconfig`. Enabling DMA
 # only later through EXTRA_CONFIG is too late on this tree: the stale NO_DMA=y
 # state survives olddefconfig, HAS_DMA stays unavailable while DRM is resolved,
-# and Kconfig silently drops CONFIG_DRM=y.  Seed the two UML emulation knobs in
-# the source defconfig *before* the harness creates .config so DMA/IOMEM are
-# available from the first Kconfig resolution.  This is a config-only change to
-# the throw-away upstream checkout, not a kernel source patch.
+# and Kconfig silently drops CONFIG_DRM=y. Seed the two UML emulation knobs in
+# the source defconfig before the harness creates .config.
 ARM64_DEFCONFIG="$SRC/arch/um/configs/arm64_defconfig"
 "$SRC/scripts/config" --file "$ARM64_DEFCONFIG" -e UML_DMA_EMULATION -e UML_IOMEM_EMULATION
 grep -qx 'CONFIG_UML_DMA_EMULATION=y' "$ARM64_DEFCONFIG"
@@ -49,11 +47,9 @@ CONFIG_INPUT=y
 CONFIG_INPUT_EVDEV=y
 CONFIG_INPUT_MISC=y
 CONFIG_INPUT_UINPUT=y
+CONFIG_VIRTIO_INPUT=y
 
-# Standard Linux virtio-gpu frontend over UML's existing vhost-user transport.
-# These are also repeated here so the final generated config is self-describing;
-# the important part is that DMA/IOMEM were already enabled for the first
-# defconfig pass above.
+# Standard Linux virtio frontends over UML's existing vhost-user transport.
 CONFIG_UML_DMA_EMULATION=y
 CONFIG_UML_IOMEM_EMULATION=y
 CONFIG_VIRTIO_MENU=y
@@ -71,15 +67,14 @@ KERNEL="$UPSTREAM_ART/linux-bionic"; STUB="$UPSTREAM_ART/stub_exe_bionic"
 [ -s "$STUB" ] || { echo "missing rebuilt UML stub: $STUB" >&2; exit 1; }
 
 echo 'Resolved UML/virtio/DRM Kconfig:'
-grep -E '^(CONFIG_(UML_DMA_EMULATION|UML_IOMEM_EMULATION|NO_DMA|HAS_DMA|NO_IOMEM|HAS_IOMEM|VIRTIO|VIRTIO_UML|DRM|DRM_VIRTIO_GPU|DRM_VIRTIO_GPU_KMS)=|# CONFIG_(UML_DMA_EMULATION|UML_IOMEM_EMULATION|NO_DMA|HAS_DMA|NO_IOMEM|HAS_IOMEM|VIRTIO|VIRTIO_UML|DRM|DRM_VIRTIO_GPU|DRM_VIRTIO_GPU_KMS) is not set)' "$OUT/.config" || true
+grep -E '^(CONFIG_(UML_DMA_EMULATION|UML_IOMEM_EMULATION|NO_DMA|HAS_DMA|NO_IOMEM|HAS_IOMEM|VIRTIO|VIRTIO_UML|VIRTIO_INPUT|DRM|DRM_VIRTIO_GPU|DRM_VIRTIO_GPU_KMS)=|# CONFIG_(UML_DMA_EMULATION|UML_IOMEM_EMULATION|NO_DMA|HAS_DMA|NO_IOMEM|HAS_IOMEM|VIRTIO|VIRTIO_UML|VIRTIO_INPUT|DRM|DRM_VIRTIO_GPU|DRM_VIRTIO_GPU_KMS) is not set)' "$OUT/.config" || true
 
 for cfg in \
   'CONFIG_SMP=y' \
   'CONFIG_NR_CPUS=8' \
   'CONFIG_INPUT=y' \
   'CONFIG_INPUT_EVDEV=y' \
-  'CONFIG_INPUT_MISC=y' \
-  'CONFIG_INPUT_UINPUT=y' \
+  'CONFIG_VIRTIO_INPUT=y' \
   'CONFIG_UML_DMA_EMULATION=y' \
   'CONFIG_UML_IOMEM_EMULATION=y' \
   'CONFIG_HAS_DMA=y' \
@@ -96,8 +91,8 @@ install -m0755 "$KERNEL" "$FINAL_ART/linux-umshm"; install -m0755 "$STUB" "$FINA
   echo "commit=$UPSTREAM_COMMIT"
   echo 'CONFIG_SMP=y'
   echo 'CONFIG_NR_CPUS=8'
-  echo 'CONFIG_INPUT_MISC=y'
-  echo 'CONFIG_INPUT_UINPUT=y'
+  echo 'CONFIG_INPUT_EVDEV=y'
+  echo 'CONFIG_VIRTIO_INPUT=y'
   echo 'CONFIG_UML_DMA_EMULATION=y'
   echo 'CONFIG_UML_IOMEM_EMULATION=y'
   echo 'CONFIG_HAS_DMA=y'
@@ -111,4 +106,4 @@ install -m0755 "$KERNEL" "$FINAL_ART/linux-umshm"; install -m0755 "$STUB" "$FINA
 } | tee "$FINAL_ART/SHA256SUMS.txt"
 strings "$FINAL_ART/linux-umshm" | grep -Fq 'ncpus=<# of desired CPUs>' || { echo 'rebuilt kernel is missing ncpus option' >&2; exit 1; }
 strings "$FINAL_ART/linux-umshm" | grep -Fq 'Vessel vhost-user-gpu display relay attached' || { echo 'rebuilt kernel is missing VHOST_USER_GPU_SET_SOCKET handoff' >&2; exit 1; }
-echo "Vessel SMP + uinput + VIRTIO_UML virtio-gpu kernel ready: $FINAL_ART/linux-umshm"
+echo "Vessel SMP + VIRTIO_INPUT + VIRTIO_UML virtio-gpu kernel ready: $FINAL_ART/linux-umshm"
