@@ -51,9 +51,10 @@ object VesselHostDebug {
         val trimmed = command.trim()
         if (trimmed.isBlank() || state.value.busy) return
 
+        val prefix = if (state.value.output.isBlank()) "" else "\n"
         state.value = state.value.copy(
             busy = true,
-            output = (state.value.output + if (state.value.output.isBlank()) "" else "\n" + "host$ $trimmed\n").takeLast(MAX_OUTPUT),
+            output = (state.value.output + prefix + "host$ $trimmed\n").takeLast(MAX_OUTPUT),
         )
 
         scope.launch {
