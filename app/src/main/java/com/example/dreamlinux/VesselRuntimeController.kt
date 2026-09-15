@@ -10,8 +10,10 @@ import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.io.RandomAccessFile
 import java.net.URL
 import java.security.MessageDigest
 import java.util.Base64
@@ -33,7 +35,7 @@ class VesselRuntimeController(
 ) {
     companion object {
         const val PROTOCOL = 39
-        const val REVISION = "v39-self-contained-dmabuf-virtio-input-r1"
+        const val REVISION = "v39-self-contained-dmabuf-virtio-input-r2"
         const val DISPLAY_TRANSPORT = "vhost-user-gpu-dmabuf-same-uid-v1"
         const val INPUT_TRANSPORT = "virtio-input-vhost-user-same-uid-v1"
         private const val ROOTFS_URL = "https://github.com/zalexdev/linux-um-arm64/releases/download/prebuilt-20260816/debian-docker.ext4.gz"
@@ -41,6 +43,9 @@ class VesselRuntimeController(
         private const val GUEST_READY_BANNER = "Type 'exit' to shut the kernel down and return to Android."
         private const val VIRTIO_GPU_ID = 16
         private const val VIRTIO_INPUT_ID = 18
+        private const val MIN_DISK_CAPACITY_BYTES = 4L * 1024L * 1024L * 1024L
+        private const val MIN_HOST_FREE_BYTES = 2L * 1024L * 1024L * 1024L
+        private const val MIN_GUEST_FREE_KIB = 2_000_000L
     }
 
     private data class InputBackendSpec(
@@ -103,6 +108,7 @@ class VesselRuntimeController(
     @Volatile private var umlProcess: Process? = null
     @Volatile private var inputProcesses: List<Process> = emptyList()
     @Volatile private var running = false
+    @Volatile private var stopping = false
     @Volatile private var guestReady = false
     @Volatile private var inputReady = false
     @Volatile private var desktopReady = false
@@ -229,41 +235,73 @@ class VesselRuntimeController(
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
+    private fun ensureDiskBackingCapacity() {
+        if (disk.length() >= MIN_DISK_CAPACITY_BYTES) return
+        val hostFree = machineDir.usableSpace
+        if (hostFree > 0L) {
+            check(hostFree >= MIN_HOST_FREE_BYTES) {
+                "Vessel needs at least 2 GiB of free Android storage to finish the Debian desktop setup"
+            }
+        }
+        val before = disk.length()
+        progress("disk_capacity", 26, "Preparing expandable Debian disk")
+        RandomAccessFile(disk, "rw").use { it.setLength(MIN_DISK_CAPACITY_BYTES) }
+        check(disk.length() == MIN_DISK_CAPACITY_BYTES) { "Could not expand Debian disk backing file" }
+        append(
+            "[disk] sparse backing capacity ${before / (1024 * 1024)} MiB -> " +
+                "${MIN_DISK_CAPACITY_BYTES / (1024 * 1024)} MiB; physical storage grows only as Linux writes data\n",
+        )
+    }
+
     private fun ensureDisk() {
         check(hasStorageAccess()) { "Storage access required for Download/LinuxPC" }
         check(machineDir.exists() || machineDir.mkdirs()) { "Cannot create ${machineDir.absolutePath}" }
-        if (disk.isFile && disk.length() > 512L * 1024 * 1024) return
-        val gz = File(machineDir, "debian-docker.ext4.gz.part")
-        val tmp = File(machineDir, "debian-docker.ext4.part")
-        gz.delete(); tmp.delete()
-        progress("disk_download", 4, "Downloading Debian once to Download/LinuxPC")
-        val connection = URL(ROOTFS_URL).openConnection().apply {
-            connectTimeout = 20_000
-            readTimeout = 60_000
-            setRequestProperty("User-Agent", "Vessel/39")
-        }
-        connection.getInputStream().buffered(256 * 1024).use { input ->
-            FileOutputStream(gz).buffered(256 * 1024).use { out ->
-                val b = ByteArray(256 * 1024)
-                var done = 0L
-                while (true) {
-                    val n = input.read(b)
-                    if (n < 0) break
-                    out.write(b, 0, n)
-                    done += n
-                    progress("disk_download", (4 + (done / 4_000_000L).toInt()).coerceAtMost(24), "Downloading persistent Debian image")
+        if (!disk.isFile || disk.length() <= 512L * 1024 * 1024) {
+            val gz = File(machineDir, "debian-docker.ext4.gz.part")
+            val tmp = File(machineDir, "debian-docker.ext4.part")
+            gz.delete(); tmp.delete()
+            progress("disk_download", 4, "Downloading Debian once to Download/LinuxPC")
+            val connection = URL(ROOTFS_URL).openConnection().apply {
+                connectTimeout = 20_000
+                readTimeout = 60_000
+                setRequestProperty("User-Agent", "Vessel/39")
+            }
+            connection.getInputStream().buffered(256 * 1024).use { input ->
+                FileOutputStream(gz).buffered(256 * 1024).use { out ->
+                    val b = ByteArray(256 * 1024)
+                    var done = 0L
+                    while (true) {
+                        val n = input.read(b)
+                        if (n < 0) break
+                        out.write(b, 0, n)
+                        done += n
+                        progress("disk_download", (4 + (done / 4_000_000L).toInt()).coerceAtMost(24), "Downloading persistent Debian image")
+                    }
                 }
             }
+            check(sha256(gz) == ROOTFS_SHA256) { "Debian image checksum mismatch" }
+            progress("disk_extract", 25, "Preparing persistent Debian disk")
+            GZIPInputStream(gz.inputStream().buffered(256 * 1024), 256 * 1024).use { input ->
+                FileOutputStream(tmp).buffered(256 * 1024).use { out -> input.copyTo(out, 256 * 1024) }
+            }
+            check(tmp.length() > 512L * 1024 * 1024) { "Debian disk extraction failed" }
+            if (disk.exists()) check(disk.delete()) { "Cannot replace incomplete Debian disk" }
+            check(tmp.renameTo(disk)) { "Could not promote persistent Debian disk" }
+            gz.delete()
         }
-        check(sha256(gz) == ROOTFS_SHA256) { "Debian image checksum mismatch" }
-        progress("disk_extract", 25, "Preparing persistent Debian disk")
-        GZIPInputStream(gz.inputStream().buffered(256 * 1024), 256 * 1024).use { input ->
-            FileOutputStream(tmp).buffered(256 * 1024).use { out -> input.copyTo(out, 256 * 1024) }
-        }
-        check(tmp.length() > 512L * 1024 * 1024) { "Debian disk extraction failed" }
-        if (disk.exists()) check(disk.delete()) { "Cannot replace incomplete Debian disk" }
-        check(tmp.renameTo(disk)) { "Could not promote persistent Debian disk" }
-        gz.delete()
+        ensureDiskBackingCapacity()
+    }
+
+    private fun startProcessLogReader(process: Process, threadName: String, prefix: String) {
+        Thread({
+            try {
+                process.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { append("$prefix$it\n") }
+                }
+            } catch (e: IOException) {
+                if (!stopping) append("$prefix[log reader closed: ${e.message}]\n")
+            }
+        }, threadName).apply { isDaemon = true; start() }
     }
 
     private fun stopInputBackends() {
@@ -293,9 +331,7 @@ class VesselRuntimeController(
                 pb.environment()["RUST_LOG"] = "info"
                 val p = pb.start()
                 started += p
-                Thread({
-                    p.inputStream.bufferedReader().forEachLine { append("[input-${spec.label}] $it\n") }
-                }, "vessel-input-${spec.label}-log").apply { isDaemon = true; start() }
+                startProcessLogReader(p, "vessel-input-${spec.label}-log", "[input-${spec.label}] ")
 
                 var tries = 0
                 while ((!spec.vhostSocket.exists() || !spec.controlSocket.exists()) && tries++ < 150) {
@@ -360,7 +396,7 @@ class VesselRuntimeController(
         pb.environment()["RUST_LOG"] = "info"
         val p = pb.start()
         gpuProcess = p
-        Thread({ p.inputStream.bufferedReader().forEachLine { append("[gpu] $it\n") } }, "vessel-gpu-log").apply { isDaemon = true; start() }
+        startProcessLogReader(p, "vessel-gpu-log", "[gpu] ")
         tries = 0
         while (!gpuSocket.exists() && tries++ < 150) {
             if (!p.isAlive) error("vhost-device-gpu exited during startup rc=${runCatching { p.exitValue() }.getOrDefault(-1)}")
@@ -391,38 +427,52 @@ class VesselRuntimeController(
         append("[host] UML launcher started\n")
         consoleWriter = BufferedWriter(OutputStreamWriter(p.outputStream, Charsets.UTF_8), 32 * 1024)
         Thread({
-            BufferedReader(InputStreamReader(p.inputStream, Charsets.UTF_8), 64 * 1024).use { reader ->
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    append("$line\n")
-                    if (line.contains(GUEST_READY_BANNER) && guestShellReady.complete(Unit)) {
-                        append("[guest] interactive shell ready\n")
-                    }
-                    synchronized(consoleLock) {
-                        val marker = pendingMarker
-                        val trimmed = line.trim()
-                        if (marker != null && trimmed.startsWith("$marker:")) {
-                            val rc = trimmed.removePrefix("$marker:").toIntOrNull()
-                            if (rc != null) {
-                                pendingFuture?.complete(rc to pendingOutput.toString())
-                                pendingMarker = null
-                                pendingFuture = null
-                                pendingOutput.setLength(0)
-                            } else {
+            try {
+                BufferedReader(InputStreamReader(p.inputStream, Charsets.UTF_8), 64 * 1024).use { reader ->
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        append("$line\n")
+                        if (line.contains(GUEST_READY_BANNER) && guestShellReady.complete(Unit)) {
+                            append("[guest] interactive shell ready\n")
+                        }
+                        synchronized(consoleLock) {
+                            val marker = pendingMarker
+                            val trimmed = line.trim()
+                            if (marker != null && trimmed.startsWith("$marker:")) {
+                                val rc = trimmed.removePrefix("$marker:").toIntOrNull()
+                                if (rc != null) {
+                                    pendingFuture?.complete(rc to pendingOutput.toString())
+                                    pendingMarker = null
+                                    pendingFuture = null
+                                    pendingOutput.setLength(0)
+                                } else {
+                                    pendingOutput.append(line).append('\n')
+                                }
+                            } else if (marker != null) {
                                 pendingOutput.append(line).append('\n')
                             }
-                        } else if (marker != null) {
-                            pendingOutput.append(line).append('\n')
                         }
                     }
                 }
+            } catch (e: IOException) {
+                if (!stopping) append("[host] UML console reader closed unexpectedly: ${e.message}\n")
+            } finally {
+                val rc = runCatching { p.waitFor() }.getOrDefault(-1)
+                val failure = IllegalStateException("UML exited before guest command completed (rc=$rc)")
+                synchronized(consoleLock) {
+                    pendingFuture?.completeExceptionally(failure)
+                    pendingFuture = null
+                    pendingMarker = null
+                    pendingOutput.setLength(0)
+                }
+                if (!stopping) {
+                    guestShellReady.completeExceptionally(IllegalStateException("UML exited before guest shell was ready (rc=$rc)"))
+                }
+                append("[host] UML launcher exited rc=$rc\n")
+                running = false
+                guestReady = false
+                inputReady = false
             }
-            val rc = runCatching { p.waitFor() }.getOrDefault(-1)
-            guestShellReady.completeExceptionally(IllegalStateException("UML exited before guest shell was ready (rc=$rc)"))
-            append("[host] UML launcher exited rc=$rc\n")
-            running = false
-            guestReady = false
-            inputReady = false
         }, "vessel-uml-console").apply { isDaemon = true; start() }
     }
 
@@ -463,6 +513,26 @@ class VesselRuntimeController(
         }
     }
 
+    private fun ensureGuestFilesystemCapacity() {
+        progress("disk_resize", 43, "Expanding Debian filesystem")
+        val (rc, out) = guestBlocking(
+            "if command -v resize2fs >/dev/null 2>&1; then resize2fs /dev/ubda; else echo 'resize2fs is missing from the Debian base image'; false; fi",
+            180,
+        )
+        if (rc != 0) {
+            append("[disk] resize2fs failed rc=$rc ${out.takeLast(3000)}\n")
+            error("Could not expand the Debian ext4 filesystem to its backing disk capacity")
+        }
+        val (freeRc, freeOut) = guestBlocking(
+            "avail=\$(df -Pk / | awk 'NR==2 {print \$4}'); echo free_kib=\$avail; test \$avail -ge $MIN_GUEST_FREE_KIB",
+            15,
+        )
+        check(freeRc == 0) {
+            "Debian filesystem still has too little free space after resize (${freeOut.trim()})"
+        }
+        append("[disk] ${freeOut.trim()} after ext4 resize\n")
+    }
+
     private fun awaitVirtioInputDevices() {
         check(inputBackendsAlive()) { "VirtIO input backend process exited before guest enumeration" }
         var ready = false
@@ -490,18 +560,34 @@ class VesselRuntimeController(
         append("[input] Linux evdev devices ready; sender=${VesselVirtioInput.status()}\n")
     }
 
+    private fun plasmaReadyCommand(): String =
+        "command -v startplasma-x11 >/dev/null && command -v Xorg >/dev/null && command -v xrandr >/dev/null && " +
+            "command -v xinput >/dev/null && (command -v cvt >/dev/null || command -v xcvt >/dev/null) && " +
+            "test -e /usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so"
+
     private fun ensurePlasma() {
         progress("plasma", 55, "Checking KDE Plasma desktop")
-        val check = guestBlocking(
-            "command -v startplasma-x11 >/dev/null && command -v Xorg >/dev/null && command -v xrandr >/dev/null && command -v xinput >/dev/null && (command -v cvt >/dev/null || command -v xcvt >/dev/null) && test -e /usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so",
-            20,
-        )
+        val check = guestBlocking(plasmaReadyCommand(), 20)
         if (check.first == 0) return
         progress("plasma_install", 56, "Installing KDE Plasma once into persistent disk")
         val cmd = "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y --no-install-recommends " +
-            "plasma-workspace plasma-desktop kwin-x11 xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt"
+            "plasma-workspace plasma-desktop kwin-x11 xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt && apt-get clean"
         val (rc, out) = guestBlocking(cmd, 1800)
-        check(rc == 0) { "Plasma install failed: ${out.takeLast(12000)}" }
+        if (rc != 0) {
+            val lower = out.lowercase()
+            val reason = when {
+                "not enough free space" in lower || "no space left on device" in lower ->
+                    "Plasma setup could not finish because the Debian filesystem ran out of space"
+                "temporary failure resolving" in lower || "failed to fetch" in lower ->
+                    "Plasma setup could not download Debian packages; check the Linux network connection"
+                else -> "Plasma package installation failed (apt rc=$rc). See Runtime log for details"
+            }
+            append("[plasma] apt failed rc=$rc\n")
+            error(reason)
+        }
+        val verify = guestBlocking(plasmaReadyCommand(), 20)
+        check(verify.first == 0) { "Plasma packages installed, but required desktop components are still missing" }
+        append("[plasma] KDE Plasma/Xorg packages ready\n")
     }
 
     private fun displayModeCommand(): String {
@@ -570,6 +656,7 @@ class VesselRuntimeController(
 
     suspend fun startDesktop(): JSONObject = withContext(Dispatchers.IO) {
         if (running) return@withContext status()
+        stopping = false
         lastError = ""
         try {
             assertAssets()
@@ -587,6 +674,7 @@ class VesselRuntimeController(
             running = true
             progress("guest_boot", 40, "Waiting for Debian userspace")
             awaitGuestShell(240)
+            ensureGuestFilesystemCapacity()
             val ready = guestBlocking("stty -echo 2>/dev/null || true; test -c /dev/dri/card0 && test -c /dev/dri/renderD128", 30)
             check(ready.first == 0) { "Debian/VirtIO GPU did not become ready: ${ready.second.takeLast(8000)}" }
             guestReady = true
@@ -625,6 +713,7 @@ class VesselRuntimeController(
     }
 
     private fun stopBlocking() {
+        stopping = true
         runCatching {
             if (umlProcess?.isAlive == true) {
                 consoleWriter?.write("exit\n")
@@ -632,6 +721,7 @@ class VesselRuntimeController(
                 umlProcess?.waitFor(8, TimeUnit.SECONDS)
             }
         }
+        runCatching { consoleWriter?.close() }
         runCatching { if (umlProcess?.isAlive == true) umlProcess?.destroyForcibly() }
         runCatching { gpuProcess?.destroyForcibly() }
         umlProcess = null
@@ -641,6 +731,12 @@ class VesselRuntimeController(
         guestReady = false
         inputReady = false
         desktopReady = false
+        synchronized(consoleLock) {
+            pendingFuture?.completeExceptionally(IllegalStateException("Vessel stopped"))
+            pendingFuture = null
+            pendingMarker = null
+            pendingOutput.setLength(0)
+        }
         stopInputBackends()
         gpuSocket.delete()
     }

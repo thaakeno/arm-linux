@@ -78,6 +78,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
@@ -246,7 +247,7 @@ class VesselActivity : ComponentActivity() {
                     Metric(Icons.Default.Bolt,"Graphics",state.graphics)
                     Metric(Icons.Default.DesktopWindows,"Android Surface",state.presenterStatus)
                     Metric(Icons.Default.Wifi,"Network",state.internetStage)
-                    Metric(Icons.Default.Storage,"Disk","Persistent ext4 · Download/LinuxPC")
+                    Metric(Icons.Default.Storage,"Disk","Persistent sparse ext4 · grows with Linux data")
                 }
             }
             LogCard(state)
@@ -260,7 +261,7 @@ class VesselActivity : ComponentActivity() {
             Row(verticalAlignment=Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Linux display",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
-                    Text(when{state.displayReady->"Real GPU frame presented · ${uptime(state.uptimeMs)}";state.frameReachedApp->"Validated frame reached Vessel";state.running||state.busy->state.progressDetail;else->"Press Start Linux first"},style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(when{state.displayReady->"Real GPU frame presented · ${uptime(state.uptimeMs)}";state.frameReachedApp->"Validated frame reached Vessel";state.running||state.busy->state.progressDetail;else->"Press Start Linux first"},style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=2,overflow=TextOverflow.Ellipsis)
                 }
                 if(state.displayReady) StatusPill("VISIBLE",true)
             }
@@ -279,8 +280,8 @@ class VesselActivity : ComponentActivity() {
                         Surface(Modifier.align(Alignment.Center).padding(18.dp),shape=RoundedCornerShape(18.dp),color=Color(0xD9101512)) {
                             Column(Modifier.padding(18.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(9.dp)) {
                                 if(state.busy||state.running) LinearProgressIndicator(progress={state.progressPercent.coerceIn(0,100)/100f},modifier=Modifier.width(220.dp))
-                                Text("${state.message} · ${state.progressPercent.coerceIn(0,100)}%")
-                                Text("Presenter: ${state.presenterStatus}",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("${state.message} · ${state.progressPercent.coerceIn(0,100)}%",maxLines=2,overflow=TextOverflow.Ellipsis)
+                                Text("Presenter: ${state.presenterStatus}",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=1,overflow=TextOverflow.Ellipsis)
                             }
                         }
                     }
@@ -288,10 +289,11 @@ class VesselActivity : ComponentActivity() {
                 ExtraKeys()
             } else {
                 Box(Modifier.weight(1f).fillMaxWidth(),contentAlignment=Alignment.Center) {
-                    ElevatedCard(shape=RoundedCornerShape(24.dp)) {
+                    ElevatedCard(shape=RoundedCornerShape(24.dp),modifier=Modifier.fillMaxWidth().padding(horizontal=12.dp)) {
                         Column(Modifier.padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(12.dp)) {
                             Icon(Icons.Default.DesktopWindows,null,Modifier.size(48.dp),tint=MaterialTheme.colorScheme.primary)
                             Text("Linux is stopped")
+                            if(state.lastError.isNotBlank()) ErrorStrip(state.lastError)
                             Button(onClick={startLinux()},enabled=!state.busy){Text(if(state.storageReady)"Start Linux" else "Grant storage")}
                         }
                     }
@@ -381,13 +383,20 @@ class VesselActivity : ComponentActivity() {
     private fun Metric(icon:ImageVector,label:String,value:String) {
         Row(verticalAlignment=Alignment.CenterVertically) {
             Icon(icon,null,tint=MaterialTheme.colorScheme.primary);Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)){Text(label,style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant);Text(value,style=MaterialTheme.typography.bodyMedium)}
+            Column(Modifier.weight(1f)){Text(label,style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant);Text(value,style=MaterialTheme.typography.bodyMedium,maxLines=2,overflow=TextOverflow.Ellipsis)}
         }
     }
 
     @Composable
     private fun ErrorStrip(text:String) {
-        Surface(shape=RoundedCornerShape(14.dp),color=MaterialTheme.colorScheme.errorContainer){Text(text,Modifier.fillMaxWidth().padding(12.dp),color=MaterialTheme.colorScheme.error)}
+        val clean=remember(text){text.replace(Regex("\\s+")," ").trim()}
+        Surface(shape=RoundedCornerShape(16.dp),color=MaterialTheme.colorScheme.errorContainer) {
+            Column(Modifier.fillMaxWidth().padding(horizontal=14.dp,vertical=12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                Text("Startup issue",style=MaterialTheme.typography.labelMedium,fontWeight=FontWeight.Bold,color=MaterialTheme.colorScheme.error)
+                Text(clean,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error,maxLines=4,overflow=TextOverflow.Ellipsis)
+                if(clean.length>260) Text("Full details are kept in Runtime log.",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onErrorContainer)
+            }
+        }
     }
 
     @Composable
@@ -395,7 +404,7 @@ class VesselActivity : ComponentActivity() {
         Column(verticalArrangement=Arrangement.spacedBy(6.dp)) {
             LinearProgressIndicator(progress={state.progressPercent.coerceIn(0,100)/100f},modifier=Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-                Text(state.progressDetail,modifier=Modifier.weight(1f),style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(state.progressDetail,modifier=Modifier.weight(1f),style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=2,overflow=TextOverflow.Ellipsis)
                 Spacer(Modifier.width(10.dp));Text("${state.progressPercent.coerceIn(0,100)}%",style=MaterialTheme.typography.bodySmall,fontWeight=FontWeight.SemiBold,color=MaterialTheme.colorScheme.primary)
             }
         }
@@ -407,7 +416,13 @@ class VesselActivity : ComponentActivity() {
         val vertical=rememberScrollState();val horizontal=rememberScrollState()
         ElevatedCard(modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(18.dp)) {
             Column(Modifier.fillMaxWidth().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text("Runtime log",Modifier.weight(1f),fontWeight=FontWeight.SemiBold);OutlinedButton(onClick={copyRuntimeLog(state.console)}){Text("Copy logs")}}
+                Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Runtime log",fontWeight=FontWeight.SemiBold)
+                        Text("Full startup diagnostics",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    OutlinedButton(onClick={copyRuntimeLog(state.console)}){Text("Copy")}
+                }
                 Surface(modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(12.dp),color=Color(0xff050706)) {
                     Box(Modifier.fillMaxWidth().height(280.dp)) {
                         SelectionContainer {Text(state.console.takeLast(40_000),modifier=Modifier.fillMaxSize().padding(12.dp).verticalScroll(vertical).horizontalScroll(horizontal),fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.labelSmall,softWrap=false)}
