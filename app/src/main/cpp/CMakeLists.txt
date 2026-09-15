@@ -22,7 +22,7 @@ add_library(vessel_wayland_presenter SHARED
 )
 target_compile_features(vessel_wayland_presenter PRIVATE cxx_std_17)
 target_compile_definitions(vessel_wayland_presenter PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
-target_compile_options(vessel_wayland_presenter PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers -Wno-misleading-indentation)
+target_compile_options(vessel_wayland_presenter PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers -Wno-misleading-indentation -Wno-unused-function)
 target_link_libraries(vessel_wayland_presenter PRIVATE android log vulkan)
 
 # Loaded into vhost-device-gpu before virglrenderer. Termux's Android libepoxy
