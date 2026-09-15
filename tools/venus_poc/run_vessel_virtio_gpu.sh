@@ -1,17 +1,21 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-# Experimental Vessel path:
+# Vessel protocol 38 GPU path:
 #   Debian UML -> Linux virtio_gpu -> VIRTIO_UML/vhost-user
 #   -> rust-vmm vhost-device-gpu -> virglrenderer -> ANGLE/Vulkan -> Adreno
-#   -> vhost-user-gpu display side channel -> Vessel Android presenter.
+#   -> standard vhost-user-gpu RGB scanout -> loopback TCP
+#   -> Vessel Android Vulkan presenter -> SurfaceView.
 #
-# No PRoot, no nested Weston and no Termux:X11 are involved.
+# 3D rendering is hardware accelerated. The final Termux->Vessel hop uses the
+# protocol's RGB update path because Android SELinux blocks cross-app SCM_RIGHTS.
+# No PRoot, nested Weston, VNC, screenshots or Termux:X11 are involved.
 
 POC_DIR="${POC_DIR:-$HOME/vessel-poc-runtime}"
 UML_DIR="${UML_DIR:-$HOME/venus-wsi-local}"
 GPU_PREFIX="${VESSEL_VHOST_GPU_PREFIX:-$PREFIX/opt/vessel-vhost-gpu}"
 GPU_BIN="${VESSEL_VHOST_GPU_BIN:-$GPU_PREFIX/bin/vhost-device-gpu}"
+GPU_RAW_MARKER="$GPU_PREFIX/.vessel-raw-scanout-v1"
 GPU_SOCK="${VESSEL_GPU_SOCK:-$PREFIX/tmp/vessel-vugpu.sock}"
 GPU_DISPLAY_SOCK="${GPU_SOCK}.display"
 GPU_LOG="${VESSEL_GPU_LOG:-$UML_DIR/vessel-vhost-gpu.log}"
@@ -41,6 +45,8 @@ need_file() {
 for f in \
   "$POC_DIR/tools/venus_poc/vhost_gpu_display_frontend.py" \
   "$POC_DIR/tools/venus_poc/build_vhost_device_gpu_termux.sh" \
+  "$POC_DIR/tools/venus_poc/build_vhost_device_gpu_termux_raw.sh" \
+  "$POC_DIR/tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py" \
   "$UML_DIR/linux-umshm" \
   "$UML_DIR/stub_exe-umshm" \
   "$UML_DIR/umnet" \
@@ -49,23 +55,21 @@ for f in \
   need_file "$f"
 done
 
-# Refuse to boot an older kernel that has virtio_gpu but lacks the GPU display
-# socket handoff. Search the binary directly: `strings | grep -q` is unsafe with
-# pipefail because a successful early grep exit can SIGPIPE strings.
 if ! grep -aFq 'Vessel vhost-user-gpu display relay attached' "$UML_DIR/linux-umshm"; then
   echo "[vessel-vugpu] linux-umshm is older than the vhost-user-gpu handoff patch." >&2
-  echo "[vessel-vugpu] install the newest 'Vessel UML SMP Kernel' artifact first." >&2
+  echo "[vessel-vugpu] install the newest Vessel UML SMP kernel first." >&2
   exit 2
 fi
 
-# First run builds the host daemon natively in Termux. Later boots reuse it.
-if [ ! -x "$GPU_BIN" ]; then
-  echo "[vessel-vugpu] host GPU backend not installed; building it once..."
-  bash "$POC_DIR/tools/venus_poc/build_vhost_device_gpu_termux.sh"
+# Protocol 38 needs the raw scanout build. Rebuild once when upgrading from the
+# earlier dma-buf-only host binary; subsequent boots reuse it.
+if [ ! -x "$GPU_BIN" ] || [ ! -f "$GPU_RAW_MARKER" ]; then
+  echo "[vessel-vugpu] installing protocol 38 raw-scanout GPU backend once..."
+  bash "$POC_DIR/tools/venus_poc/build_vhost_device_gpu_termux_raw.sh"
 fi
 need_file "$GPU_BIN"
+need_file "$GPU_RAW_MARKER"
 
-# Only stop Vessel processes that can collide with this exact disk/runtime.
 stale_uml_pids=()
 for proc in /proc/[0-9]*; do
   pid="${proc##*/}"
@@ -102,8 +106,6 @@ mkdir -p "$UML_DIR" "$(dirname "$GPU_SOCK")"
 : >"$DISPLAY_LOG"
 : >"$INPUT_LOG"
 
-# The display side channel must already be listening when UML sends
-# VHOST_USER_GPU_SET_SOCKET to the daemon.
 python3 "$POC_DIR/tools/venus_poc/vhost_gpu_display_frontend.py" \
   --socket "$GPU_DISPLAY_SOCK" \
   --width "$VESSEL_WIDTH" \
@@ -126,25 +128,11 @@ done
 
 ANGLE_PREFIX="$PREFIX/opt/angle-android/vulkan"
 VIRGL_LIB="$PREFIX/opt/virglrenderer-android/lib"
-
-# Do NOT put ANGLE symlink aliases named libEGL.so/libGLESv*.so in
-# LD_LIBRARY_PATH. Android's version linker matches VERNEED entries against the
-# dependency's real DT_SONAME. An alias such as libGLESv1_CM.so ->
-# libGLESv1_CM_angle.so therefore poisons dependencies of libandroid_runtime.so:
-# it asks for SONAME libGLESv1_CM.so but sees libGLESv1_CM_angle.so and aborts.
-# libepoxy selects the real *_angle.so files by absolute path below, while
-# Android framework dependencies remain free to resolve their proper system GL
-# libraries and SONAMEs.
 export LD_LIBRARY_PATH="$VIRGL_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export EGL_PLATFORM="${EGL_PLATFORM:-surfaceless}"
 export RUST_LOG="${RUST_LOG:-debug}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 
-# virglrenderer-android's bundled libepoxy does not select ANGLE merely because
-# ANGLE is installed. Its vtest --angle-vulkan path calls the Termux-specific
-# epoxy_set_library_path() hook explicitly. vhost-device-gpu bypasses vtest, so
-# do the same before VirGL lazily initializes EGL. Use dlsym in a tiny preload
-# helper so this remains compatible if the symbol ever moves between DSOs.
 ANGLE_SELECT_SO="$GPU_PREFIX/lib/libvessel-angle-select.so"
 ANGLE_SELECT_C="$GPU_PREFIX/lib/vessel-angle-select.c"
 mkdir -p "$GPU_PREFIX/lib"
@@ -158,26 +146,19 @@ if [ ! -s "$ANGLE_SELECT_SO" ]; then
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
-
 typedef void (*epoxy_set_library_path_fn)(const char *);
-
 __attribute__((constructor))
 static void vessel_select_angle(void)
 {
     const char *path = getenv("VESSEL_ANGLE_PATH");
-    if (!path || !*path)
-        return;
-
+    if (!path || !*path) return;
     dlerror();
     void *sym = dlsym(RTLD_DEFAULT, "epoxy_set_library_path");
     const char *err = dlerror();
     if (!sym || err) {
-        fprintf(stderr,
-                "[vessel-angle] epoxy_set_library_path unavailable: %s\n",
-                err ? err : "symbol not found");
+        fprintf(stderr, "[vessel-angle] epoxy_set_library_path unavailable: %s\n", err ? err : "symbol not found");
         return;
     }
-
     ((epoxy_set_library_path_fn)sym)(path);
     fprintf(stderr, "[vessel-angle] selected ANGLE libraries: %s\n", path);
 }
@@ -215,13 +196,8 @@ done
   exit 1
 }
 
-# If the daemon dies after the guest connects (the failure mode during capset
-# negotiation), surface its host log immediately in the same terminal. This
-# avoids another opaque UML 'read returned 0' round-trip.
 gpu_watchdog() {
-  while kill -0 "$GPU_PID" 2>/dev/null; do
-    sleep .10
-  done
+  while kill -0 "$GPU_PID" 2>/dev/null; do sleep .10; done
   echo >&2
   echo "[vessel-vugpu] HOST GPU BACKEND EXITED; last log follows:" >&2
   tail -240 "$GPU_LOG" >&2 || true
@@ -230,9 +206,6 @@ gpu_watchdog() {
 gpu_watchdog &
 WATCHDOG_PID=$!
 
-# Keep Vessel's existing native input bridge. It is independent of the old
-# Venus display transport and lets the Android UI continue to feed input once
-# the visible scanout is working.
 if [ -f "$POC_DIR/tools/venus_poc/host_input_bridge.py" ]; then
   python3 "$POC_DIR/tools/venus_poc/host_input_bridge.py" \
     --android-port 47634 --guest-port 47633 \
@@ -240,13 +213,12 @@ if [ -f "$POC_DIR/tools/venus_poc/host_input_bridge.py" ]; then
   INPUT_PID=$!
 fi
 
-echo "[vessel-vugpu] vhost-user virtio-gpu backend ready: $GPU_SOCK"
-echo "[vessel-vugpu] GPU display relay ready: $GPU_DISPLAY_SOCK"
+echo "[vessel-vugpu] protocol 38 virtio-gpu backend ready: $GPU_SOCK"
+echo "[vessel-vugpu] display relay: $GPU_DISPLAY_SOCK -> Android TCP 127.0.0.1:47635"
 echo "[vessel-vugpu] GPU log:     $GPU_LOG"
 echo "[vessel-vugpu] display log: $DISPLAY_LOG"
-echo "[vessel-vugpu] ANGLE path:  $ANGLE_PREFIX (direct libepoxy selection; no SONAME aliases)"
-echo "[vessel-vugpu] booting REAL Debian UML with $VESSEL_VCPUS vCPUs / ${VESSEL_MEM_MB} MiB"
-echo "[vessel-vugpu] guest should expose /dev/dri/card0 and /dev/dri/renderD128"
+echo "[vessel-vugpu] ANGLE: $ANGLE_PREFIX -> physical Adreno"
+echo "[vessel-vugpu] booting Debian UML with $VESSEL_VCPUS vCPUs / ${VESSEL_MEM_MB} MiB"
 
 cd "$UML_DIR"
 set +e
