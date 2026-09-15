@@ -30,6 +30,7 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
         private const val BTN_LEFT = 0x110
         private const val BTN_RIGHT = 0x111
         private const val BTN_MIDDLE = 0x112
+        private const val LONG_PRESS_DRAG_MS = 350L
     }
 
     @Volatile private var pointerMode = PointerMode.DIRECT
@@ -42,6 +43,7 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
     private var gestureTravel = 0f
     private var lastScrollX = 0f
     private var lastScrollY = 0f
+    private var dragging = false
 
     private val surfaceView = object : SurfaceView(context) {
         override fun onCheckIsTextEditor(): Boolean = true
@@ -90,6 +92,7 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
     }
 
     override fun onDetachedFromWindow() {
+        releaseDrag()
         if (active === this) active = null
         if (surfaceView.holder.surface.isValid) VesselWaylandPresenter.detach()
         super.onDetachedFromWindow()
@@ -105,6 +108,7 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        releaseDrag()
         VesselWaylandPresenter.detach()
     }
 
@@ -113,6 +117,7 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
         surfaceView.requestFocus()
 
         if (pointerMode == PointerMode.DIRECT) {
+            releaseDrag()
             val x = (event.x / width.toFloat()).coerceIn(0f, 1f)
             val y = (event.y / height.toFloat()).coerceIn(0f, 1f)
             when (event.actionMasked) {
@@ -124,6 +129,7 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                releaseDrag()
                 lastX = event.x
                 lastY = event.y
                 downX = event.x
@@ -135,6 +141,9 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
                 lastScrollY = event.y
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
+                // A second finger switches the gesture to scrolling/right-click;
+                // never leave BTN_LEFT held when doing that.
+                releaseDrag()
                 maxPointerCount = maxOf(maxPointerCount, event.pointerCount)
                 lastScrollX = averageX(event)
                 lastScrollY = averageY(event)
@@ -155,6 +164,16 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
                 } else {
                     val dx = event.x - lastX
                     val dy = event.y - lastY
+                    val density = resources.displayMetrics.density
+                    // Hold, then move: press the real Linux left button before
+                    // the first drag delta and keep it down until finger-up.
+                    if (!dragging &&
+                        SystemClock.uptimeMillis() - downAt >= LONG_PRESS_DRAG_MS &&
+                        gestureTravel < 14f * density
+                    ) {
+                        VesselInputClient.button(BTN_LEFT, true)
+                        dragging = true
+                    }
                     gestureTravel += abs(dx) + abs(dy)
                     VesselInputClient.relative(dx, dy)
                     lastX = event.x
@@ -172,18 +191,29 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
                 }
             }
             MotionEvent.ACTION_UP -> {
-                val density = resources.displayMetrics.density
-                val directTravel = abs(event.x - downX) + abs(event.y - downY)
-                val moved = maxOf(gestureTravel, directTravel)
-                if (SystemClock.uptimeMillis() - downAt < 350L && moved < 14f * density) {
-                    val button = if (maxPointerCount >= 2) BTN_RIGHT else BTN_LEFT
-                    VesselInputClient.button(button, true)
-                    VesselInputClient.button(button, false)
+                if (dragging) {
+                    releaseDrag()
+                } else {
+                    val density = resources.displayMetrics.density
+                    val directTravel = abs(event.x - downX) + abs(event.y - downY)
+                    val moved = maxOf(gestureTravel, directTravel)
+                    if (SystemClock.uptimeMillis() - downAt < LONG_PRESS_DRAG_MS && moved < 14f * density) {
+                        val button = if (maxPointerCount >= 2) BTN_RIGHT else BTN_LEFT
+                        VesselInputClient.button(button, true)
+                        VesselInputClient.button(button, false)
+                    }
                 }
             }
-            MotionEvent.ACTION_CANCEL -> Unit
+            MotionEvent.ACTION_CANCEL -> releaseDrag()
         }
         return true
+    }
+
+    private fun releaseDrag() {
+        if (dragging) {
+            VesselInputClient.button(BTN_LEFT, false)
+            dragging = false
+        }
     }
 
     private fun averageX(event: MotionEvent): Float =
@@ -303,6 +333,7 @@ class VncFramebufferView(context: Context) : FrameLayout(context), SurfaceHolder
     }
 
     fun setPointerMode(mode: PointerMode) {
+        if (pointerMode != mode) releaseDrag()
         pointerMode = mode
     }
 
