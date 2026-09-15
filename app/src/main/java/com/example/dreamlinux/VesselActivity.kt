@@ -340,7 +340,7 @@ class VesselActivity : ComponentActivity() {
                     Text(
                         when {
                             state.displayReady -> "Real GPU frame presented · ${uptime(state.uptimeMs)}"
-                            state.frameReachedApp -> "Frame reached Vessel · attaching Android Surface"
+                            state.frameReachedApp -> "Validated frame reached Vessel · attaching Android Surface"
                             state.running -> state.progressDetail
                             else -> "Press Start Linux first"
                         },
@@ -387,8 +387,22 @@ class VesselActivity : ComponentActivity() {
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.spacedBy(9.dp),
                             ) {
-                                if (state.running) LinearProgressIndicator(Modifier.width(220.dp))
-                                Text(state.message)
+                                if (state.running) {
+                                    if (state.progressPercent in 0..100) {
+                                        LinearProgressIndicator(
+                                            progress = { state.progressPercent / 100f },
+                                            modifier = Modifier.width(220.dp),
+                                        )
+                                    } else {
+                                        LinearProgressIndicator(Modifier.width(220.dp))
+                                    }
+                                }
+                                Text(
+                                    if (state.progressPercent in 0..100)
+                                        "${state.message} · ${state.progressPercent}%"
+                                    else
+                                        state.message
+                                )
                                 Text(
                                     "Presenter: ${state.presenterStatus}",
                                     style = MaterialTheme.typography.labelSmall,
@@ -622,7 +636,23 @@ class VesselActivity : ComponentActivity() {
             } else if (state.busy) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
-            Text(state.progressDetail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    state.progressDetail,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (state.progressPercent in 0..100) {
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "${state.progressPercent}%",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
         }
     }
 
