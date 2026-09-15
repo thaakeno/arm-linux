@@ -365,17 +365,29 @@ impl VhostUserBackendMut for VesselInputBackend {
         }
         match device_event {
             EVENT_QUEUE => {
-                if self.event_idx { vrings[0].disable_notification()?; }
+                if self.event_idx {
+                    vrings[0].disable_notification()
+                        .map_err(|e| io::Error::other(format!("virtio-input disable notification failed: {e}")))?;
+                }
                 let r = self.process_event_queue(&vrings[0]);
-                if self.event_idx { vrings[0].enable_notification()?; }
+                if self.event_idx {
+                    vrings[0].enable_notification()
+                        .map_err(|e| io::Error::other(format!("virtio-input enable notification failed: {e}")))?;
+                }
                 r
             }
             STATUS_QUEUE => self.process_status_queue(&vrings[1]),
             x if u64::from(x) == CONTROL_EVENT_ID => {
                 self.read_control()?;
-                if self.event_idx { vrings[0].disable_notification()?; }
+                if self.event_idx {
+                    vrings[0].disable_notification()
+                        .map_err(|e| io::Error::other(format!("virtio-input disable notification failed: {e}")))?;
+                }
                 let r = self.process_event_queue(&vrings[0]);
-                if self.event_idx { vrings[0].enable_notification()?; }
+                if self.event_idx {
+                    vrings[0].enable_notification()
+                        .map_err(|e| io::Error::other(format!("virtio-input enable notification failed: {e}")))?;
+                }
                 r
             }
             _ => Ok(()),
@@ -427,13 +439,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("vessel-virtio-input-{}", kind.name()),
         Arc::clone(&backend),
         GuestMemoryAtomic::new(GuestMemoryMmap::new()),
-    )?;
+    )
+    .map_err(|e| io::Error::other(format!("create vhost-user daemon failed: {e:?}")))?;
     daemon.get_epoll_handlers()[0].register_listener(control_fd, EventSet::IN, CONTROL_EVENT_ID)?;
 
     log::info!("Vessel {:?} backend ready: vhost={} control={}", kind, socket_path.display(), control_path.display());
     let result = daemon.serve(&socket_path);
     let _ = remove_stale(&control_path);
     let _ = remove_stale(&socket_path);
-    result?;
+    result.map_err(|e| io::Error::other(format!("vhost-user serve failed: {e:?}")))?;
     Ok(())
 }
