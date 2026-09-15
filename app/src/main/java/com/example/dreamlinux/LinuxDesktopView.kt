@@ -55,7 +55,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     override fun onAttachedToWindow(){super.onAttachedToWindow();active=this}
     override fun onDetachedFromWindow(){releaseDrag();if(active===this)active=null;VesselWaylandPresenter.detach();super.onDetachedFromWindow()}
     override fun surfaceCreated(h:SurfaceHolder){surfaceView.requestFocus();VesselWaylandPresenter.attach(h.surface)}
-    override fun surfaceChanged(h:SurfaceHolder,format:Int,w:Int,ht:Int){val refresh=context.display?.refreshRate?:60f;val dpi=resources.displayMetrics.densityDpi;if(Build.VERSION.SDK_INT>=30)runCatching{h.surface.setFrameRate(refresh,Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)};VmSessionService.active?.configureDisplay(w,ht,dpi,refresh);VesselWaylandPresenter.attach(h.surface)}
+    override fun surfaceChanged(h:SurfaceHolder,format:Int,w:Int,ht:Int){val refresh=surfaceView.display?.refreshRate?:60f;val dpi=resources.displayMetrics.densityDpi;if(Build.VERSION.SDK_INT>=30)runCatching{h.surface.setFrameRate(refresh,Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)};VmSessionService.active?.configureDisplay(w,ht,dpi,refresh);VesselWaylandPresenter.attach(h.surface)}
     override fun surfaceDestroyed(h:SurfaceHolder){releaseDrag();VesselWaylandPresenter.detach()}
 
     fun setPointerMode(m:PointerMode){if(pointerMode!=m)releaseDrag();pointerMode=m}
