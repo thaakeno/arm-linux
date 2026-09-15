@@ -10,7 +10,7 @@ import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.truncate
 
-/** Persistent low-latency Android -> Vessel Wayland seat channel. */
+/** Persistent low-latency Android -> Vessel Linux uinput/evdev channel. */
 object VesselInputClient {
     private const val PORT = 47634
     private val running = AtomicBoolean(true)
@@ -18,6 +18,8 @@ object VesselInputClient {
     private val fractionLock = Any()
     private var fracX = 0f
     private var fracY = 0f
+    private var scrollFracX = 0f
+    private var scrollFracY = 0f
 
     init {
         Thread(::loop, "vessel-input-client").apply { isDaemon = true; priority = Thread.MAX_PRIORITY; start() }
@@ -42,7 +44,7 @@ object VesselInputClient {
         motion = true,
     )
 
-    /** Returns the exact integer delta sent to Linux so the local cursor stays bit-for-bit in sync. */
+    /** Returns the exact integer delta sent to Linux so fractional motion is never lost. */
     fun relative(dx: Float, dy: Float): Pair<Int, Int> {
         val ix: Int
         val iy: Int
@@ -65,13 +67,28 @@ object VesselInputClient {
 
     fun scroll(x: Int, y: Int) {
         if (x == 0 && y == 0) return
-        send(JSONObject().put("t", "scroll").put("x", x).put("y", y))
+        send(JSONObject().put("t", "scroll").put("x", x).put("y", y), motion = true)
+    }
+
+    /** Preserve fractional wheel/gesture deltas instead of dropping slow two-finger scrolling. */
+    fun scrollPrecise(x: Float, y: Float) {
+        val ix: Int
+        val iy: Int
+        synchronized(fractionLock) {
+            scrollFracX += x
+            scrollFracY += y
+            ix = truncate(scrollFracX).toInt()
+            iy = truncate(scrollFracY).toInt()
+            scrollFracX -= ix
+            scrollFracY -= iy
+        }
+        scroll(ix, iy)
     }
 
     fun key(code: Int, down: Boolean) =
         send(JSONObject().put("t", "key").put("code", code).put("down", down))
 
-    /** UTF-8 text commit from Android IME -> compositor -> text-input-v3 focused client. */
+    /** UTF-8 text commit from Android IME into the focused Linux application. */
     fun text(value: String) {
         if (value.isEmpty()) return
         val encoded = Base64.encodeToString(value.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
