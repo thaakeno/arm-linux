@@ -34,10 +34,11 @@ class VesselRuntimeController(
 ) {
     companion object {
         const val PROTOCOL = 39
-        const val REVISION = "v39-self-contained-dmabuf-r3"
+        const val REVISION = "v39-self-contained-dmabuf-r4"
         const val DISPLAY_TRANSPORT = "vhost-user-gpu-dmabuf-same-uid-v1"
         private const val ROOTFS_URL = "https://github.com/zalexdev/linux-um-arm64/releases/download/prebuilt-20260816/debian-docker.ext4.gz"
         private const val ROOTFS_SHA256 = "2807979f76021fadf1f76f0c827fbe1eab4df51e33bfeca0c840c5181c610be3"
+        private const val GUEST_READY_BANNER = "Type 'exit' to shut the kernel down and return to Android."
     }
 
     private val runtimeDir = File(context.filesDir, "vessel-runtime").apply { mkdirs() }
@@ -91,6 +92,7 @@ class VesselRuntimeController(
     @Volatile private var pendingFuture: CompletableFuture<Pair<Int, String>>? = null
     private val pendingOutput = StringBuilder()
     private val commandId = AtomicLong()
+    @Volatile private var guestShellReady = CompletableFuture<Unit>()
 
     private val inputLock = Any()
     @Volatile private var inputGuest: Socket? = null
@@ -360,6 +362,7 @@ class VesselRuntimeController(
 
     private fun startUml() {
         runCatching { umlProcess?.destroyForcibly() }
+        guestShellReady = CompletableFuture()
         append("[host] starting UML with ${guestMemoryMb} MiB RAM, 6 vCPUs\n")
         val cmd = listOf(
             umnetBin.absolutePath, "--passt", passtBin.absolutePath, "--dns", "1.1.1.1", "--",
@@ -378,12 +381,22 @@ class VesselRuntimeController(
                 while (true) {
                     val line = reader.readLine() ?: break
                     append("$line\n")
+                    if (line.contains(GUEST_READY_BANNER) && guestShellReady.complete(Unit)) {
+                        append("[guest] interactive shell ready\n")
+                    }
                     synchronized(consoleLock) {
                         val marker = pendingMarker
-                        if (marker != null && line.contains(marker)) {
-                            val rc = line.substringAfter("$marker:", "125").trim().takeWhile { it == '-' || it.isDigit() }.toIntOrNull() ?: 125
-                            pendingFuture?.complete(rc to pendingOutput.toString())
-                            pendingMarker = null; pendingFuture = null; pendingOutput.setLength(0)
+                        val trimmed = line.trim()
+                        if (marker != null && trimmed.startsWith("$marker:")) {
+                            val rc = trimmed.removePrefix("$marker:").toIntOrNull()
+                            if (rc != null) {
+                                pendingFuture?.complete(rc to pendingOutput.toString())
+                                pendingMarker = null
+                                pendingFuture = null
+                                pendingOutput.setLength(0)
+                            } else {
+                                pendingOutput.append(line).append('\n')
+                            }
                         } else if (marker != null) {
                             pendingOutput.append(line).append('\n')
                         }
@@ -391,9 +404,19 @@ class VesselRuntimeController(
                 }
             }
             val rc = runCatching { p.waitFor() }.getOrDefault(-1)
+            guestShellReady.completeExceptionally(IllegalStateException("UML exited before guest shell was ready (rc=$rc)"))
             append("[host] UML launcher exited rc=$rc\n")
             running = false
         }, "vessel-uml-console").apply { isDaemon = true; start() }
+    }
+
+    private fun awaitGuestShell(timeoutSeconds: Int) {
+        check(umlProcess?.isAlive == true) { "UML is not running" }
+        try {
+            guestShellReady.get(timeoutSeconds.toLong(), TimeUnit.SECONDS)
+        } catch (t: Throwable) {
+            throw IllegalStateException("Debian userspace did not reach the interactive shell within ${timeoutSeconds}s", t)
+        }
     }
 
     private fun guestBlocking(command: String, timeoutSeconds: Int): Pair<Int, String> = synchronized(commandLock) {
@@ -518,7 +541,9 @@ class VesselRuntimeController(
             startUml()
             startedAt = android.os.SystemClock.elapsedRealtime()
             running = true
-            val ready = guestBlocking("stty -echo 2>/dev/null || true; test -c /dev/dri/card0 && test -c /dev/dri/renderD128", 100)
+            progress("guest_boot", 40, "Waiting for Debian userspace")
+            awaitGuestShell(240)
+            val ready = guestBlocking("stty -echo 2>/dev/null || true; test -c /dev/dri/card0 && test -c /dev/dri/renderD128", 30)
             check(ready.first == 0) { "Debian/VirtIO GPU did not become ready: ${ready.second.takeLast(8000)}" }
             guestReady = true
             progress("input", 48, "Starting verified evdev/libinput devices")
@@ -565,12 +590,12 @@ class VesselRuntimeController(
     private fun stopBlocking() {
         runCatching {
             if (umlProcess?.isAlive == true) {
-                consoleWriter?.write("poweroff\n")
+                consoleWriter?.write("exit\n")
                 consoleWriter?.flush()
-                umlProcess?.waitFor(4, TimeUnit.SECONDS)
+                umlProcess?.waitFor(8, TimeUnit.SECONDS)
             }
         }
-        runCatching { umlProcess?.destroyForcibly() }
+        runCatching { if (umlProcess?.isAlive == true) umlProcess?.destroyForcibly() }
         runCatching { gpuProcess?.destroyForcibly() }
         umlProcess = null; gpuProcess = null; consoleWriter = null
         running = false; guestReady = false; desktopReady = false
