@@ -123,11 +123,22 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
         self._ensure_kmscube()
 
         self.set_progress("display_start", 75, "Starting accelerated DRM/KMS scanout")
+        # Debian's kmscube treats POLLIN/HUP on stdin as "user interrupted".
+        # /dev/null is therefore wrong for a daemonized launch because EOF is
+        # immediately pollable. Give kmscube a private pipe whose write end it
+        # keeps open itself across exec; fd 0 then stays quiet and non-EOF for
+        # the lifetime of kmscube without needing another helper process.
         self.guest(
             "pkill -x kmscube 2>/dev/null || true; "
             "rm -f /tmp/vessel-kmscube.log /tmp/vessel-kmscube.pid; "
-            "nohup env EGL_PLATFORM=gbm kmscube -D /dev/dri/card0 "
-            ">/tmp/vessel-kmscube.log 2>&1 </dev/null & echo $! >/tmp/vessel-kmscube.pid",
+            "nohup env EGL_PLATFORM=gbm python3 -c '"
+            "import os; "
+            "r,w=os.pipe(); "
+            "os.set_inheritable(w, True); "
+            "os.dup2(r, 0); "
+            "os.close(r); "
+            "os.execvp(\"kmscube\", [\"kmscube\", \"-D\", \"/dev/dri/card0\"])' "
+            ">/tmp/vessel-kmscube.log 2>&1 & echo $! >/tmp/vessel-kmscube.pid",
             20,
         )
 
@@ -136,12 +147,15 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
         while time.monotonic() < deadline:
             guest = self.guest(
                 "pid=$(cat /tmp/vessel-kmscube.pid 2>/dev/null || true); "
-                "case \"$pid\" in ''|*[!0-9]*) ;; *) kill -0 \"$pid\" 2>/dev/null && echo KMSCUBE_ALIVE || true ;; esac; "
-                "tail -40 /tmp/vessel-kmscube.log 2>/dev/null || true",
+                "case \"$pid\" in ''|*[!0-9]*) ;; *) kill -0 \"$pid\" 2>/dev/null && echo KMSCUBE_ALIVE || true ;; esac",
                 8,
             )
             if "KMSCUBE_ALIVE" not in guest:
-                raise RuntimeError("kmscube exited before scanout:\n" + guest[-6000:])
+                failure_log = self.guest(
+                    "tail -60 /tmp/vessel-kmscube.log 2>/dev/null | cut -c1-500 || true",
+                    8,
+                )
+                raise RuntimeError("kmscube exited before scanout:\n" + failure_log[-6000:])
             display = self._tail(DISPLAY_LOG, 12000)
             if "raw frame scanout=" in display and "presenter=yes" in display:
                 self.desktop_ready = True
