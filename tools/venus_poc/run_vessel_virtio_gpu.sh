@@ -49,9 +49,9 @@ for f in \
 done
 
 # Refuse to boot an older kernel that has virtio_gpu but lacks the GPU display
-# socket handoff.  Otherwise the backend would start and then mysteriously fail
-# with "set_gpu_socket() not called".
-if ! strings "$UML_DIR/linux-umshm" | grep -Fq 'Vessel vhost-user-gpu display relay attached'; then
+# socket handoff. Search the binary directly: `strings | grep -q` is unsafe with
+# pipefail because a successful early grep exit can SIGPIPE strings.
+if ! grep -aFq 'Vessel vhost-user-gpu display relay attached' "$UML_DIR/linux-umshm"; then
   echo "[vessel-vugpu] linux-umshm is older than the vhost-user-gpu handoff patch." >&2
   echo "[vessel-vugpu] install the newest 'Vessel UML SMP Kernel' artifact first." >&2
   exit 2
