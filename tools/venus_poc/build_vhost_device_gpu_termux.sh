@@ -25,11 +25,25 @@ if [ "$(uname -o 2>/dev/null || true)" != "Android" ] && [ ! -d /data/data/com.t
   exit 1
 fi
 
-echo "[vhost-gpu-build] installing build prerequisites..."
-pkg update -y
-pkg install -y rust clang git curl tar pkg-config make
+# Do not run a full pkg update on every retry.  Install only tools that are
+# actually missing; Cargo's target directory is persistent so failed builds
+# resume from the already-compiled crates.
+missing_pkgs=()
+command -v cargo >/dev/null 2>&1 || missing_pkgs+=(rust)
+command -v clang >/dev/null 2>&1 || missing_pkgs+=(clang)
+command -v git >/dev/null 2>&1 || missing_pkgs+=(git)
+command -v curl >/dev/null 2>&1 || missing_pkgs+=(curl)
+command -v tar >/dev/null 2>&1 || missing_pkgs+=(tar)
+command -v pkg-config >/dev/null 2>&1 || missing_pkgs+=(pkg-config)
+command -v make >/dev/null 2>&1 || missing_pkgs+=(make)
+if [ "${#missing_pkgs[@]}" -gt 0 ]; then
+  echo "[vhost-gpu-build] installing missing prerequisites: ${missing_pkgs[*]}"
+  pkg install -y "${missing_pkgs[@]}"
+else
+  echo "[vhost-gpu-build] build prerequisites already installed"
+fi
 
-for cmd in cargo clang git curl pkg-config; do need "$cmd"; done
+for cmd in cargo clang git curl tar pkg-config make; do need "$cmd"; done
 
 # Reuse Vessel's known-good Android virglrenderer build.  It is patched for
 # ANGLE and Venus and already works on this phone.  Build it only if missing.
@@ -48,11 +62,15 @@ VIRGL_LIB="$(find "$VIRGL_PREFIX/lib" -maxdepth 1 -type f -name 'libvirglrendere
   exit 1
 }
 
-mkdir -p "$WORK" "$INSTALL/bin" "$INSTALL/lib/pkgconfig" "$INSTALL/angle-shim"
+VIRGL_INCLUDE="$INSTALL/include"
+VIRGL_PUBLIC="$VIRGL_INCLUDE/virgl"
+mkdir -p "$WORK" "$INSTALL/bin" "$INSTALL/lib/pkgconfig" "$INSTALL/angle-shim" "$VIRGL_PUBLIC"
 
-# Termux intentionally strips the development headers/pkg-config metadata from
-# virglrenderer-android.  Fetch the *matching* 1.3.0 source only for public
-# headers and point pkg-config at the already-installed Android library.
+# Termux's runtime-only virglrenderer install has the .so but not the public
+# development headers/pkg-config metadata.  Fetch the matching 1.3.0 source and
+# recreate the normal installed header layout expected by virglrenderer-sys:
+#   <includedir>/virgl/virglrenderer.h
+#   <includedir>/virgl/virgl-version.h
 VIRGL_ARCHIVE="$WORK/virglrenderer-$VIRGL_VERSION.tar.gz"
 VIRGL_SRC="$WORK/virglrenderer-virglrenderer-$VIRGL_VERSION"
 if [ ! -f "$VIRGL_SRC/src/virglrenderer.h" ]; then
@@ -66,15 +84,31 @@ if [ ! -f "$VIRGL_SRC/src/virglrenderer.h" ]; then
   tar -xzf "$VIRGL_ARCHIVE" -C "$WORK"
 fi
 [ -f "$VIRGL_SRC/src/virglrenderer.h" ] || {
-  echo "[vhost-gpu-build] matching virglrenderer headers were not extracted" >&2
+  echo "[vhost-gpu-build] matching virglrenderer header was not extracted" >&2
   exit 1
 }
+[ -f "$VIRGL_SRC/src/virgl-version.h.meson" ] || {
+  echo "[vhost-gpu-build] matching virgl-version.h template was not extracted" >&2
+  exit 1
+}
+
+install -m0644 "$VIRGL_SRC/src/virglrenderer.h" "$VIRGL_PUBLIC/virglrenderer.h"
+IFS=. read -r VIRGL_MAJOR VIRGL_MINOR VIRGL_MICRO <<<"$VIRGL_VERSION"
+sed \
+  -e "s/@VIRGL_MAJOR_VERSION@/$VIRGL_MAJOR/g" \
+  -e "s/@VIRGL_MINOR_VERSION@/$VIRGL_MINOR/g" \
+  -e "s/@VIRGL_MICRO_VERSION@/$VIRGL_MICRO/g" \
+  "$VIRGL_SRC/src/virgl-version.h.meson" >"$VIRGL_PUBLIC/virgl-version.h"
+
+grep -Fq '#define VIRGL_MAJOR_VERSION' "$VIRGL_PUBLIC/virgl-version.h"
+grep -Fq '#define VIRGL_MINOR_VERSION' "$VIRGL_PUBLIC/virgl-version.h"
+grep -Fq '#define VIRGL_MICRO_VERSION' "$VIRGL_PUBLIC/virgl-version.h"
 
 cat >"$INSTALL/lib/pkgconfig/virglrenderer.pc" <<EOF
 prefix=$VIRGL_PREFIX
 exec_prefix=\${prefix}
 libdir=\${prefix}/lib
-includedir=$VIRGL_SRC/src
+includedir=$VIRGL_INCLUDE
 
 Name: virglrenderer
 Description: Vessel Android virglrenderer
@@ -82,6 +116,13 @@ Version: $VIRGL_VERSION
 Libs: -L\${libdir} -lvirglrenderer
 Cflags: -I\${includedir}
 EOF
+
+# Fail here with a small, readable diagnostic instead of 80 crates into Cargo if
+# the public-header layout ever changes again.
+printf '#include <virgl/virglrenderer.h>\n' | \
+  clang -E -x c -I"$VIRGL_INCLUDE" - >/dev/null
+
+echo "[vhost-gpu-build] virgl headers staged: $VIRGL_PUBLIC"
 
 # The Termux libepoxy patch normally gets its ANGLE path from
 # virgl_test_server_android --angle-vulkan.  vhost-device-gpu embeds the
@@ -131,7 +172,7 @@ print("[vhost-gpu-build] disabled unsupported RESOURCE_BLOB advertisement")
 PY
 
 export PKG_CONFIG_PATH="$INSTALL/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-export BINDGEN_EXTRA_CLANG_ARGS="-I$VIRGL_SRC/src ${BINDGEN_EXTRA_CLANG_ARGS:-}"
+export BINDGEN_EXTRA_CLANG_ARGS="-I$VIRGL_INCLUDE ${BINDGEN_EXTRA_CLANG_ARGS:-}"
 export LIBRARY_PATH="$VIRGL_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export RUSTFLAGS="-C link-arg=-Wl,-rpath,$VIRGL_PREFIX/lib ${RUSTFLAGS:-}"
 
