@@ -47,7 +47,12 @@ class VmSessionService:Service(){
     private fun applyState(o:JSONObject){val presenter=VesselWaylandPresenter.status();val err=o.optString("lastError");state.value=state.value.copy(running=o.optBoolean("running"),guestReady=o.optBoolean("guestReady"),displayReady=o.optBoolean("desktopReady")||presenter.startsWith("presenting-dmabuf"),presenterStatus=presenter,console=o.optString("logTail",state.value.console),lastError=err,uptimeMs=o.optLong("uptimeMs"),graphics=o.optString("renderer",state.value.graphics),message=when{err.isNotBlank()->err;presenter.startsWith("presenting-dmabuf")->"Plasma visible · direct DMA-BUF";o.optBoolean("guestReady")->state.value.progressDetail;else->state.value.message})}
     private suspend fun refreshState(){updateAvailability();if(!state.value.running)return;runCatching{runtime.status()}.onSuccess(::applyState)}
 
-    fun configureDisplay(width:Int,height:Int,densityDpi:Int,rate:Float){w=width;h=height;dpi=densityDpi;refresh=rate;runtime.configureDisplay(w,h,dpi,refresh)}
+    fun configureDisplay(width:Int,height:Int,densityDpi:Int,rate:Float){
+        val changed=width!=w||height!=h||densityDpi!=dpi||kotlin.math.abs(rate-refresh)>0.5f
+        w=width;h=height;dpi=densityDpi;refresh=rate
+        runtime.configureDisplay(w,h,dpi,refresh)
+        if(changed&&state.value.running&&state.value.guestReady){scope.launch(Dispatchers.IO){runtime.resizeDesktop(w,h,dpi,refresh)}}
+    }
     fun sendInput(type:String,values:Map<String,Any>)=runtime.input(type,values)
     fun startVm(){if(state.value.busy)return;updateAvailability();if(!state.value.connected)return;state.value=state.value.copy(busy=true,lastError="",progressPercent=1,progressDetail="Starting self-contained Vessel runtime",message="Starting Linux")
         scope.launch(Dispatchers.IO){try{val o=runtime.startDesktop();launch(Dispatchers.Main){applyState(o)}}catch(t:Throwable){launch(Dispatchers.Main){state.value=state.value.copy(lastError=t.message?:t.javaClass.simpleName,message=t.message?:"Startup failed")}}finally{launch(Dispatchers.Main){state.value=state.value.copy(busy=false)}}}}
