@@ -53,7 +53,26 @@ android {
       buildConfig = true
       shaders = false
     }
-    packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
+    packaging {
+      // Protocol 39 executes the UML/GPU/network helpers directly from the APK's
+      // nativeLibraryDir. Force extraction so those ELF files live on an executable
+      // filesystem rather than only inside the APK zip.
+      jniLibs {
+        useLegacyPackaging = true
+        keepDebugSymbols += setOf(
+          "**/libvessel_uml.so",
+          "**/libvessel_stub.so",
+          "**/libvessel_umnet.so",
+          "**/libvessel_passt.so",
+          "**/libvessel_vhost_gpu.so",
+          "**/libvessel_virglrenderer.so",
+          "**/libvessel_epoxy.so",
+          "**/libEGL_angle.so",
+          "**/libGLESv2_angle.so",
+        )
+      }
+      resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+    }
     ndkVersion = "29.0.14206865"
     externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
 }
