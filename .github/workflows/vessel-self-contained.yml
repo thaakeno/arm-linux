@@ -68,10 +68,15 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'v39-self-contained-dmabuf-virtio-input-r1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          # Revision numbers are allowed to advance. Verify the architecture,
+          # not one transient build label, so a legitimate runtime bump cannot
+          # fail CI before Gradle even runs.
+          grep -Eq 'const val REVISION = "v39-self-contained-dmabuf-virtio-input-r[0-9]+"' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'vhost-user-gpu-dmabuf-same-uid-v1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'virtio-input-vhost-user-same-uid-v1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'softwareFallback", false' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'VIRTIO_INPUT_ID = 18' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'CONFIG_VIRTIO_INPUT=y' tools/venus_poc/build_uml_smp_android.sh
           ! test -e app/src/main/assets/vessel/guest_input_agent.py
           ! grep -R -E 'VesselFrameTcpBridge|47635|47633|guest_input_agent|TermuxUmlController|com\.termux\.permission\.RUN_COMMAND' \
             app/src/main/AndroidManifest.xml \
