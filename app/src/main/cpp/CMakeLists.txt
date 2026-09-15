@@ -10,11 +10,12 @@ target_compile_features(dev1_payload PRIVATE cxx_std_17)
 target_compile_options(dev1_payload PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(dev1_payload PRIVATE dl)
 
-# Vessel protocol 37 presentation path. Weston 16's native Vulkan renderer
-# exports compositor dma-bufs through Venus/umshm. The Android side retains
-# imported dma-bufs across Surface recreation and presents them through a
-# FIFO/vsync Vulkan swapchain with three frames in flight. Protocol 37 does not
-# enable the presenter's legacy SHM message support.
+# Vessel protocol 38 Android presentation path. Linux 3D is rendered through
+# virtio-gpu/VirGL on host ANGLE/Vulkan/Adreno. Standard vhost-user-gpu RGB
+# scanout updates cross the Termux/Vessel sandbox boundary over loopback TCP,
+# then this native Vulkan presenter uploads/blits them into the SurfaceFlinger
+# swapchain. The existing dma-buf import path remains available for a future
+# same-UID/Binder FD transport.
 add_library(vessel_wayland_presenter SHARED vessel_wayland_presenter_v3.cpp)
 target_compile_features(vessel_wayland_presenter PRIVATE cxx_std_17)
 # Android Vulkan declarations in vulkan.h are gated on VK_USE_PLATFORM_ANDROID_KHR.
