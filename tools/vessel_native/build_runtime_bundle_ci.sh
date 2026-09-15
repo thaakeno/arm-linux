@@ -114,7 +114,7 @@ export CC_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android29-clang"
 export CXX_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android29-clang++"
 export AR_aarch64_linux_android="$TOOLCHAIN/bin/llvm-ar"
 export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android29 --sysroot=$TOOLCHAIN/sysroot -I$INC"
-CLANG_SO="$(find /usr/lib -type f -name 'libclang.so*' -print -quit)"; [ -n "$CLANG_SO" ] || { echo "libclang not found" >&2; exit 5; }
+CLANG_SO="$(find /usr/lib -name 'libclang.so*' -print -quit 2>/dev/null || true)"; [ -n "$CLANG_SO" ] || { echo "libclang not found" >&2; exit 5; }
 export LIBCLANG_PATH="$(dirname "$CLANG_SO")"
 export RUSTFLAGS="-C link-arg=-Wl,-rpath,\$ORIGIN"
 (cd "$VHOST"; cargo build --locked --release --target aarch64-linux-android -p vhost-device-gpu --no-default-features --features backend-virgl)
