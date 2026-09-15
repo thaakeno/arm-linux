@@ -21,7 +21,7 @@ class TermuxUmlController(private val context: Context) {
         const val CONTROL_PORT = 47631
         const val VNC_PORT = -1
         const val REQUIRED_PROTOCOL = 38
-        private const val REQUIRED_RUNTIME_REVISION = "v38-virtio-gpu-virgl-adreno"
+        private const val REQUIRED_RUNTIME_REVISION = "v38-virtio-gpu-plasma-r1"
         private const val DISPLAY_TRANSPORT = "virtio-gpu-rgb-loopback-android-vulkan-v1"
         private const val TERMUX_HOME = "/data/data/com.termux/files/home"
         private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
@@ -53,7 +53,7 @@ class TermuxUmlController(private val context: Context) {
             LOG=~/vessel-daemon.log
             : > "${'$'}LOG"
             {
-              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 38 VirtIO GPU / VirGL / Adreno"
+              echo "[vessel-launch] ${'$'}(date -Iseconds) protocol 38 KDE Plasma / VirtIO GPU / VirGL / Adreno"
               set -e
 
               RUNTIME=~/vessel-poc-runtime
@@ -63,6 +63,7 @@ class TermuxUmlController(private val context: Context) {
                 exit 70
               }
               test -f "${'$'}RUNTIME/tools/venus_poc/vessel_runtime_daemon_v38.py"
+              test -f "${'$'}RUNTIME/tools/venus_poc/guest_command_agent_v38.py"
               test -f "${'$'}RUNTIME/tools/venus_poc/run_vessel_virtio_gpu.sh"
               test -f "${'$'}RUNTIME/tools/venus_poc/vhost_gpu_display_frontend.py"
 
@@ -129,7 +130,7 @@ class TermuxUmlController(private val context: Context) {
             throw IllegalStateException(reason)
         }
         if (!isNativeProtocol(obj)) {
-            throw IllegalStateException("$action returned a stale Vessel runtime; protocol 38 is required")
+            throw IllegalStateException("$action returned a stale Vessel runtime; KDE Plasma protocol 38 runtime is required")
         }
         return obj
     }
@@ -157,7 +158,7 @@ class TermuxUmlController(private val context: Context) {
             }
         }
         throw IllegalStateException(
-            "Vessel protocol 38 runtime did not start. Update ~/vessel-poc-runtime manually, then check ~/vessel-daemon.log",
+            "Vessel KDE Plasma protocol 38 runtime did not start. Update ~/vessel-poc-runtime manually, then check ~/vessel-daemon.log",
             last,
         )
     }
@@ -175,6 +176,7 @@ class TermuxUmlController(private val context: Context) {
     }
 
     suspend fun stop(): JSONObject = withContext(Dispatchers.IO) {
+        VesselWaylandPresenter.resetPresentationLatch()
         runCatching { requestBlocking(JSONObject().put("action", "stop"), 15_000) }.getOrElse {
             JSONObject()
                 .put("ok", true)
@@ -192,6 +194,7 @@ class TermuxUmlController(private val context: Context) {
     }
 
     suspend fun startDesktop(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) {
+        VesselWaylandPresenter.resetPresentationLatch()
         ensureDaemon()
         requireOk(
             "Start display",
@@ -203,6 +206,7 @@ class TermuxUmlController(private val context: Context) {
     }
 
     suspend fun startDesktopAsync(width: Int, height: Int, dpi: Int): JSONObject = withContext(Dispatchers.IO) {
+        VesselWaylandPresenter.resetPresentationLatch()
         ensureDaemon()
         requireOk(
             "Start display",
