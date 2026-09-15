@@ -3,17 +3,18 @@ package com.example.dreamlinux
 import android.view.Surface
 
 /**
- * Native GPU presenter for Vessel's Wayland/Venus output path.
+ * Native Vulkan presenter for Vessel's Android SurfaceView.
  *
- * Frames arrive as compositor dma-bufs. Native code imports them into Vulkan
- * and presents them to the existing Vessel SurfaceView without VNC, screenshots
- * or CPU framebuffer copies. The Linux compositor is intentionally independent
- * from this Android presentation layer.
+ * Protocol 38 keeps Linux rendering on virtio-gpu/VirGL/ANGLE/Adreno. The
+ * cross-app frame stream enters Vessel over loopback TCP and is proxied from
+ * inside this UID to the native presenter. The native side performs the final
+ * Vulkan upload/blit/present to SurfaceFlinger.
  */
 object VesselWaylandPresenter {
     init {
         System.loadLibrary("vessel_wayland_presenter")
         nativeStart()
+        VesselFrameTcpBridge.start()
     }
 
     @JvmStatic private external fun nativeStart()
@@ -25,5 +26,8 @@ object VesselWaylandPresenter {
     fun attach(surface: Surface) = nativeAttachSurface(surface)
     fun detach() = nativeDetachSurface()
     fun status(): String = runCatching { nativeStatus() }.getOrElse { "presenter-error:${it.message}" }
-    fun shutdown() = nativeStop()
+    fun shutdown() {
+        VesselFrameTcpBridge.stop()
+        nativeStop()
+    }
 }
