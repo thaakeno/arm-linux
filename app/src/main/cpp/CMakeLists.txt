@@ -12,8 +12,13 @@ target_link_libraries(dev1_payload PRIVATE dl)
 
 # The presenter itself is the vhost-user-gpu display frontend. It receives
 # virglrenderer DMA-BUF FDs via SCM_RIGHTS inside Vessel's own UID and imports
-# them directly into Vulkan. There is intentionally no RGB/SHM fallback.
-add_library(vessel_wayland_presenter SHARED vessel_native_presenter.cpp)
+# them directly into Vulkan. The same library also owns the local Android ->
+# vhost-user virtio-input sender. There is intentionally no RGB/SHM or guest
+# networking input fallback.
+add_library(vessel_wayland_presenter SHARED
+    vessel_native_presenter.cpp
+    vessel_virtio_input.cpp
+)
 target_compile_features(vessel_wayland_presenter PRIVATE cxx_std_17)
 target_compile_definitions(vessel_wayland_presenter PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
 target_compile_options(vessel_wayland_presenter PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers -Wno-misleading-indentation)
