@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Vessel protocol 38: Debian UML + VirtIO GPU + KDE Plasma Wayland/KWin.
+"""Vessel protocol 38: Debian UML + VirtIO GPU + full KDE Plasma Wayland.
 
-The guest owns a normal Linux virtio-gpu DRM device. KWin runs directly on
-/dev/dri/card0 and Plasma renders through Mesa VirGL; the host vhost-user GPU
-continues through virglrenderer -> ANGLE/Vulkan -> Adreno. Final scanout reaches
-the Android Vulkan SurfaceView through Vessel's RGB loopback bridge.
+The guest owns a normal Linux virtio-gpu DRM device. A standard Plasma 5.27
+Wayland session launches unmodified KWin directly on /dev/dri/card0 and renders
+through Mesa VirGL; the host vhost-user GPU continues through virglrenderer ->
+ANGLE/Vulkan -> Adreno. Final scanout reaches the Android Vulkan SurfaceView
+through Vessel's RGB loopback bridge.
 
-No VNC, screenshots, nested Weston, Termux:X11, custom KWin output plugin, or
-software renderer is used.
+No kmscube, VNC, screenshots, nested Weston, Termux:X11, custom KWin output
+plugin, guest Venus, or software renderer is used.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from typing import Any
 import vessel_runtime_daemon_v33 as v33
 
 PROTOCOL_VERSION = 38
-RUNTIME_REVISION = "v38-virtio-gpu-plasma-r1"
+RUNTIME_REVISION = "v38-virtio-gpu-plasma-r2"
 DISPLAY_TRANSPORT = "virtio-gpu-rgb-loopback-android-vulkan-v1"
 POC = pathlib.Path.home() / "vessel-poc-runtime"
 if "VESSEL_POC_DIR" in __import__("os").environ:
@@ -73,8 +74,8 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
             return ""
 
     def _prepare_venus_guest(self) -> None:
-        # Name retained because Runtime.start() calls this virtual hook. Protocol
-        # 38 does not configure or use guest Venus.
+        # Name retained only because Runtime.start() calls this virtual hook.
+        # Protocol 38 deliberately does not configure or use guest Venus.
         self.set_progress("command_agent", 36, "Starting guest control + native input channel")
         agent = POC / "tools/venus_poc/guest_command_agent_v38.py"
         if not agent.exists():
@@ -105,6 +106,7 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
 
     def _ensure_plasma(self) -> None:
         have = self.guest(
+            "command -v startplasma-wayland >/dev/null && "
             "command -v kwin_wayland >/dev/null && "
             "command -v plasmashell >/dev/null && "
             "command -v dbus-run-session >/dev/null && "
@@ -116,7 +118,7 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
             15,
         )
         if "VESSEL_PLASMA_READY" not in have:
-            self.set_progress("display_deps", 60, "Installing KDE Plasma Wayland + session/input services")
+            self.set_progress("plasma_deps", 60, "Installing full KDE Plasma Wayland session")
             out = self.guest(
                 "export DEBIAN_FRONTEND=noninteractive; "
                 "apt-get update && "
@@ -127,6 +129,7 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
                 1800,
             )
             check = self.guest(
+                "command -v startplasma-wayland >/dev/null && "
                 "command -v kwin_wayland >/dev/null && "
                 "command -v plasmashell >/dev/null && "
                 "command -v dbus-run-session >/dev/null && "
@@ -139,11 +142,10 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
             if "VESSEL_PLASMA_READY" not in check:
                 raise RuntimeError("KDE Plasma Wayland installation failed:\n" + out[-10000:])
 
-        # KWin 5.27's DRM backend acquires DRM/input through a login1 session.
-        # This guest intentionally has a tiny non-systemd init, so provide the
-        # standard org.freedesktop.login1 API with elogind instead of faking or
-        # patching KWin.
-        self.set_progress("session_services", 68, "Starting udev, D-Bus and elogind")
+        # KWin 5.27's DRM backend acquires DRM and evdev devices through a
+        # login1 session. The guest intentionally has a minimal non-systemd PID
+        # 1, so run standard udev + D-Bus + elogind rather than patching KWin.
+        self.set_progress("plasma_session_services", 68, "Starting udev, D-Bus and elogind")
         services = self.guest(
             "set -e; "
             "mkdir -p /run/dbus /run/elogind /run/user; "
@@ -173,9 +175,10 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
             )
             raise RuntimeError("elogind/udev session services failed:\n" + diag[-10000:])
 
-        # Ensure su(1) opens an elogind PAM session. A real VT-backed PAM
-        # session is what lets unmodified KWin 5.27 own /dev/dri/card0 and the
-        # evdev devices through TakeControl/TakeDevice.
+        # A VT-backed PAM session is important: unmodified KWin then receives a
+        # genuine active seat0 login1 session and opens DRM/input using
+        # TakeControl/TakeDevice. This is the same interface a normal distro
+        # login manager supplies, without needing systemd as guest PID 1.
         prep = self.guest(
             "set -e; "
             "id -u vessel >/dev/null 2>&1 || useradd -m -s /bin/bash vessel; "
@@ -204,6 +207,11 @@ class VirtioGpuRuntime(v33.WlrootsRuntime):
 
     @staticmethod
     def _plasma_session_script() -> str:
+        # startplasma-wayland is KDE's real login-session entry point. Plasma
+        # 5.27 automatically uses its legacy plasma-session startup path when a
+        # systemd user manager is unavailable; that is exactly what this tiny
+        # UML guest needs. With DISPLAY/WAYLAND_DISPLAY absent, KWin's own 5.27
+        # backend selection chooses DRM/KMS. KWIN_DRM_DEVICES pins card0.
         return r"""#!/bin/bash
 set -euo pipefail
 exec >/tmp/vessel-plasma-session.log 2>&1
@@ -220,59 +228,18 @@ export KWIN_DRM_NO_DIRECT_SCANOUT=1
 export LIBGL_ALWAYS_SOFTWARE=0
 export QT_QUICK_BACKEND=opengl
 export MOZ_ENABLE_WAYLAND=1
-unset DISPLAY WAYLAND_DISPLAY
+unset DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET
 
 UID_NOW=$(id -u)
 export XDG_RUNTIME_DIR=/run/user/$UID_NOW
-mkdir -p "$XDG_RUNTIME_DIR"
+test -d "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
-rm -f "$XDG_RUNTIME_DIR"/wayland-* /tmp/vessel-kwin.log /tmp/vessel-plasmashell.log /tmp/vessel-kded.log
-echo "session=$XDG_SESSION_ID runtime=$XDG_RUNTIME_DIR tty=$(tty || true)"
-loginctl show-session "$XDG_SESSION_ID" -p Active -p Seat -p TTY -p Type -p Class -p State || true
+echo "session=${XDG_SESSION_ID:-missing} runtime=$XDG_RUNTIME_DIR tty=$(tty || true)"
+test -n "${XDG_SESSION_ID:-}"
+loginctl show-session "$XDG_SESSION_ID" -p Active -p Seat -p TTY -p Type -p Class -p State
 
-kwin_wayland --drm --xwayland --no-lockscreen --socket wayland-0 >/tmp/vessel-kwin.log 2>&1 &
-KWIN_PID=$!
-
-for i in $(seq 1 300); do
-    if [ -S "$XDG_RUNTIME_DIR/wayland-0" ]; then
-        break
-    fi
-    kill -0 "$KWIN_PID" 2>/dev/null || {
-        wait "$KWIN_PID" || true
-        echo "KWin exited before creating wayland-0"
-        exit 41
-    }
-    sleep .05
-done
-
-[ -S "$XDG_RUNTIME_DIR/wayland-0" ] || {
-    echo "KWin did not create a Wayland socket"
-    kill "$KWIN_PID" 2>/dev/null || true
-    exit 42
-}
-
-export WAYLAND_DISPLAY=wayland-0
-export QT_QPA_PLATFORM=wayland
-kded5 >/tmp/vessel-kded.log 2>&1 &
-plasmashell >/tmp/vessel-plasmashell.log 2>&1 &
-PLASMA_PID=$!
-
-for i in $(seq 1 200); do
-    kill -0 "$KWIN_PID" 2>/dev/null || { wait "$KWIN_PID" || true; exit 43; }
-    kill -0 "$PLASMA_PID" 2>/dev/null && {
-        echo VESSEL_PLASMA_PROCESS_READY
-        break
-    }
-    sleep .05
-done
-
-kill -0 "$PLASMA_PID" 2>/dev/null || {
-    echo "plasmashell exited during startup"
-    exit 44
-}
-
-wait "$KWIN_PID"
+exec startplasma-wayland
 """
 
     def _launch_plasma(self) -> None:
@@ -280,15 +247,18 @@ wait "$KWIN_PID"
         encoded = base64.b64encode(script.encode()).decode()
         self.guest(
             "pkill -u vessel -x plasmashell 2>/dev/null || true; "
+            "pkill -u vessel -x plasma_session 2>/dev/null || true; "
+            "pkill -u vessel -x ksmserver 2>/dev/null || true; "
             "pkill -u vessel -x kwin_wayland 2>/dev/null || true; "
-            "pkill -f '[s]u -l vessel -c /usr/local/bin/vessel-plasma-session' 2>/dev/null || true; "
-            "rm -f /tmp/vessel-plasma-session.log /tmp/vessel-kwin.log "
-            "/tmp/vessel-plasmashell.log /tmp/vessel-kded.log /tmp/vessel-plasma-launch.pid; "
+            "pkill -u vessel -f '[s]tartplasma-wayland' 2>/dev/null || true; "
+            "pkill -f '[s]u -l vessel -c .*vessel-plasma-session' 2>/dev/null || true; "
+            "rm -f /tmp/vessel-plasma-session.log /tmp/vessel-plasma-launch.log /tmp/vessel-plasma-launch.pid; "
             f"printf '%s' '{encoded}' | base64 -d >/usr/local/bin/vessel-plasma-session; "
             "chmod 755 /usr/local/bin/vessel-plasma-session; "
-            # setsid + opening tty1 gives su/PAM a real VT so pam_elogind
-            # registers a seat0 graphical session. The session itself stays an
-            # ordinary, unmodified KDE/KWin Wayland stack.
+            # setsid + tty1 causes su/PAM + pam_elogind to create a real active
+            # seat0 graphical session. dbus-run-session supplies the normal KDE
+            # session bus. KDE itself then starts KWin, kded, ksmserver,
+            # plasmashell and autostart components.
             "nohup setsid sh -c '"
             "exec </dev/tty1 >/dev/tty1 2>&1; "
             "exec su -l vessel -c \"dbus-run-session -- /usr/local/bin/vessel-plasma-session\""
@@ -298,69 +268,76 @@ wait "$KWIN_PID"
         )
 
     def ensure_desktop(self, width: int = 1280, height: int = 720, dpi: int = 120) -> dict[str, Any]:
+        # The virtual monitor mode is currently supplied by the already-proven
+        # protocol-38 VirtIO GPU frontend. Dynamic mode/DPI changes are a later
+        # display-mode milestone and must not be mixed into this Plasma switch.
         del width, height, dpi
         self.start()
         self._ensure_plasma()
 
         self.desktop_ready = False
-        self.set_progress("display_start", 76, "Starting KDE Plasma / KWin on /dev/dri/card0")
+        self.set_progress("plasma_start", 76, "Starting full KDE Plasma Wayland session on /dev/dri/card0")
         self._launch_plasma()
 
-        self.set_progress("display_frame", 88, "Waiting for KDE Plasma GPU scanout")
-        deadline = time.monotonic() + 120
+        self.set_progress("plasma_frame", 88, "Waiting for KDE Plasma GPU scanout")
+        started = time.monotonic()
+        deadline = started + 120
         process_ready = False
         while time.monotonic() < deadline:
             guest = self.guest(
                 "echo '=== processes ==='; "
                 "pgrep -u vessel -x kwin_wayland >/dev/null && echo KWIN_ALIVE || true; "
                 "pgrep -u vessel -x plasmashell >/dev/null && echo PLASMA_ALIVE || true; "
+                "pgrep -u vessel -x plasma_session >/dev/null && echo PLASMA_SESSION_ALIVE || true; "
                 "echo '=== sessions ==='; loginctl list-sessions --no-legend 2>/dev/null || true; "
                 "echo '=== libinput ==='; "
                 "libinput list-devices 2>/dev/null | grep -E '^Device:.*Vessel (Touchscreen|Trackpad|Keyboard)' || true",
                 12,
             )
-            if "KWIN_ALIVE" not in guest:
+
+            if "KWIN_ALIVE" in guest and "PLASMA_ALIVE" in guest:
+                process_ready = True
+            elif time.monotonic() - started > 12:
                 failure_log = self.guest(
-                    "echo '=== plasma session ==='; tail -160 /tmp/vessel-plasma-session.log 2>/dev/null || true; "
-                    "echo '=== kwin ==='; tail -220 /tmp/vessel-kwin.log 2>/dev/null || true; "
-                    "echo '=== launch ==='; tail -100 /tmp/vessel-plasma-launch.log 2>/dev/null || true; "
+                    "echo '=== plasma session ==='; tail -260 /tmp/vessel-plasma-session.log 2>/dev/null || true; "
+                    "echo '=== launch ==='; tail -120 /tmp/vessel-plasma-launch.log 2>/dev/null || true; "
+                    "echo '=== processes ==='; ps -ef | grep -E 'startplasma|plasma_session|kwin_wayland|plasmashell|ksmserver' | grep -v grep || true; "
                     "echo '=== loginctl ==='; loginctl list-sessions 2>&1 || true",
                     12,
                 )
-                raise RuntimeError("KWin exited before Plasma reached scanout:\n" + failure_log[-14000:])
-
-            if "PLASMA_ALIVE" in guest:
-                process_ready = True
+                raise RuntimeError("Full KDE Plasma session failed before scanout:\n" + failure_log[-16000:])
 
             display = self._tail(DISPLAY_LOG, 14000)
-            # Raw-scanout v2 does not forward all-black readback. Requiring both
-            # live KWin+plasmashell and a forwarded non-black scanout proves the
-            # desktop, renderer, DRM path and Android bridge are all active.
+            # Raw-scanout v2 never forwards an all-black readback. Requiring
+            # live KWin+plasmashell plus a forwarded non-black frame proves a
+            # real Plasma frame traversed DRM/VirGL and the Android bridge.
             if process_ready and "raw frame scanout=" in display and "presenter=yes" in display:
                 input_check = self.guest(
                     "libinput list-devices 2>/dev/null | "
                     "grep -E '^Device:.*Vessel (Touchscreen|Trackpad|Keyboard)' | head -10 || true",
                     10,
                 )
+                if "Vessel Touchscreen" not in input_check or "Vessel Trackpad" not in input_check or "Vessel Keyboard" not in input_check:
+                    raise RuntimeError("KWin/Plasma is visible but Linux libinput did not enumerate all Vessel input devices:\n" + input_check)
                 self.desktop_ready = True
                 self.last_error = ""
                 self.append("KWIN_DRM_PLASMA_READY\n")
                 self.append("VIRTIO_GPU_VALIDATED_FRAME_REACHED_VESSEL\n")
                 self.append("VESSEL_LIBINPUT_DEVICES=" + input_check.replace("\n", " | ") + "\n")
-                self.set_progress("frame_validated", 96, "Validated KDE Plasma GPU frame reached Vessel")
+                self.set_progress("plasma_frame_validated", 96, "Validated KDE Plasma GPU frame + libinput devices reached Vessel")
                 return self.state()
             time.sleep(.25)
 
         failure_log = self.guest(
-            "echo '=== plasma session ==='; tail -180 /tmp/vessel-plasma-session.log 2>/dev/null || true; "
-            "echo '=== kwin ==='; tail -240 /tmp/vessel-kwin.log 2>/dev/null || true; "
-            "echo '=== plasmashell ==='; tail -140 /tmp/vessel-plasmashell.log 2>/dev/null || true; "
+            "echo '=== plasma session ==='; tail -300 /tmp/vessel-plasma-session.log 2>/dev/null || true; "
+            "echo '=== launch ==='; tail -140 /tmp/vessel-plasma-launch.log 2>/dev/null || true; "
+            "echo '=== processes ==='; ps -ef | grep -E 'startplasma|plasma_session|kwin_wayland|plasmashell|ksmserver' | grep -v grep || true; "
             "echo '=== input ==='; libinput list-devices 2>/dev/null | grep -A12 -B2 Vessel || true",
             15,
         )
         raise RuntimeError(
             "No validated KDE Plasma VirtIO-GPU frame reached Vessel within 120s.\n"
-            + "=== guest ===\n" + failure_log[-16000:]
+            + "=== guest ===\n" + failure_log[-18000:]
             + "\n=== display ===\n" + self._tail(DISPLAY_LOG, 12000)
             + "\n=== gpu ===\n" + self._tail(GPU_LOG, 12000)
         )
@@ -393,8 +370,11 @@ wait "$KWIN_PID"
             try:
                 self.guest(
                     "pkill -u vessel -x plasmashell 2>/dev/null || true; "
+                    "pkill -u vessel -x plasma_session 2>/dev/null || true; "
+                    "pkill -u vessel -x ksmserver 2>/dev/null || true; "
                     "pkill -u vessel -x kded5 2>/dev/null || true; "
                     "pkill -u vessel -x kwin_wayland 2>/dev/null || true; "
+                    "pkill -u vessel -f '[s]tartplasma-wayland' 2>/dev/null || true; "
                     "pkill -f '[s]u -l vessel -c .*vessel-plasma-session' 2>/dev/null || true",
                     10,
                 )
