@@ -61,22 +61,24 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          chmod +x tools/vessel_native/build_runtime_bundle_ci.sh
+          chmod +x tools/vessel_native/build_runtime_bundle_ci.sh tools/vessel_native/rebuild_vhost_gpu_ahb.sh
           tools/vessel_native/build_runtime_bundle_ci.sh
+          tools/vessel_native/rebuild_vhost_gpu_ahb.sh
 
       - name: Verify production architecture has no legacy display or input bridge
         shell: bash
         run: |
           set -euxo pipefail
-          # Revision numbers are allowed to advance. Verify the architecture,
-          # not one transient build label, so a legitimate runtime bump cannot
-          # fail CI before Gradle even runs.
           grep -Eq 'const val REVISION = "v39-self-contained-dmabuf-virtio-input-r[0-9]+"' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'vhost-user-gpu-dmabuf-same-uid-v1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'virtio-input-vhost-user-same-uid-v1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'softwareFallback", false' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'VIRTIO_INPUT_ID = 18' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'CONFIG_VIRTIO_INPUT=y' tools/venus_poc/build_uml_smp_android.sh
+          grep -F 'display_bridge=android-hardware-buffer-zero-copy-v1' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'runtime=v39-self-contained-ahb-virtio-input-r4' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'nativeAhbAttachSurface' app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt
+          grep -F 'AHardwareBuffer_sendHandleToUnixSocket' tools/vessel_native/vessel_ahb_bridge.cpp
           ! test -e app/src/main/assets/vessel/guest_input_agent.py
           ! grep -R -E 'VesselFrameTcpBridge|47635|47633|guest_input_agent|TermuxUmlController|com\.termux\.permission\.RUN_COMMAND' \
             app/src/main/AndroidManifest.xml \
@@ -84,14 +86,17 @@ jobs:
             app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt \
             app/src/main/java/com/example/dreamlinux/VesselVirtioInput.kt \
             app/src/main/cpp/vessel_native_presenter.cpp \
+            app/src/main/cpp/vessel_ahb_presenter.cpp \
             app/src/main/cpp/vessel_virtio_input.cpp
           test -x app/src/main/jniLibs/arm64-v8a/libvessel_uml.so
           test -x app/src/main/jniLibs/arm64-v8a/libvessel_vhost_gpu.so
           test -x app/src/main/jniLibs/arm64-v8a/libvessel_vhost_input.so
+          test -s app/src/main/jniLibs/arm64-v8a/libvessel_ahb_bridge.so
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_virglrenderer.so
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_epoxy.so
           test -s app/src/main/jniLibs/arm64-v8a/libEGL_angle.so
           test -s app/src/main/jniLibs/arm64-v8a/libGLESv2_angle.so
+          patchelf --print-needed app/src/main/jniLibs/arm64-v8a/libvessel_vhost_gpu.so | grep -Fq libvessel_ahb_bridge.so
 
       - name: Build, test and lint APK
         shell: bash
@@ -108,7 +113,8 @@ jobs:
           unzip -l "$APK" | tee /tmp/apk-files.txt
           for f in \
             libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so \
-            libvessel_vhost_gpu.so libvessel_vhost_input.so libvessel_virglrenderer.so libvessel_epoxy.so \
+            libvessel_vhost_gpu.so libvessel_vhost_input.so libvessel_ahb_bridge.so \
+            libvessel_virglrenderer.so libvessel_epoxy.so \
             libEGL_angle.so libGLESv2_angle.so libvessel_wayland_presenter.so; do
             grep -Fq "lib/arm64-v8a/$f" /tmp/apk-files.txt || { echo "APK missing $f" >&2; exit 1; }
           done
