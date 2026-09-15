@@ -15,7 +15,7 @@ POC_DIR="${POC_DIR:-$HOME/vessel-poc-runtime}"
 UML_DIR="${UML_DIR:-$HOME/venus-wsi-local}"
 GPU_PREFIX="${VESSEL_VHOST_GPU_PREFIX:-$PREFIX/opt/vessel-vhost-gpu}"
 GPU_BIN="${VESSEL_VHOST_GPU_BIN:-$GPU_PREFIX/bin/vhost-device-gpu}"
-GPU_RAW_MARKER="$GPU_PREFIX/.vessel-raw-scanout-v1"
+GPU_RAW_MARKER="$GPU_PREFIX/.vessel-raw-scanout-v2"
 GPU_SOCK="${VESSEL_GPU_SOCK:-$PREFIX/tmp/vessel-vugpu.sock}"
 GPU_DISPLAY_SOCK="${GPU_SOCK}.display"
 GPU_LOG="${VESSEL_GPU_LOG:-$UML_DIR/vessel-vhost-gpu.log}"
@@ -61,10 +61,11 @@ if ! grep -aFq 'Vessel vhost-user-gpu display relay attached' "$UML_DIR/linux-um
   exit 2
 fi
 
-# Protocol 38 needs the raw scanout build. Rebuild once when upgrading from the
-# earlier dma-buf-only host binary; subsequent boots reuse it.
+# Protocol 38 raw-scanout v2 fixes VirGL readback stride and suppresses blank
+# frames. A missing v2 marker intentionally forces one incremental backend
+# rebuild when upgrading from v1; subsequent boots reuse the binary.
 if [ ! -x "$GPU_BIN" ] || [ ! -f "$GPU_RAW_MARKER" ]; then
-  echo "[vessel-vugpu] installing protocol 38 raw-scanout GPU backend once..."
+  echo "[vessel-vugpu] installing protocol 38 raw-scanout v2 GPU backend once..."
   bash "$POC_DIR/tools/venus_poc/build_vhost_device_gpu_termux_raw.sh"
 fi
 need_file "$GPU_BIN"
