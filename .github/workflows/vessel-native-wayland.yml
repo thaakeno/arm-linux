@@ -12,6 +12,7 @@ on:
       - 'settings.gradle.kts'
       - 'gradle.properties'
       - 'tools/venus_poc/vessel_runtime_daemon_v38.py'
+      - 'tools/venus_poc/guest_command_agent_v38.py'
       - 'tools/venus_poc/vhost_gpu_display_frontend.py'
       - 'tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py'
       - 'tools/venus_poc/build_vhost_device_gpu_termux.sh'
@@ -38,21 +39,30 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Verify protocol 38 runtime
+      - name: Verify protocol 38 Plasma runtime
         run: |
           set -euxo pipefail
           python3 -m py_compile \
             tools/venus_poc/vessel_runtime_daemon_v38.py \
+            tools/venus_poc/guest_command_agent_v38.py \
             tools/venus_poc/vhost_gpu_display_frontend.py \
             tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py \
             tools/venus_poc/host_input_bridge.py
           bash -n tools/venus_poc/run_vessel_virtio_gpu.sh
           bash -n tools/venus_poc/build_vhost_device_gpu_termux_raw.sh
           grep -F 'PROTOCOL_VERSION = 38' tools/venus_poc/vessel_runtime_daemon_v38.py
-          grep -F 'v38-virtio-gpu-virgl-adreno' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'v38-virtio-gpu-plasma-r1' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'virtio-gpu-rgb-loopback-android-vulkan-v1' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'VIRTIO_GPU_DRM_READY' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'KWIN_DRM_PLASMA_READY' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'VIRTIO_GPU_VALIDATED_FRAME_REACHED_VESSEL' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'kwin_wayland --drm --xwayland' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'KWIN_DRM_DEVICES=/dev/dri/card0' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'libinput list-devices' tools/venus_poc/vessel_runtime_daemon_v38.py
+          grep -F 'UI_SET_PROPBIT' tools/venus_poc/guest_command_agent_v38.py
+          grep -F 'INPUT_PROP_DIRECT' tools/venus_poc/guest_command_agent_v38.py
+          grep -F 'INPUT_PROP_POINTER' tools/venus_poc/guest_command_agent_v38.py
+          ! grep -F 'kmscube' tools/venus_poc/vessel_runtime_daemon_v38.py
           grep -F 'VESSEL_RAW_SCANOUT_V2' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
           grep -F 'stride = width.checked_mul(4)' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
           grep -F 'has_visible_rgb' tools/venus_poc/patch_vhost_device_gpu_raw_scanout.py
@@ -65,11 +75,15 @@ jobs:
         run: |
           set -euxo pipefail
           grep -F 'REQUIRED_PROTOCOL = 38' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
-          grep -F 'v38-virtio-gpu-virgl-adreno' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'v38-virtio-gpu-plasma-r1' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'guest_command_agent_v38.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'vessel_runtime_daemon_v38.py' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
+          grep -F 'resetPresentationLatch()' app/src/main/java/com/example/dreamlinux/TermuxUmlController.kt
           grep -F 'VesselFrameTcpBridge.start()' app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt
           grep -F 'private const val PORT = 47635' app/src/main/java/com/example/dreamlinux/VesselFrameTcpBridge.kt
           grep -F 'frameValidated && presenter.startsWith("presenting-")' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'scrollPrecise' app/src/main/java/com/example/dreamlinux/VesselInputClient.kt app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
+          grep -F 'BTN_RIGHT' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
           grep -F 'state.progressPercent}%' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'VirtIO GPU · VirGL · Adreno' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'keepScreenOn = false' app/src/main/java/com/example/dreamlinux/VncFramebufferView.kt
@@ -100,7 +114,7 @@ jobs:
       - name: Upload Vessel APK
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-protocol38-virtio-gpu-debug
+          name: vessel-protocol38-plasma-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
