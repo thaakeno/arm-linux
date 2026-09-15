@@ -9,6 +9,13 @@ stream into its native Vulkan presenter from inside the Vessel UID.
 3D rendering remains guest Mesa/VirGL -> host virglrenderer -> ANGLE/Vulkan ->
 Adreno. Only the final cross-app presentation hop is copied, because Android
 SELinux blocks SCM_RIGHTS directly from the Termux app UID to Vessel.
+
+Important format rule: VHOST_USER_GPU_UPDATE is defined by the QEMU protocol as
+PIXMAN_x8r8g8b8. It does not carry a DRM fourcc. We therefore perform one
+explicit conversion at this protocol boundary: preserve RGB, force the unused
+X byte opaque, and describe the resulting canonical buffer as
+DRM_FORMAT_ARGB8888 to the Android Vulkan presenter. We never guess a fourcc
+from the rendered resource.
 """
 from __future__ import annotations
 
@@ -57,6 +64,36 @@ VESSEL_SHM_DAMAGE = 4
 VESSEL_FRAME_MSG = struct.Struct("=IIIIIIIIQQ")
 ANDROID_FRAME_HOST = "127.0.0.1"
 ANDROID_FRAME_PORT = 47635
+
+
+def drm_fourcc(code: str) -> int:
+    """Build a DRM fourcc exactly like fourcc_code(a,b,c,d)."""
+    if len(code) != 4 or not code.isascii():
+        raise ValueError(f"invalid DRM fourcc {code!r}")
+    raw = code.encode("ascii")
+    return raw[0] | raw[1] << 8 | raw[2] << 16 | raw[3] << 24
+
+
+# Canonical format used only after converting the protocol-defined
+# PIXMAN_x8r8g8b8 update into an opaque buffer.
+DRM_FORMAT_ARGB8888 = drm_fourcc("AR24")
+
+
+def pixman_x8r8g8b8_to_argb8888_opaque(pixels: bytes) -> bytes:
+    """Convert protocol-defined PIXMAN_x8r8g8b8 to opaque ARGB8888.
+
+    PIXMAN_x8r8g8b8 is a native-endian 32-bit pixel 0xXXRRGGBB. The X byte is
+    explicitly not alpha, so passing it straight to a Vulkan A8 format is wrong:
+    renderers are free to leave X as zero. Termux and Vessel run on the same
+    Android CPU and therefore share byte order. We only replace that unused X
+    byte with 0xff; RGB bytes are never reordered or guessed.
+    """
+    if len(pixels) % 4:
+        raise RuntimeError(f"PIXMAN_x8r8g8b8 payload is not 32-bit aligned: {len(pixels)} bytes")
+    out = bytearray(pixels)
+    alpha_offset = 3 if sys.byteorder == "little" else 0
+    out[alpha_offset::4] = b"\xff" * (len(out) // 4)
+    return bytes(out)
 
 
 def recvn(sock: socket.socket, n: int) -> bytes:
@@ -280,19 +317,25 @@ class Frontend:
         if len(payload) < UPDATE.size:
             raise RuntimeError("short GPU_UPDATE")
         scanout_id, x, y, width, height = UPDATE.unpack(payload[:UPDATE.size])
-        pixels = payload[UPDATE.size:]
+        pixman_pixels = payload[UPDATE.size:]
         state = self.scanouts.get(scanout_id)
         full_width = state.width if state and state.width else self.width
         full_height = state.height if state and state.height else self.height
         expected = width * height * 4
-        if len(pixels) != expected:
-            raise RuntimeError(f"raw update bytes={len(pixels)} expected={expected}")
+        if len(pixman_pixels) != expected:
+            raise RuntimeError(f"raw update bytes={len(pixman_pixels)} expected={expected}")
+
+        # QEMU's vhost-user-gpu specification fixes GPU_UPDATE to
+        # PIXMAN_x8r8g8b8. The X channel is *not alpha*. Convert once at the
+        # protocol boundary so the Vulkan presenter always receives a real
+        # opaque ARGB8888 buffer instead of interpreting an undefined X byte.
+        pixels = pixman_x8r8g8b8_to_argb8888_opaque(pixman_pixels)
         msg = VESSEL_FRAME_MSG.pack(
             VESSEL_FRAME_MAGIC,
             VESSEL_SHM_DAMAGE,
             full_width,
             full_height,
-            0x34325258,
+            DRM_FORMAT_ARGB8888,
             width * 4,
             x,
             y,
@@ -302,6 +345,7 @@ class Frontend:
         presented = self.presenter.shm_damage(msg, pixels)
         print(
             f"[vugpu-display] raw frame scanout={scanout_id} damage={width}x{height}+{x}+{y} "
+            "format=PIXMAN_x8r8g8b8->DRM_FORMAT_ARGB8888(opaque) "
             f"presenter={'yes' if presented else 'not-connected'}",
             flush=True,
         )
