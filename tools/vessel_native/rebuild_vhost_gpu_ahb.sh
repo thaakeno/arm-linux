@@ -38,21 +38,21 @@ patchelf --set-rpath '$ORIGIN' "$OUT/libvessel_ahb_bridge.so"
 # EGL_NO_CONTEXT even though VirGL's ANGLE context was current. Require the
 # bridge to bind to the exact same bundled ANGLE libraries as VirGL.
 BRIDGE_NEEDED="$(patchelf --print-needed "$OUT/libvessel_ahb_bridge.so")"
-grep -Fxq 'libEGL_angle.so' <<<"$BRIDGE_NEEDED"
-grep -Fxq 'libGLESv2_angle.so' <<<"$BRIDGE_NEEDED"
-if grep -Eq '^(libEGL\.so|libGLESv2\.so)$' <<<"$BRIDGE_NEEDED"; then
+grep -Fx 'libEGL_angle.so' <<<"$BRIDGE_NEEDED" >/dev/null
+grep -Fx 'libGLESv2_angle.so' <<<"$BRIDGE_NEEDED" >/dev/null
+if grep -E '^(libEGL\.so|libGLESv2\.so)$' <<<"$BRIDGE_NEEDED" >/dev/null; then
   echo "AHardwareBuffer bridge accidentally depends on Android system EGL/GLES" >&2
   printf '%s\n' "$BRIDGE_NEEDED" >&2
   exit 5
 fi
 for sym in eglGetCurrentDisplay eglGetCurrentContext eglGetError eglGetProcAddress; do
-  "$NM" -D "$OUT/libEGL_angle.so" | grep -Eq " [TW] ${sym}$" || {
+  "$NM" -D "$OUT/libEGL_angle.so" | grep -E " [TW] ${sym}$" >/dev/null || {
     echo "bundled ANGLE EGL is missing $sym" >&2
     exit 5
   }
 done
 for sym in glBindFramebuffer glBlitFramebuffer glCheckFramebufferStatus glFinish glGenFramebuffers glGetError; do
-  "$NM" -D "$OUT/libGLESv2_angle.so" | grep -Eq " [TW] ${sym}$" || {
+  "$NM" -D "$OUT/libGLESv2_angle.so" | grep -E " [TW] ${sym}$" >/dev/null || {
     echo "bundled ANGLE GLES is missing $sym" >&2
     exit 5
   }
@@ -61,12 +61,12 @@ echo "[vessel-ahb] bridge EGL/GLES dispatch pinned to bundled ANGLE"
 
 # Catch the exact Android runtime failure r4 exposed: the C virglrenderer API
 # must remain an unmangled C symbol when referenced from our C++ bridge.
-"$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge.so" | grep -Fq 'virgl_renderer_resource_get_info'
-if "$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge.so" | grep -Fq '_Z32virgl_renderer_resource_get_info'; then
+"$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge.so" | grep -F 'virgl_renderer_resource_get_info' >/dev/null
+if "$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge.so" | grep -F '_Z32virgl_renderer_resource_get_info' >/dev/null; then
   echo "AHardwareBuffer bridge references C++-mangled virgl_renderer_resource_get_info" >&2
   exit 5
 fi
-"$NM" -D "$OUT/libvessel_virglrenderer.so" | grep -Fq 'virgl_renderer_resource_get_info'
+"$NM" -D "$OUT/libvessel_virglrenderer.so" | grep -F 'virgl_renderer_resource_get_info' >/dev/null
 
 # Rebuild vhost-device-gpu from its pinned source with the Android-native
 # scanout path. The normal vhost-user-gpu side channel stays active for EDID
@@ -117,8 +117,9 @@ while read -r dep; do
   esac
 done < <(patchelf --print-needed "$OUT/libvessel_vhost_gpu.so")
 
-patchelf --print-needed "$OUT/libvessel_vhost_gpu.so" | grep -Fq 'libvessel_ahb_bridge.so'
-strings "$OUT/libvessel_vhost_gpu.so" | grep -Fq 'Vessel Android HardwareBuffer scanout'
+VHOST_NEEDED="$(patchelf --print-needed "$OUT/libvessel_vhost_gpu.so")"
+grep -F 'libvessel_ahb_bridge.so' <<<"$VHOST_NEEDED" >/dev/null
+strings "$OUT/libvessel_vhost_gpu.so" | grep -F 'Vessel Android HardwareBuffer scanout' >/dev/null
 
 # Recreate the runtime manifest from the actual files every build. The fast
 # native cache intentionally does not cache app assets, so relying on an old
