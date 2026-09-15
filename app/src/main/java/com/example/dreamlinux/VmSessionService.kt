@@ -52,6 +52,9 @@ class VmSessionService:Service(){
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main.immediate)
     private lateinit var runtime:VesselRuntimeController
     private var w=1280;private var h=720;private var dpi=120;private var refresh=120f
+    @Volatile private var operationGeneration=0L
+
+    private fun nextOperation():Long=synchronized(this){++operationGeneration}
 
     override fun onCreate(){super.onCreate();active=this
         runtime=VesselRuntimeController(this){phase,pct,detail->state.value=state.value.copy(stage=phase,progressPercent=pct,progressDetail=detail,message=detail)}
@@ -82,6 +85,7 @@ class VmSessionService:Service(){
     private fun applyState(o:JSONObject){
         val presenter=VesselWaylandPresenter.status();val err=o.optString("lastError")
         val frame=o.optBoolean("frameContentValidated")||presenter.startsWith("presenting-dmabuf")
+        val stoppingNow=state.value.stage=="stopping"
         state.value=state.value.copy(
             running=o.optBoolean("running"),
             guestReady=o.optBoolean("guestReady"),
@@ -98,12 +102,13 @@ class VmSessionService:Service(){
             displayTransport=o.optString("displayTransport",state.value.displayTransport),
             runtimeRevision=o.optString("runtimeRevision",state.value.runtimeRevision),
             guestMemoryMb=o.optInt("guestMemoryMb",state.value.guestMemoryMb),
-            message=when{err.isNotBlank()->err;presenter.startsWith("presenting-dmabuf")->"Plasma visible · direct DMA-BUF";o.optBoolean("guestReady")->state.value.progressDetail;else->state.value.message},
+            message=when{stoppingNow->"Stopping Linux";err.isNotBlank()->err;presenter.startsWith("presenting-dmabuf")->"Plasma visible · direct DMA-BUF";o.optBoolean("guestReady")->state.value.progressDetail;else->state.value.message},
         )
     }
 
     private suspend fun refreshState(){
         refreshAvailability()
+        if(state.value.stage=="stopping")return
         if(!state.value.running&&!state.value.busy)return
         runCatching{runtime.status()}.onSuccess(::applyState)
     }
@@ -121,31 +126,45 @@ class VmSessionService:Service(){
         if(state.value.busy)return
         refreshAvailability()
         if(!state.value.connected)return
-        state.value=state.value.copy(busy=true,lastError="",progressPercent=1,progressDetail="Starting self-contained Vessel runtime",message="Starting Linux",terminalOutput="")
+        val op=nextOperation()
+        state.value=state.value.copy(busy=true,lastError="",stage="starting",progressPercent=1,progressDetail="Starting self-contained Vessel runtime",message="Starting Linux",terminalOutput="")
         scope.launch(Dispatchers.IO){
             try{
                 val o=runtime.startDesktop()
-                launch(Dispatchers.Main){applyState(o)}
+                launch(Dispatchers.Main){if(op==operationGeneration)applyState(o)}
             }catch(t:Throwable){
                 val snapshot=runCatching{runtime.status()}.getOrNull()
                 launch(Dispatchers.Main){
+                    if(op!=operationGeneration)return@launch
                     if(snapshot!=null)applyState(snapshot)
                     state.value=state.value.copy(lastError=t.message?:t.javaClass.simpleName,message=t.message?:"Startup failed")
                 }
             }finally{
-                launch(Dispatchers.Main){state.value=state.value.copy(busy=false)}
+                launch(Dispatchers.Main){
+                    if(op==operationGeneration){
+                        val current=state.value
+                        state.value=current.copy(busy=false,stage=if(current.running)current.stage else "idle")
+                    }
+                }
             }
         }
     }
 
     fun stopVm(){
-        if(state.value.busy)return
-        state.value=state.value.copy(busy=true,message="Stopping Linux")
+        val current=state.value
+        if(!current.running&&!current.busy)return
+        if(current.stage=="stopping")return
+        val op=nextOperation()
+        state.value=current.copy(busy=true,stage="stopping",progressDetail="Stopping Linux safely",message="Stopping Linux",lastError="")
         scope.launch(Dispatchers.IO){
             val r=runCatching{runtime.stop()}
             launch(Dispatchers.Main){
+                if(op!=operationGeneration)return@launch
                 r.onSuccess(::applyState).onFailure{state.value=state.value.copy(lastError=it.message?:"Stop failed")}
-                state.value=state.value.copy(busy=false,running=false,guestReady=false,displayReady=false,inputReady=false,frameReachedApp=false,message="Linux stopped; disk retained")
+                state.value=state.value.copy(
+                    busy=false,running=false,guestReady=false,displayReady=false,inputReady=false,frameReachedApp=false,
+                    stage="idle",progressPercent=0,progressDetail="Runtime stopped",message="Linux stopped; disk retained",
+                )
             }
         }
     }

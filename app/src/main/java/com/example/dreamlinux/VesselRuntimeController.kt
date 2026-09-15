@@ -35,7 +35,7 @@ class VesselRuntimeController(
 ) {
     companion object {
         const val PROTOCOL = 39
-        const val REVISION = "v39-self-contained-dmabuf-virtio-input-r2"
+        const val REVISION = "v39-self-contained-dmabuf-virtio-input-r3"
         const val DISPLAY_TRANSPORT = "vhost-user-gpu-dmabuf-same-uid-v1"
         const val INPUT_TRANSPORT = "virtio-input-vhost-user-same-uid-v1"
         private const val ROOTFS_URL = "https://github.com/zalexdev/linux-um-arm64/releases/download/prebuilt-20260816/debian-docker.ext4.gz"
@@ -43,7 +43,7 @@ class VesselRuntimeController(
         private const val GUEST_READY_BANNER = "Type 'exit' to shut the kernel down and return to Android."
         private const val VIRTIO_GPU_ID = 16
         private const val VIRTIO_INPUT_ID = 18
-        private const val MIN_DISK_CAPACITY_BYTES = 4L * 1024L * 1024L * 1024L
+        private const val MIN_DISK_CAPACITY_BYTES = 6L * 1024L * 1024L * 1024L
         private const val MIN_HOST_FREE_BYTES = 2L * 1024L * 1024L * 1024L
         private const val MIN_GUEST_FREE_KIB = 2_000_000L
     }
@@ -123,6 +123,7 @@ class VesselRuntimeController(
     @Volatile private var consoleWriter: BufferedWriter? = null
     @Volatile private var pendingMarker: String? = null
     @Volatile private var pendingFuture: CompletableFuture<Pair<Int, String>>? = null
+    @Volatile private var pendingLineObserver: ((String) -> Unit)? = null
     private val pendingOutput = StringBuilder()
     private val commandId = AtomicLong()
     @Volatile private var guestShellReady = CompletableFuture<Unit>()
@@ -212,7 +213,10 @@ class VesselRuntimeController(
 
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
         val presenter = VesselWaylandPresenter.status()
-        if (presenter.startsWith("presenting-dmabuf")) desktopReady = true
+        if (presenter.startsWith("presenting-dmabuf")) {
+            desktopReady = true
+            lastError = ""
+        }
         if (inputReady && !inputBackendsAlive()) inputReady = false
         baseState().put("presenter", presenter)
     }
@@ -244,7 +248,7 @@ class VesselRuntimeController(
             }
         }
         val before = disk.length()
-        progress("disk_capacity", 26, "Preparing expandable Debian disk")
+        progress("disk_capacity", 26, "Growing Debian disk capacity safely")
         RandomAccessFile(disk, "rw").use { it.setLength(MIN_DISK_CAPACITY_BYTES) }
         check(disk.length() == MIN_DISK_CAPACITY_BYTES) { "Could not expand Debian disk backing file" }
         append(
@@ -298,8 +302,8 @@ class VesselRuntimeController(
                 process.inputStream.bufferedReader().useLines { lines ->
                     lines.forEach { append("$prefix$it\n") }
                 }
-            } catch (e: IOException) {
-                if (!stopping) append("$prefix[log reader closed: ${e.message}]\n")
+            } catch (t: Throwable) {
+                if (!stopping && process.isAlive) append("$prefix[log reader closed: ${t.message}]\n")
             }
         }, threadName).apply { isDaemon = true; start() }
     }
@@ -435,6 +439,7 @@ class VesselRuntimeController(
                         if (line.contains(GUEST_READY_BANNER) && guestShellReady.complete(Unit)) {
                             append("[guest] interactive shell ready\n")
                         }
+                        var observer: ((String) -> Unit)? = null
                         synchronized(consoleLock) {
                             val marker = pendingMarker
                             val trimmed = line.trim()
@@ -444,18 +449,22 @@ class VesselRuntimeController(
                                     pendingFuture?.complete(rc to pendingOutput.toString())
                                     pendingMarker = null
                                     pendingFuture = null
+                                    pendingLineObserver = null
                                     pendingOutput.setLength(0)
                                 } else {
                                     pendingOutput.append(line).append('\n')
+                                    observer = pendingLineObserver
                                 }
                             } else if (marker != null) {
                                 pendingOutput.append(line).append('\n')
+                                observer = pendingLineObserver
                             }
                         }
+                        observer?.let { runCatching { it(line) } }
                     }
                 }
-            } catch (e: IOException) {
-                if (!stopping) append("[host] UML console reader closed unexpectedly: ${e.message}\n")
+            } catch (t: Throwable) {
+                if (!stopping) append("[host] UML console reader closed unexpectedly: ${t.message}\n")
             } finally {
                 val rc = runCatching { p.waitFor() }.getOrDefault(-1)
                 val failure = IllegalStateException("UML exited before guest command completed (rc=$rc)")
@@ -463,6 +472,7 @@ class VesselRuntimeController(
                     pendingFuture?.completeExceptionally(failure)
                     pendingFuture = null
                     pendingMarker = null
+                    pendingLineObserver = null
                     pendingOutput.setLength(0)
                 }
                 if (!stopping) {
@@ -472,6 +482,7 @@ class VesselRuntimeController(
                 running = false
                 guestReady = false
                 inputReady = false
+                desktopReady = false
             }
         }, "vessel-uml-console").apply { isDaemon = true; start() }
     }
@@ -485,7 +496,11 @@ class VesselRuntimeController(
         }
     }
 
-    private fun guestBlocking(command: String, timeoutSeconds: Int): Pair<Int, String> = synchronized(commandLock) {
+    private fun guestBlocking(
+        command: String,
+        timeoutSeconds: Int,
+        onLine: ((String) -> Unit)? = null,
+    ): Pair<Int, String> = synchronized(commandLock) {
         val future: CompletableFuture<Pair<Int, String>>
         synchronized(consoleLock) {
             check(umlProcess?.isAlive == true) { "UML is not running" }
@@ -494,6 +509,7 @@ class VesselRuntimeController(
             future = CompletableFuture()
             pendingMarker = marker
             pendingFuture = future
+            pendingLineObserver = onLine
             pendingOutput.setLength(0)
             consoleWriter!!.apply {
                 write("$command\nprintf '$marker:%s\\n' \$?\n")
@@ -507,6 +523,7 @@ class VesselRuntimeController(
                 if (pendingFuture === future) {
                     pendingMarker = null
                     pendingFuture = null
+                    pendingLineObserver = null
                     pendingOutput.setLength(0)
                 }
             }
@@ -528,7 +545,7 @@ class VesselRuntimeController(
             15,
         )
         check(freeRc == 0) {
-            "Debian filesystem still has too little free space after resize (${freeOut.trim()})"
+            "Debian filesystem still has too little free space after resize (${freeOut.trim()}); Vessel requires at least ${MIN_GUEST_FREE_KIB} KiB free"
         }
         append("[disk] ${freeOut.trim()} after ext4 resize\n")
     }
@@ -565,14 +582,113 @@ class VesselRuntimeController(
             "command -v xinput >/dev/null && (command -v cvt >/dev/null || command -v xcvt >/dev/null) && " +
             "test -e /usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so"
 
+    private fun packagePolicyCommand(): String = """
+        install -d -m 755 /usr/sbin
+        cat >/usr/sbin/policy-rc.d <<'VESSEL_POLICY'
+        #!/bin/sh
+        # Vessel UML uses a custom PID 1. Package maintainer scripts must not
+        # auto-start system services while the persistent image is provisioned.
+        exit 101
+        VESSEL_POLICY
+        chmod 0755 /usr/sbin/policy-rc.d
+    """.trimIndent()
+
+    private inner class PackageProgressReporter(
+        private val stage: String,
+        private val startPercent: Int,
+    ) {
+        private var total = 0
+        private var downloaded = 0
+        private var unpacked = 0
+        private var configured = 0
+        private var lastPercent = startPercent
+
+        private fun emit(percent: Int, detail: String) {
+            val next = percent.coerceIn(lastPercent, 71)
+            lastPercent = next
+            progress(stage, next, detail)
+        }
+
+        fun onLine(raw: String) {
+            val line = raw
+                .replace("\u001B[?2004h", "")
+                .replace("\u001B[?2004l", "")
+                .trim()
+            if (line.isBlank()) return
+
+            Regex("""(\d+) newly installed""").find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let {
+                if (it > 0) total = it
+            }
+            Regex("""VESSEL_PENDING_PACKAGES=(\d+)""").find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let {
+                if (it > 0) total = it
+            }
+
+            Regex("""^Get:(\d+)\s""").find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { index ->
+                downloaded = maxOf(downloaded, index)
+                val pct = if (total > 0) 56 + (downloaded.coerceAtMost(total) * 6 / total) else 57
+                val name = line.substringAfter(' ', "packages").substringBefore(' ')
+                emit(pct, if (total > 0) "Downloading packages · ${downloaded.coerceAtMost(total)}/$total · $name" else "Downloading packages · $name")
+                return
+            }
+
+            when {
+                line.startsWith("Fetched ") -> emit(62, "Package download complete")
+                line.startsWith("Unpacking ") -> {
+                    unpacked++
+                    val pct = if (total > 0) 63 + (unpacked.coerceAtMost(total) * 4 / total) else 64
+                    val name = line.removePrefix("Unpacking ").substringBefore(' ')
+                    emit(pct, if (total > 0) "Unpacking Plasma · ${unpacked.coerceAtMost(total)}/$total · $name" else "Unpacking Plasma · $name")
+                }
+                line.startsWith("Setting up ") -> {
+                    configured++
+                    val pct = if (total > 0) 68 + (configured.coerceAtMost(total) * 3 / total) else 69
+                    val name = line.removePrefix("Setting up ").substringBefore(' ')
+                    emit(pct, if (total > 0) "Configuring Plasma · ${configured.coerceAtMost(total)}/$total · $name" else "Configuring Plasma · $name")
+                }
+                line.startsWith("Processing triggers") -> emit(71, "Finishing Plasma package triggers")
+            }
+        }
+    }
+
+    private fun recoverPackageState() {
+        progress("plasma_recovery", 53, "Checking interrupted Debian package state")
+        val reporter = PackageProgressReporter("plasma_recovery", 53)
+        val cmd = packagePolicyCommand() + "\n" + """
+            export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1
+            pending=${'$'}(dpkg-query -W -f='${'$'}{db:Status-Abbrev} ${'$'}{binary:Package}\n' 2>/dev/null | awk '${'$'}1 !~ /^ii/ {c++} END {print c+0}')
+            echo VESSEL_PENDING_PACKAGES=${'$'}pending
+            if [ "${'$'}pending" -gt 0 ]; then
+              dpkg --configure -a || {
+                apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 -f install -y
+                dpkg --configure -a
+              }
+            fi
+        """.trimIndent()
+        val (rc, out) = guestBlocking(cmd, 1800, reporter::onLine)
+        if (rc != 0) {
+            append("[plasma] interrupted package recovery failed rc=$rc ${out.takeLast(6000)}\n")
+            error("Debian package recovery failed (dpkg rc=$rc). See Runtime log for details")
+        }
+    }
+
     private fun ensurePlasma() {
+        recoverPackageState()
         progress("plasma", 55, "Checking KDE Plasma desktop")
         val check = guestBlocking(plasmaReadyCommand(), 20)
-        if (check.first == 0) return
-        progress("plasma_install", 56, "Installing KDE Plasma once into persistent disk")
-        val cmd = "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y --no-install-recommends " +
-            "plasma-workspace plasma-desktop kwin-x11 xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt && apt-get clean"
-        val (rc, out) = guestBlocking(cmd, 1800)
+        if (check.first == 0) {
+            append("[plasma] KDE Plasma/Xorg packages already ready\n")
+            return
+        }
+
+        progress("plasma_install", 56, "Resolving KDE Plasma packages")
+        val reporter = PackageProgressReporter("plasma_install", 56)
+        val cmd = packagePolicyCommand() + "\n" +
+            "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
+            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
+            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --no-install-recommends " +
+            "plasma-workspace plasma-desktop kwin-x11 xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt && " +
+            "dpkg --configure -a && apt-get clean"
+        val (rc, out) = guestBlocking(cmd, 1800, reporter::onLine)
         if (rc != 0) {
             val lower = out.lowercase()
             val reason = when {
@@ -582,11 +698,12 @@ class VesselRuntimeController(
                     "Plasma setup could not download Debian packages; check the Linux network connection"
                 else -> "Plasma package installation failed (apt rc=$rc). See Runtime log for details"
             }
-            append("[plasma] apt failed rc=$rc\n")
+            append("[plasma] apt failed rc=$rc ${out.takeLast(6000)}\n")
             error(reason)
         }
         val verify = guestBlocking(plasmaReadyCommand(), 20)
         check(verify.first == 0) { "Plasma packages installed, but required desktop components are still missing" }
+        progress("plasma_ready", 71, "KDE Plasma packages ready")
         append("[plasma] KDE Plasma/Xorg packages ready\n")
     }
 
@@ -654,10 +771,14 @@ class VesselRuntimeController(
         applyDisplayModeBlocking()
     }
 
+    private fun displayFailureStatus(status: String): Boolean =
+        status.contains("missing-") || status.contains("failed") || status.contains("rejected") || status.startsWith("presenter-error")
+
     suspend fun startDesktop(): JSONObject = withContext(Dispatchers.IO) {
         if (running) return@withContext status()
         stopping = false
         lastError = ""
+        desktopReady = false
         try {
             assertAssets()
             ensureDisk()
@@ -683,21 +804,41 @@ class VesselRuntimeController(
             ensurePlasma()
             launchDesktop()
             progress("frame", 88, "Waiting for direct DMA-BUF scanout")
+
             var tries = 0
-            while (tries++ < 240) {
+            while (tries++ < 600) {
+                if (stopping) return@withContext baseState()
                 val ps = VesselWaylandPresenter.status()
                 if (ps.startsWith("presenting-dmabuf")) {
                     desktopReady = true
+                    lastError = ""
                     progress("ready", 100, "Plasma visible through direct DMA-BUF")
                     return@withContext baseState().put("presenter", ps)
                 }
-                if (ps.contains("missing-") || ps.contains("failed") || ps.contains("rejected")) {
-                    error("Native presenter failed: $ps")
+                if (displayFailureStatus(ps)) {
+                    lastError = "Native presenter issue: $ps"
+                    append("[display] $lastError; Linux kept running for diagnostics\n")
+                    progress("display_issue", 94, "Desktop running · presenter needs attention")
+                    return@withContext baseState(false).put("presenter", ps)
+                }
+                if (tries >= 20 && (ps == "surface-detached" || ps.contains("waiting-for-surface"))) {
+                    progress("display_wait", 94, "Desktop running · open Display to attach the Android surface")
+                    append("[display] desktop is running; waiting for Android display surface\n")
+                    return@withContext baseState().put("presenter", ps)
                 }
                 Thread.sleep(50)
             }
-            error("Plasma started but no DMA-BUF frame reached Vessel; presenter=${VesselWaylandPresenter.status()}")
+
+            val ps = VesselWaylandPresenter.status()
+            lastError = "Desktop is running, but no direct DMA-BUF frame has arrived yet; presenter=$ps"
+            append("[display] $lastError; Linux kept running for diagnostics\n")
+            progress("display_wait", 94, "Desktop running · waiting for first GPU frame")
+            baseState(false).put("presenter", ps)
         } catch (t: Throwable) {
+            if (stopping) {
+                append("[host] startup stopped by user\n")
+                return@withContext baseState()
+            }
             lastError = t.message ?: t.javaClass.simpleName
             append("[error] $lastError\n")
             stopBlocking()
@@ -714,6 +855,13 @@ class VesselRuntimeController(
 
     private fun stopBlocking() {
         stopping = true
+        synchronized(consoleLock) {
+            pendingFuture?.completeExceptionally(IllegalStateException("Vessel stopped"))
+            pendingFuture = null
+            pendingMarker = null
+            pendingLineObserver = null
+            pendingOutput.setLength(0)
+        }
         runCatching {
             if (umlProcess?.isAlive == true) {
                 consoleWriter?.write("exit\n")
@@ -723,7 +871,7 @@ class VesselRuntimeController(
         }
         runCatching { consoleWriter?.close() }
         runCatching { if (umlProcess?.isAlive == true) umlProcess?.destroyForcibly() }
-        runCatching { gpuProcess?.destroyForcibly() }
+        runCatching { if (gpuProcess?.isAlive == true) gpuProcess?.destroyForcibly() }
         umlProcess = null
         gpuProcess = null
         consoleWriter = null
@@ -731,12 +879,6 @@ class VesselRuntimeController(
         guestReady = false
         inputReady = false
         desktopReady = false
-        synchronized(consoleLock) {
-            pendingFuture?.completeExceptionally(IllegalStateException("Vessel stopped"))
-            pendingFuture = null
-            pendingMarker = null
-            pendingOutput.setLength(0)
-        }
         stopInputBackends()
         gpuSocket.delete()
     }
@@ -744,6 +886,7 @@ class VesselRuntimeController(
     suspend fun stop(): JSONObject = withContext(Dispatchers.IO) {
         stopBlocking()
         VesselWaylandPresenter.resetPresentationLatch()
+        lastError = ""
         baseState()
     }
 }

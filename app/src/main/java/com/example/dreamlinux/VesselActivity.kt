@@ -205,13 +205,16 @@ class VesselActivity : ComponentActivity() {
                     Text("Vessel",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
                     Text("Rootless ARM64 Linux · VirtIO GPU · VirGL · Adreno",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                StatusPill(when{state.displayReady->"VISIBLE";state.frameReachedApp->"FRAME";state.running->"RUNNING";state.connected->"READY";else->"SETUP"},state.running||state.displayReady)
+                val label=when{state.stage=="stopping"->"STOPPING";state.displayReady->"VISIBLE";state.frameReachedApp->"FRAME";state.running->"RUNNING";state.busy->"STARTING";state.connected->"READY";else->"SETUP"}
+                StatusPill(label,state.running||state.busy||state.displayReady)
             }
         }
     }
 
     @Composable
     private fun MachinePage(state:SessionState,openDisplay:()->Unit) {
+        val stopping=state.stage=="stopping"
+        val canStop=state.running||state.busy
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
             ElevatedCard(shape=RoundedCornerShape(26.dp)) {
                 Column(Modifier.fillMaxWidth().padding(20.dp),verticalArrangement=Arrangement.spacedBy(13.dp)) {
@@ -220,20 +223,26 @@ class VesselActivity : ComponentActivity() {
                             Text("Debian workstation",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
                             Text(if(state.running||state.busy)state.message else "Persistent Linux PC on your phone",color=MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        StatusPill(if(state.running)"LIVE" else if(state.busy)"STARTING" else "OFF",state.running||state.busy)
+                        StatusPill(when{stopping->"STOPPING";state.running->"LIVE";state.busy->"STARTING";else->"OFF"},canStop)
                     }
                     if(state.lastError.isNotBlank()) ErrorStrip(state.lastError)
                     if(!state.storageReady) ErrorStrip("Vessel needs file access once so the persistent Linux disk can live in Download/LinuxPC.")
                     if(state.busy||state.running) ProgressBlock(state)
                     Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
                         Button(
-                            onClick={if(state.running)VmSessionService.active?.stopVm() else {startLinux();openDisplay()}},
-                            enabled=!state.busy,
+                            onClick={if(canStop)VmSessionService.active?.stopVm() else {startLinux();openDisplay()}},
+                            enabled=!stopping,
                             modifier=Modifier.weight(1f),
                         ) {
-                            Icon(if(state.running)Icons.Default.Stop else Icons.Default.PlayArrow,null)
+                            Icon(if(canStop)Icons.Default.Stop else Icons.Default.PlayArrow,null)
                             Spacer(Modifier.width(7.dp))
-                            Text(when{!state.storageReady->"Grant storage";state.running->"Stop Linux";else->"Start Linux"})
+                            Text(when{
+                                stopping->"Stopping…"
+                                state.busy&&!state.running->"Cancel startup"
+                                state.running->"Stop Linux"
+                                !state.storageReady->"Grant storage"
+                                else->"Start Linux"
+                            })
                         }
                         if(state.running) OutlinedButton(onClick=openDisplay) {Icon(Icons.Default.DesktopWindows,null);Spacer(Modifier.width(6.dp));Text("Display")}
                     }
@@ -247,7 +256,7 @@ class VesselActivity : ComponentActivity() {
                     Metric(Icons.Default.Bolt,"Graphics",state.graphics)
                     Metric(Icons.Default.DesktopWindows,"Android Surface",state.presenterStatus)
                     Metric(Icons.Default.Wifi,"Network",state.internetStage)
-                    Metric(Icons.Default.Storage,"Disk","Persistent sparse ext4 · grows with Linux data")
+                    Metric(Icons.Default.Storage,"Disk","Persistent sparse ext4 · auto-grows to safe desktop capacity")
                 }
             }
             LogCard(state)
@@ -279,8 +288,8 @@ class VesselActivity : ComponentActivity() {
                     if(!state.displayReady) {
                         Surface(Modifier.align(Alignment.Center).padding(18.dp),shape=RoundedCornerShape(18.dp),color=Color(0xD9101512)) {
                             Column(Modifier.padding(18.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(9.dp)) {
-                                if(state.busy||state.running) LinearProgressIndicator(progress={state.progressPercent.coerceIn(0,100)/100f},modifier=Modifier.width(220.dp))
-                                Text("${state.message} · ${state.progressPercent.coerceIn(0,100)}%",maxLines=2,overflow=TextOverflow.Ellipsis)
+                                LinearProgressIndicator(progress={state.progressPercent.coerceIn(0,100)/100f},modifier=Modifier.width(220.dp))
+                                Text("${state.message} · ${state.progressPercent.coerceIn(0,100)}%",maxLines=3,overflow=TextOverflow.Ellipsis)
                                 Text("Presenter: ${state.presenterStatus}",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=1,overflow=TextOverflow.Ellipsis)
                             }
                         }
@@ -290,7 +299,7 @@ class VesselActivity : ComponentActivity() {
             } else {
                 Box(Modifier.weight(1f).fillMaxWidth(),contentAlignment=Alignment.Center) {
                     ElevatedCard(shape=RoundedCornerShape(24.dp),modifier=Modifier.fillMaxWidth().padding(horizontal=12.dp)) {
-                        Column(Modifier.padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                        Column(Modifier.fillMaxWidth().padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(12.dp)) {
                             Icon(Icons.Default.DesktopWindows,null,Modifier.size(48.dp),tint=MaterialTheme.colorScheme.primary)
                             Text("Linux is stopped")
                             if(state.lastError.isNotBlank()) ErrorStrip(state.lastError)
@@ -392,7 +401,7 @@ class VesselActivity : ComponentActivity() {
         val clean=remember(text){text.replace(Regex("\\s+")," ").trim()}
         Surface(shape=RoundedCornerShape(16.dp),color=MaterialTheme.colorScheme.errorContainer) {
             Column(Modifier.fillMaxWidth().padding(horizontal=14.dp,vertical=12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                Text("Startup issue",style=MaterialTheme.typography.labelMedium,fontWeight=FontWeight.Bold,color=MaterialTheme.colorScheme.error)
+                Text("Runtime issue",style=MaterialTheme.typography.labelMedium,fontWeight=FontWeight.Bold,color=MaterialTheme.colorScheme.error)
                 Text(clean,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error,maxLines=4,overflow=TextOverflow.Ellipsis)
                 if(clean.length>260) Text("Full details are kept in Runtime log.",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onErrorContainer)
             }

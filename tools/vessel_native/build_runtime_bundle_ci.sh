@@ -132,6 +132,14 @@ new='''            .use_virgl(true)\n            .use_venus(false)\n            
 if s.count(old)!=1: raise SystemExit('unexpected VirGL flags layout')
 vir.write_text(s.replace(old,new,1))
 PY
+
+# Upstream assumes create_3d already supplied a DMA-BUF handle. On Android
+# classic VirGL can instead have valid metadata with handle=None. Export the FD
+# lazily at SET_SCANOUT while keeping the end-to-end direct DMA-BUF path.
+python3 "$ROOT/tools/vessel_native/patch_vhost_gpu_lazy_dmabuf.py" "$VHOST"
+grep -Fq 'VESSEL_LAZY_DMABUF_SCANOUT_V1' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
+grep -Fq 'export_resource_dmabuf(resource_id)' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
+
 export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH="$WORK/pkgconfig"
 export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android29 --sysroot=$TOOLCHAIN/sysroot -I$INCLUDE_ROOT"
 CLANG_SO="$(find /usr/lib -name 'libclang.so*' -print -quit 2>/dev/null || true)"; [ -n "$CLANG_SO" ] || { echo "libclang not found" >&2; exit 5; }
@@ -140,6 +148,7 @@ export LIBCLANG_PATH="$(dirname "$CLANG_SO")"
 VHOST_BIN="$VHOST/target/aarch64-linux-android/release/vhost-device-gpu"; [ -x "$VHOST_BIN" ] || exit 5
 install -m0755 "$VHOST_BIN" "$OUT/libvessel_vhost_gpu.so"; patchelf --set-rpath '$ORIGIN' "$OUT/libvessel_vhost_gpu.so"
 while read -r dep; do case "$dep" in libvirglrenderer.so*) patchelf --replace-needed "$dep" libvessel_virglrenderer.so "$OUT/libvessel_vhost_gpu.so";; esac; done < <(patchelf --print-needed "$OUT/libvessel_vhost_gpu.so")
+strings "$OUT/libvessel_vhost_gpu.so" | grep -Fq 'lazily exported DMA-BUF for scanout resource'
 
 for f in "$OUT"/*.so; do
   if file "$f" | grep -q ELF; then
@@ -149,7 +158,7 @@ for f in "$OUT"/*.so; do
 done
 mkdir -p "$ROOT/app/src/main/assets/vessel"
 {
-  echo protocol=39; echo runtime=v39-self-contained-dmabuf-virtio-input-r1
+  echo protocol=39; echo runtime=v39-self-contained-dmabuf-virtio-input-r3
   echo "kernel_sha256=$(sha256sum "$OUT/libvessel_uml.so" | awk '{print $1}')"
   echo "vhost_gpu_sha256=$(sha256sum "$OUT/libvessel_vhost_gpu.so" | awk '{print $1}')"
   echo "vhost_input_sha256=$(sha256sum "$OUT/libvessel_vhost_input.so" | awk '{print $1}')"
