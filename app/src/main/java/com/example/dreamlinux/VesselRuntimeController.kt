@@ -35,9 +35,10 @@ class VesselRuntimeController(
 ) {
     companion object {
         const val PROTOCOL = 39
-        const val REVISION = "v39-self-contained-dmabuf-virtio-input-r3"
-        const val DISPLAY_TRANSPORT = "vhost-user-gpu-dmabuf-same-uid-v1"
+        const val REVISION = "v39-self-contained-ahb-syncfd-virtio-input-r6"
+        const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahardwarebuffer-syncfd-v2"
         const val INPUT_TRANSPORT = "virtio-input-vhost-user-same-uid-v1"
+        const val UML_VCPUS = 1
         private const val ROOTFS_URL = "https://github.com/zalexdev/linux-um-arm64/releases/download/prebuilt-20260816/debian-docker.ext4.gz"
         private const val ROOTFS_SHA256 = "2807979f76021fadf1f76f0c827fbe1eab4df51e33bfeca0c840c5181c610be3"
         private const val GUEST_READY_BANNER = "Type 'exit' to shut the kernel down and return to Android."
@@ -180,6 +181,8 @@ class VesselRuntimeController(
 
     private fun logTail(): String = synchronized(logLock) { log.takeLast(180_000).toString() }
     private fun inputBackendsAlive(): Boolean = inputProcesses.size == inputSpecs.size && inputProcesses.all { it.isAlive }
+    private fun presenterVisible(status: String): Boolean =
+        status.startsWith("presenting-ahardwarebuffer") || status.startsWith("presenting-retained") || status.startsWith("presenting-dmabuf")
 
     private fun baseState(ok: Boolean = true): JSONObject = JSONObject()
         .put("ok", ok)
@@ -197,10 +200,11 @@ class VesselRuntimeController(
         .put("runtimeDir", runtimeDir.absolutePath)
         .put("machineDir", machineDir.absolutePath)
         .put("guestMemoryMb", guestMemoryMb)
+        .put("vcpus", UML_VCPUS)
         .put("running", running)
         .put("guestReady", guestReady)
         .put("desktopReady", desktopReady)
-        .put("frameContentValidated", VesselWaylandPresenter.status().startsWith("presenting-dmabuf"))
+        .put("frameContentValidated", presenterVisible(VesselWaylandPresenter.status()))
         .put("inputConnected", inputReady && inputBackendsAlive())
         .put("inputSender", VesselVirtioInput.status())
         .put("displayWidth", displayWidth)
@@ -213,7 +217,7 @@ class VesselRuntimeController(
 
     suspend fun status(): JSONObject = withContext(Dispatchers.IO) {
         val presenter = VesselWaylandPresenter.status()
-        if (presenter.startsWith("presenting-dmabuf")) {
+        if (presenterVisible(presenter)) {
             desktopReady = true
             lastError = ""
         }
@@ -268,7 +272,7 @@ class VesselRuntimeController(
             val connection = URL(ROOTFS_URL).openConnection().apply {
                 connectTimeout = 20_000
                 readTimeout = 60_000
-                setRequestProperty("User-Agent", "Vessel/39")
+                setRequestProperty("User-Agent", "Vessel/2.1")
             }
             connection.getInputStream().buffered(256 * 1024).use { input ->
                 FileOutputStream(gz).buffered(256 * 1024).use { out ->
@@ -413,11 +417,11 @@ class VesselRuntimeController(
     private fun startUml() {
         runCatching { umlProcess?.destroyForcibly() }
         guestShellReady = CompletableFuture()
-        append("[host] starting UML with ${guestMemoryMb} MiB RAM, 6 vCPUs\n")
+        append("[host] starting UML with ${guestMemoryMb} MiB RAM, $UML_VCPUS vCPU (ARM64 SMP containment)\n")
         val cmd = listOf(
             umnetBin.absolutePath, "--passt", passtBin.absolutePath, "--dns", "1.1.1.1", "--",
             umlBin.absolutePath,
-            "mem=${guestMemoryMb}M", "ncpus=6", "seccomp=on",
+            "mem=${guestMemoryMb}M", "ncpus=$UML_VCPUS", "seccomp=on",
             "ubd0=${disk.absolutePath}", "root=/dev/ubda", "rw", "init=/umarm-init",
             "stub_exe=${stubBin.absolutePath}",
             "virtio_uml.device=${gpuSocket.absolutePath}:$VIRTIO_GPU_ID",
@@ -579,8 +583,9 @@ class VesselRuntimeController(
 
     private fun plasmaReadyCommand(): String =
         "command -v startplasma-x11 >/dev/null && command -v Xorg >/dev/null && command -v xrandr >/dev/null && " +
-            "command -v xinput >/dev/null && (command -v cvt >/dev/null || command -v xcvt >/dev/null) && " +
-            "test -e /usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so"
+            "command -v xinput >/dev/null && command -v systemsettings >/dev/null && command -v konsole >/dev/null && command -v firefox-esr >/dev/null && " +
+            "(command -v cvt >/dev/null || command -v xcvt >/dev/null) && test -d /usr/share/icons/breeze && " +
+            "test -f /etc/xdg/menus/plasma-applications.menu && test -e /usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so"
 
     private fun packagePolicyCommand(): String = """
         install -d -m 755 /usr/sbin
@@ -676,19 +681,23 @@ class VesselRuntimeController(
         progress("plasma", 55, "Checking KDE Plasma desktop")
         val check = guestBlocking(plasmaReadyCommand(), 20)
         if (check.first == 0) {
-            append("[plasma] KDE Plasma/Xorg packages already ready\n")
+            append("[plasma] complete KDE Plasma/Xorg workstation already ready\n")
             return
         }
 
-        progress("plasma_install", 56, "Resolving KDE Plasma packages")
+        progress("plasma_install", 56, "Resolving complete KDE Plasma workstation")
         val reporter = PackageProgressReporter("plasma_install", 56)
         val cmd = packagePolicyCommand() + "\n" +
             "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
             "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
-            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --no-install-recommends " +
-            "plasma-workspace plasma-desktop kwin-x11 xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt && " +
+            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y " +
+            "kde-plasma-desktop plasma-workspace plasma-desktop kwin-x11 systemsettings " +
+            "xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt " +
+            "breeze breeze-icon-theme hicolor-icon-theme desktop-file-utils xdg-user-dirs shared-mime-info menu appstream python3-yaml " +
+            "qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 " +
+            "fonts-noto-core fonts-dejavu-core fonts-liberation firefox-esr konsole dolphin ark kcalc okular gwenview kate && " +
             "dpkg --configure -a && apt-get clean"
-        val (rc, out) = guestBlocking(cmd, 1800, reporter::onLine)
+        val (rc, out) = guestBlocking(cmd, 2400, reporter::onLine)
         if (rc != 0) {
             val lower = out.lowercase()
             val reason = when {
@@ -701,10 +710,10 @@ class VesselRuntimeController(
             append("[plasma] apt failed rc=$rc ${out.takeLast(6000)}\n")
             error(reason)
         }
-        val verify = guestBlocking(plasmaReadyCommand(), 20)
-        check(verify.first == 0) { "Plasma packages installed, but required desktop components are still missing" }
-        progress("plasma_ready", 71, "KDE Plasma packages ready")
-        append("[plasma] KDE Plasma/Xorg packages ready\n")
+        val verify = guestBlocking(plasmaReadyCommand(), 30)
+        check(verify.first == 0) { "Plasma packages installed, but required desktop/QML/icon components are still missing" }
+        progress("plasma_ready", 71, "KDE Plasma workstation ready")
+        append("[plasma] complete KDE Plasma/Xorg workstation ready\n")
     }
 
     private fun displayModeCommand(): String {
@@ -735,7 +744,7 @@ class VesselRuntimeController(
     }
 
     private fun launchDesktop() {
-        progress("desktop", 72, "Starting direct DRM Plasma desktop")
+        progress("desktop", 72, "Starting accelerated Plasma desktop")
         val prep = "set -e; mkdir -p /run/dbus /run/user /etc/X11/xorg.conf.d /tmp/.X11-unix; " +
             "dbus-uuidgen --ensure=/etc/machine-id; " +
             "(pgrep -x systemd-udevd >/dev/null || (/lib/systemd/systemd-udevd --daemon 2>/tmp/vessel-udev.log || /usr/lib/systemd/systemd-udevd --daemon 2>/tmp/vessel-udev.log)); " +
@@ -752,7 +761,7 @@ class VesselRuntimeController(
         check(prc == 0) { "desktop prep failed: $pout" }
 
         val session = "#!/bin/bash\n" +
-            "export DISPLAY=:0 XDG_SESSION_TYPE=x11 XDG_SESSION_DESKTOP=KDE XDG_CURRENT_DESKTOP=KDE DESKTOP_SESSION=plasma KDE_FULL_SESSION=true KDE_SESSION_VERSION=5 LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl\n" +
+            "export DISPLAY=:0 XDG_SESSION_TYPE=x11 XDG_SESSION_DESKTOP=KDE XDG_CURRENT_DESKTOP=KDE DESKTOP_SESSION=plasma KDE_FULL_SESSION=true KDE_SESSION_VERSION=5 LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl MOZ_X11_EGL=1\n" +
             "export XDG_RUNTIME_DIR=/run/user/\$(id -u)\n" +
             "exec startplasma-x11\n"
         val b64 = Base64.getEncoder().encodeToString(session.toByteArray())
@@ -764,7 +773,7 @@ class VesselRuntimeController(
             "for i in \$(seq 1 50); do DISPLAY=:0 xinput list --name-only >/tmp/vessel-xinput.log 2>&1; grep -Fq 'Vessel Trackpad' /tmp/vessel-xinput.log && grep -Fq 'Vessel Touchscreen' /tmp/vessel-xinput.log && grep -Fq 'Vessel Keyboard' /tmp/vessel-xinput.log && break; sleep .1; done; " +
             "DISPLAY=:0 xinput list --name-only >/tmp/vessel-xinput.log 2>&1; " +
             "grep -Fq 'Vessel Trackpad' /tmp/vessel-xinput.log && grep -Fq 'Vessel Touchscreen' /tmp/vessel-xinput.log && grep -Fq 'Vessel Keyboard' /tmp/vessel-xinput.log || { cat /tmp/vessel-xinput.log; exit 43; }; " +
-            "nohup su -l vessel -c \"DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/\$(id -u vessel) dbus-run-session -- /usr/local/bin/vessel-plasma-session\" >/tmp/vessel-plasma.log 2>&1 </dev/null &"
+            "nohup su -l vessel -c \"DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/\$(id -u vessel) MOZ_X11_EGL=1 dbus-run-session -- /usr/local/bin/vessel-plasma-session\" >/tmp/vessel-plasma.log 2>&1 </dev/null &"
         val (rc, out) = guestBlocking(launch, 60)
         check(rc == 0) { "Plasma launch failed: ${out.takeLast(12000)}" }
         append("[input] Xorg/libinput attached all Vessel devices\n")
@@ -789,7 +798,7 @@ class VesselRuntimeController(
             startInputBackends()
             progress("gpu", 31, "Starting native VirtIO GPU")
             startGpu()
-            progress("uml", 36, "Booting Debian ARM64 · ${guestMemoryMb} MiB")
+            progress("uml", 36, "Booting Debian ARM64 · ${guestMemoryMb} MiB · $UML_VCPUS vCPU")
             startUml()
             startedAt = android.os.SystemClock.elapsedRealtime()
             running = true
@@ -803,16 +812,16 @@ class VesselRuntimeController(
             awaitVirtioInputDevices()
             ensurePlasma()
             launchDesktop()
-            progress("frame", 88, "Waiting for direct DMA-BUF scanout")
+            progress("frame", 88, "Waiting for synchronized AHardwareBuffer scanout")
 
             var tries = 0
             while (tries++ < 600) {
                 if (stopping) return@withContext baseState()
                 val ps = VesselWaylandPresenter.status()
-                if (ps.startsWith("presenting-dmabuf")) {
+                if (presenterVisible(ps)) {
                     desktopReady = true
                     lastError = ""
-                    progress("ready", 100, "Plasma visible through direct DMA-BUF")
+                    progress("ready", 100, "Plasma visible through synchronized AHardwareBuffer")
                     return@withContext baseState().put("presenter", ps)
                 }
                 if (displayFailureStatus(ps)) {
@@ -830,7 +839,7 @@ class VesselRuntimeController(
             }
 
             val ps = VesselWaylandPresenter.status()
-            lastError = "Desktop is running, but no direct DMA-BUF frame has arrived yet; presenter=$ps"
+            lastError = "Desktop is running, but no synchronized AHardwareBuffer frame has arrived yet; presenter=$ps"
             append("[display] $lastError; Linux kept running for diagnostics\n")
             progress("display_wait", 94, "Desktop running · waiting for first GPU frame")
             baseState(false).put("presenter", ps)
