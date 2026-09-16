@@ -17,6 +17,7 @@ extern "C" {
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include <poll.h>
 #include <sys/socket.h>
@@ -26,12 +27,13 @@ extern "C" {
 namespace {
 constexpr const char* TAG = "VesselAhbBridge";
 constexpr uint32_t MAGIC = 0x42484156u;
-constexpr uint32_t VERSION = 2;
+constexpr uint32_t VERSION = 3;
 constexpr uint32_t MSG_REGISTER_FRAME = 1;
 constexpr uint32_t MSG_FRAME = 2;
 constexpr uint32_t MSG_DISABLE = 3;
 constexpr size_t MAX_SCANOUTS = 16;
 constexpr size_t FRAME_SLOTS = 3;
+constexpr uint8_t FENCE_TAG = 0xF3;
 
 constexpr int RC_EXTENSIONS = 101;
 constexpr int RC_CONTEXT = 102;
@@ -44,6 +46,8 @@ constexpr int RC_RESOURCE_INFO = 108;
 constexpr int RC_SRC_FBO = 109;
 constexpr int RC_GPU_BLIT = 110;
 constexpr int RC_SOCKET = 111;
+constexpr int RC_RENDER_SYNC = 112;
+constexpr int RC_NATIVE_FENCE = 113;
 
 #pragma pack(push, 1)
 struct AhbMessage {
@@ -90,6 +94,7 @@ struct ScanoutState {
 
 std::mutex g_lock;
 std::array<ScanoutState, MAX_SCANOUTS> g_scanouts{};
+std::unordered_map<uint32_t, GLsync> g_context_fences;
 int g_socket = -1;
 uint64_t g_frame_count = 0;
 auto g_rate_started = std::chrono::steady_clock::now();
@@ -98,11 +103,17 @@ using GetNativeClientBuffer = PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC;
 using CreateImage = PFNEGLCREATEIMAGEKHRPROC;
 using DestroyImage = PFNEGLDESTROYIMAGEKHRPROC;
 using ImageTargetTexture = PFNGLEGLIMAGETARGETTEXTURE2DOESPROC;
+using CreateSync = PFNEGLCREATESYNCKHRPROC;
+using DestroySync = PFNEGLDESTROYSYNCKHRPROC;
+using DupNativeFenceFd = PFNEGLDUPNATIVEFENCEFDANDROIDPROC;
 
 GetNativeClientBuffer g_get_native_client_buffer = nullptr;
 CreateImage g_create_image = nullptr;
 DestroyImage g_destroy_image = nullptr;
 ImageTargetTexture g_image_target_texture = nullptr;
+CreateSync g_create_sync = nullptr;
+DestroySync g_destroy_sync = nullptr;
+DupNativeFenceFd g_dup_native_fence_fd = nullptr;
 
 std::string hex_value(uint32_t value) {
     char out[16]{};
@@ -119,8 +130,8 @@ void loge(const std::string& message) { emit_log(ANDROID_LOG_ERROR, "E", message
 void logw(const std::string& message) { emit_log(ANDROID_LOG_WARN, "W", message); }
 void logi(const std::string& message) { emit_log(ANDROID_LOG_INFO, "I", message); }
 
-void clear_gl_errors() { for (int i=0;i<16;++i) if (glGetError()==GL_NO_ERROR) return; }
-void clear_egl_errors() { for (int i=0;i<16;++i) if (eglGetError()==EGL_SUCCESS) return; }
+void clear_gl_errors() { for (int i = 0; i < 16; ++i) if (glGetError() == GL_NO_ERROR) return; }
+void clear_egl_errors() { for (int i = 0; i < 16; ++i) if (eglGetError() == EGL_SUCCESS) return; }
 
 bool send_all(int fd, const void* data, size_t size) {
     const auto* p = static_cast<const uint8_t*>(data);
@@ -146,6 +157,28 @@ bool recv_all(int fd, void* data, size_t size) {
     return true;
 }
 
+bool send_fence_fd(int socket_fd, int fence_fd) {
+    uint8_t tag = FENCE_TAG;
+    iovec io{&tag, sizeof(tag)};
+    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int))]{};
+    msghdr msg{};
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+    cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    std::memcpy(CMSG_DATA(cmsg), &fence_fd, sizeof(int));
+    msg.msg_controllen = CMSG_SPACE(sizeof(int));
+    for (;;) {
+        const ssize_t n = sendmsg(socket_fd, &msg, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
+        return n == static_cast<ssize_t>(sizeof(tag));
+    }
+}
+
 void mark_transport_reset() {
     for (auto& scanout : g_scanouts) {
         for (auto& slot : scanout.slots) {
@@ -166,19 +199,19 @@ bool connect_socket() {
     if (g_socket >= 0) return true;
     const std::string name = "vessel-ahb-" + std::to_string(getuid());
     int last_errno = 0;
-    for (int attempt=0; attempt<100; ++attempt) {
+    for (int attempt = 0; attempt < 100; ++attempt) {
         const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0) { loge("socket(AF_UNIX) failed errno=" + std::to_string(errno)); return false; }
         sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
-        if (name.size()+1 >= sizeof(addr.sun_path)) { close(fd); loge("AHB socket name too long"); return false; }
+        if (name.size() + 1 >= sizeof(addr.sun_path)) { close(fd); loge("AHB socket name too long"); return false; }
         addr.sun_path[0] = '\0';
-        memcpy(addr.sun_path+1, name.data(), name.size());
-        const socklen_t len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path)+1+name.size());
+        memcpy(addr.sun_path + 1, name.data(), name.size());
+        const socklen_t len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + name.size());
         if (connect(fd, reinterpret_cast<sockaddr*>(&addr), len) == 0) {
             g_socket = fd;
             mark_transport_reset();
-            logi("connected pipelined presenter side channel name=" + name + " protocol=2 slots=3");
+            logi("connected presenter side channel name=" + name + " protocol=3 slots=3 syncfd=1");
             return true;
         }
         last_errno = errno;
@@ -231,16 +264,21 @@ void drain_acks() {
 }
 
 bool load_extensions() {
-    if (g_get_native_client_buffer && g_create_image && g_destroy_image && g_image_target_texture) return true;
+    if (g_get_native_client_buffer && g_create_image && g_destroy_image && g_image_target_texture &&
+        g_create_sync && g_destroy_sync && g_dup_native_fence_fd) return true;
     g_get_native_client_buffer = reinterpret_cast<GetNativeClientBuffer>(eglGetProcAddress("eglGetNativeClientBufferANDROID"));
     g_create_image = reinterpret_cast<CreateImage>(eglGetProcAddress("eglCreateImageKHR"));
     g_destroy_image = reinterpret_cast<DestroyImage>(eglGetProcAddress("eglDestroyImageKHR"));
     g_image_target_texture = reinterpret_cast<ImageTargetTexture>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
-    if (!g_get_native_client_buffer || !g_create_image || !g_destroy_image || !g_image_target_texture) {
-        loge("missing EGL/AHB entry point");
+    g_create_sync = reinterpret_cast<CreateSync>(eglGetProcAddress("eglCreateSyncKHR"));
+    g_destroy_sync = reinterpret_cast<DestroySync>(eglGetProcAddress("eglDestroySyncKHR"));
+    g_dup_native_fence_fd = reinterpret_cast<DupNativeFenceFd>(eglGetProcAddress("eglDupNativeFenceFDANDROID"));
+    if (!g_get_native_client_buffer || !g_create_image || !g_destroy_image || !g_image_target_texture ||
+        !g_create_sync || !g_destroy_sync || !g_dup_native_fence_fd) {
+        loge("missing EGL/AHardwareBuffer/native-fence entry point");
         return false;
     }
-    logi("loaded EGL_ANDROID_image_native_buffer entry points");
+    logi("loaded EGL AHardwareBuffer + Android native-fence entry points");
     return true;
 }
 
@@ -258,6 +296,26 @@ void destroy_scanout(ScanoutState& state) {
     state = {};
 }
 
+int wait_for_render_contexts() {
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT) return RC_CONTEXT;
+    clear_gl_errors();
+    size_t waited = 0;
+    for (auto& entry : g_context_fences) {
+        if (!entry.second) continue;
+        glWaitSync(entry.second, 0, GL_TIMEOUT_IGNORED);
+        glDeleteSync(entry.second);
+        entry.second = nullptr;
+        ++waited;
+    }
+    const GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        loge("render-context GPU wait failed glError=" + hex_value(err));
+        return RC_RENDER_SYNC;
+    }
+    if (waited) logi("ordered scanout after " + std::to_string(waited) + " VirGL render context(s)");
+    return 0;
+}
+
 int allocate_slot(BufferSlot& slot, uint32_t width, uint32_t height, uint32_t index) {
     if (slot.buffer && slot.width == width && slot.height == height) return 0;
     destroy_slot(slot);
@@ -270,7 +328,9 @@ int allocate_slot(BufferSlot& slot, uint32_t width, uint32_t height, uint32_t in
     }
 
     AHardwareBuffer_Desc desc{};
-    desc.width = width; desc.height = height; desc.layers = 1;
+    desc.width = width;
+    desc.height = height;
+    desc.layers = 1;
     desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
     desc.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER;
     if (!AHardwareBuffer_isSupported(&desc)) { loge("AHB descriptor unsupported"); return RC_AHB_ALLOC; }
@@ -284,10 +344,11 @@ int allocate_slot(BufferSlot& slot, uint32_t width, uint32_t height, uint32_t in
     slot.image = g_create_image(display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, client, attrs);
     if (slot.image == EGL_NO_IMAGE_KHR) {
         loge("eglCreateImageKHR failed eglError=" + hex_value(static_cast<uint32_t>(eglGetError())));
-        destroy_slot(slot); return RC_EGL_IMAGE;
+        destroy_slot(slot);
+        return RC_EGL_IMAGE;
     }
 
-    GLint old_texture=0, old_draw=0;
+    GLint old_texture = 0, old_draw = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &old_texture);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw);
     clear_gl_errors();
@@ -306,24 +367,30 @@ int allocate_slot(BufferSlot& slot, uint32_t width, uint32_t height, uint32_t in
     glBindTexture(GL_TEXTURE_2D, old_texture);
     if (status != GL_FRAMEBUFFER_COMPLETE || err != GL_NO_ERROR) {
         loge("AHB destination FBO failed status=" + hex_value(status) + " glError=" + hex_value(err));
-        destroy_slot(slot); return RC_DST_FBO;
+        destroy_slot(slot);
+        return RC_DST_FBO;
     }
-    slot.width = width; slot.height = height;
+    slot.width = width;
+    slot.height = height;
     logi("allocated pipeline slot=" + std::to_string(index) + " size=" + std::to_string(width) + "x" + std::to_string(height));
     return 0;
 }
 
-int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t x, uint32_t y, uint32_t width, uint32_t height, int* out_fence_fd) {
+    *out_fence_fd = -1;
+    const int sync_rc = wait_for_render_contexts();
+    if (sync_rc) return sync_rc;
+
     virgl_renderer_resource_info info{};
     const int info_rc = virgl_renderer_resource_get_info(static_cast<int>(resource_id), &info);
     if (!info.tex_id) { loge("resource has no GL texture id=" + std::to_string(resource_id)); return RC_RESOURCE_INFO; }
     if (info_rc != 0) logw("resource metadata rc=" + std::to_string(info_rc) + " ignored; tex_id is valid");
 
-    GLint old_read=0, old_draw=0;
+    GLint old_read = 0, old_draw = 0;
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw);
     clear_gl_errors();
-    GLuint read_fbo=0;
+    GLuint read_fbo = 0;
     glGenFramebuffers(1, &read_fbo);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
     glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, info.tex_id, 0);
@@ -331,32 +398,52 @@ int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t x, uint32_t y
     const GLenum read_status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
     const GLenum read_error = glGetError();
     if (read_status != GL_FRAMEBUFFER_COMPLETE || read_error != GL_NO_ERROR) {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read); glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw); glDeleteFramebuffers(1,&read_fbo);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw);
+        glDeleteFramebuffers(1, &read_fbo);
         loge("VirGL source FBO failed status=" + hex_value(read_status) + " glError=" + hex_value(read_error));
         return RC_SRC_FBO;
     }
+
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, slot.draw_fbo);
     const GLenum draw_buffer = GL_COLOR_ATTACHMENT0;
     glDrawBuffers(1, &draw_buffer);
     clear_gl_errors();
-    glBlitFramebuffer(static_cast<GLint>(x), static_cast<GLint>(y), static_cast<GLint>(x+width), static_cast<GLint>(y+height),
+    glBlitFramebuffer(static_cast<GLint>(x), static_cast<GLint>(y), static_cast<GLint>(x + width), static_cast<GLint>(y + height),
                       0, 0, static_cast<GLint>(width), static_cast<GLint>(height), GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    // Producer completion remains explicit. The three-slot ring removes the much larger
-    // producer<->presenter round-trip serialization without allowing Vulkan to read a slot
-    // while ANGLE is still writing it.
-    glFinish();
     const GLenum blit_error = glGetError();
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read); glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw); glDeleteFramebuffers(1,&read_fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw);
+    glDeleteFramebuffers(1, &read_fbo);
     if (blit_error != GL_NO_ERROR) { loge("GPU blit failed glError=" + hex_value(blit_error)); return RC_GPU_BLIT; }
+
+    const EGLDisplay display = eglGetCurrentDisplay();
+    if (display == EGL_NO_DISPLAY || !load_extensions()) return RC_CONTEXT;
+    clear_egl_errors();
+    const EGLint sync_attrs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, EGL_NO_NATIVE_FENCE_FD_ANDROID, EGL_NONE};
+    EGLSyncKHR sync = g_create_sync(display, EGL_SYNC_NATIVE_FENCE_ANDROID, sync_attrs);
+    if (sync == EGL_NO_SYNC_KHR) {
+        loge("eglCreateSyncKHR(native fence) failed eglError=" + hex_value(static_cast<uint32_t>(eglGetError())));
+        return RC_NATIVE_FENCE;
+    }
+    glFlush();
+    const int fence_fd = g_dup_native_fence_fd(display, sync);
+    const EGLint dup_error = eglGetError();
+    g_destroy_sync(display, sync);
+    if (fence_fd < 0) {
+        loge("eglDupNativeFenceFDANDROID failed fd=" + std::to_string(fence_fd) + " eglError=" + hex_value(static_cast<uint32_t>(dup_error)));
+        return RC_NATIVE_FENCE;
+    }
+    *out_fence_fd = fence_fd;
     return 0;
 }
 
 int wait_for_free_slot(uint32_t scanout_id, ScanoutState& state) {
     for (;;) {
         drain_acks();
-        for (size_t n=0; n<FRAME_SLOTS; ++n) {
+        for (size_t n = 0; n < FRAME_SLOTS; ++n) {
             const uint32_t idx = (state.next_slot + static_cast<uint32_t>(n)) % FRAME_SLOTS;
-            if (!state.slots[idx].busy) { state.next_slot = (idx+1)%FRAME_SLOTS; return static_cast<int>(idx); }
+            if (!state.slots[idx].busy) { state.next_slot = (idx + 1) % FRAME_SLOTS; return static_cast<int>(idx); }
         }
         if (!connect_socket() || !receive_one_ack(true)) {
             if (g_socket < 0) continue;
@@ -369,7 +456,7 @@ int wait_for_free_slot(uint32_t scanout_id, ScanoutState& state) {
 bool wait_scanout_idle(ScanoutState& state) {
     for (;;) {
         drain_acks();
-        bool busy=false;
+        bool busy = false;
         for (const auto& slot : state.slots) busy = busy || slot.busy;
         if (!busy) return true;
         if (!connect_socket() || !receive_one_ack(true)) {
@@ -379,27 +466,34 @@ bool wait_scanout_idle(ScanoutState& state) {
     }
 }
 
-int send_frame(uint32_t scanout_id, uint32_t slot_index, ScanoutState& state) {
-    if (!connect_socket()) return RC_SOCKET;
+int send_frame(uint32_t scanout_id, uint32_t slot_index, ScanoutState& state, int fence_fd) {
+    if (!connect_socket()) { close(fence_fd); return RC_SOCKET; }
     auto& slot = state.slots[slot_index];
     const uint32_t serial = state.next_serial++;
     const bool needs_handle = !slot.registered;
     AhbMessage msg{MAGIC, VERSION, needs_handle ? MSG_REGISTER_FRAME : MSG_FRAME, scanout_id, slot_index, serial, state.width, state.height};
-    if (!send_all(g_socket, &msg, sizeof(msg))) { close_socket(); return RC_SOCKET; }
+    if (!send_all(g_socket, &msg, sizeof(msg))) { close(fence_fd); close_socket(); return RC_SOCKET; }
     if (needs_handle) {
         const int rc = AHardwareBuffer_sendHandleToUnixSocket(slot.buffer, g_socket);
-        if (rc != 0) { loge("AHardwareBuffer_sendHandleToUnixSocket failed rc=" + std::to_string(rc)); close_socket(); return RC_SOCKET; }
+        if (rc != 0) { loge("AHardwareBuffer_sendHandleToUnixSocket failed rc=" + std::to_string(rc)); close(fence_fd); close_socket(); return RC_SOCKET; }
         slot.registered = true;
         logi("registered AHB pipeline slot=" + std::to_string(slot_index) + " size=" + std::to_string(state.width) + "x" + std::to_string(state.height));
     }
+    if (!send_fence_fd(g_socket, fence_fd)) {
+        loge("failed to send native producer fence fd");
+        close(fence_fd);
+        close_socket();
+        return RC_SOCKET;
+    }
+    close(fence_fd);
     slot.busy = true;
     slot.serial = serial;
 
     ++g_frame_count;
     const auto now = std::chrono::steady_clock::now();
-    const double elapsed = std::chrono::duration<double>(now-g_rate_started).count();
+    const double elapsed = std::chrono::duration<double>(now - g_rate_started).count();
     if (elapsed >= 2.0) {
-        logi("pipelined frame rate producer=" + std::to_string(static_cast<int>(g_frame_count/elapsed)) + " fps in_flight<=3");
+        logi("pipelined frame rate producer=" + std::to_string(static_cast<int>(g_frame_count / elapsed)) + " fps in_flight<=3 syncfd=1");
         g_frame_count = 0;
         g_rate_started = now;
     }
@@ -411,22 +505,46 @@ int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint3
     if (state.width != width || state.height != height) {
         if (!wait_scanout_idle(state)) return RC_SOCKET;
         destroy_scanout(state);
-        state.width = width; state.height = height; state.x = x; state.y = y;
+        state.width = width;
+        state.height = height;
+        state.x = x;
+        state.y = y;
         logi("scanout resized to stable frame " + std::to_string(width) + "x" + std::to_string(height));
     } else {
-        state.x=x; state.y=y;
+        state.x = x;
+        state.y = y;
     }
     const int idx = wait_for_free_slot(scanout_id, state);
     if (idx < 0) return RC_SOCKET;
     auto& slot = state.slots[static_cast<size_t>(idx)];
     const int alloc_rc = allocate_slot(slot, width, height, static_cast<uint32_t>(idx));
     if (alloc_rc) return alloc_rc;
-    const int copy_rc = copy_resource(resource_id, slot, x, y, width, height);
+    int fence_fd = -1;
+    const int copy_rc = copy_resource(resource_id, slot, x, y, width, height, &fence_fd);
     if (copy_rc) return copy_rc;
-    return send_frame(scanout_id, static_cast<uint32_t>(idx), state);
+    return send_frame(scanout_id, static_cast<uint32_t>(idx), state, fence_fd);
 }
 
 } // namespace
+
+extern "C" int vessel_ahb_note_submit(uint32_t ctx_id) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
+        loge("VirGL submit completed without a current EGL context ctx=" + std::to_string(ctx_id));
+        return RC_CONTEXT;
+    }
+    clear_gl_errors();
+    GLsync next = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!next) {
+        loge("glFenceSync failed after VirGL submit ctx=" + std::to_string(ctx_id) + " glError=" + hex_value(glGetError()));
+        return RC_RENDER_SYNC;
+    }
+    glFlush();
+    auto it = g_context_fences.find(ctx_id);
+    if (it != g_context_fences.end() && it->second) glDeleteSync(it->second);
+    g_context_fences[ctx_id] = next;
+    return 0;
+}
 
 extern "C" int vessel_ahb_set_scanout(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> guard(g_lock);
@@ -458,7 +576,7 @@ extern "C" int vessel_ahb_disable(uint32_t scanout_id) {
             for (;;) {
                 AckMessage ack{};
                 if (!recv_all(g_socket, &ack, sizeof(ack))) { close_socket(); break; }
-                if (ack.magic==MAGIC && ack.version==VERSION && ack.serial==serial && ack.slot==UINT32_MAX) break;
+                if (ack.magic == MAGIC && ack.version == VERSION && ack.serial == serial && ack.slot == UINT32_MAX) break;
                 handle_ack(ack);
             }
         } else close_socket();
