@@ -24,8 +24,11 @@ jobs:
           set -euo pipefail
           mkdir -p out
           gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -n vessel-self-contained-arm64 -D out
-          test -s out/Vessel-2.1.0-alpha2-arm64.apk
-          mv out/Vessel-2.1.0-alpha2-arm64.apk out/Vessel-alpha5-debug.apk
+          find out -maxdepth 6 -type f -print
+          APK="$(find out -type f -name 'Vessel-2.1.0-alpha2-arm64.apk' -print -quit)"
+          test -n "$APK"
+          test -s "$APK"
+          cp "$APK" out/Vessel-alpha5-debug.apk
           sha256sum out/Vessel-alpha5-debug.apk | tee out/Vessel-alpha5-debug.apk.sha256
 
       - name: Publish rolling prerelease
