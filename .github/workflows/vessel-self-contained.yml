@@ -1,4 +1,4 @@
-name: Vessel self-contained protocol 39 APK
+name: Vessel APK
 
 on:
   push:
@@ -57,8 +57,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .vessel-native-build/vhost-device-target
-          key: vessel-rust-v3-${{ runner.os }}-${{ hashFiles('tools/vessel_native/**/Cargo.lock', 'tools/vessel_native/patch_vhost_gpu_android_ahb.py', 'tools/vessel_native/rebuild_vhost_gpu_ahb.sh') }}
+          key: vessel-rust-v4-${{ runner.os }}-${{ hashFiles('tools/vessel_native/**/Cargo.lock', 'tools/vessel_native/patch_vhost_gpu_android_ahb.py', 'tools/vessel_native/rebuild_vhost_gpu_ahb.sh') }}
           restore-keys: |
+            vessel-rust-v4-${{ runner.os }}-
             vessel-rust-v3-${{ runner.os }}-
 
       - name: Seed native base from last verified APK
@@ -88,7 +89,9 @@ jobs:
 
           rm -rf /tmp/vessel-prev /tmp/vessel-prev-apk
           mkdir -p /tmp/vessel-prev /tmp/vessel-prev-apk app/src/main/jniLibs/arm64-v8a app/src/main/assets/vessel
-          gh run download "$PREV_RUN" -n vessel-protocol39-self-contained-arm64 -D /tmp/vessel-prev
+          if ! gh run download "$PREV_RUN" -n vessel-self-contained-arm64 -D /tmp/vessel-prev; then
+            gh run download "$PREV_RUN" -n vessel-protocol39-self-contained-arm64 -D /tmp/vessel-prev
+          fi
           PREV_APK="$(find /tmp/vessel-prev -name '*.apk' -print -quit)"
           [ -n "$PREV_APK" ] || exit 0
           unzip -q "$PREV_APK" 'lib/arm64-v8a/*' 'assets/vessel/runtime-build.txt' -d /tmp/vessel-prev-apk
@@ -150,20 +153,38 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          grep -F 'versionName = "2.1.0-alpha1"' app/build.gradle.kts
           grep -F 'softwareFallback", false' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'UML_VCPUS = 1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'VIRTIO_INPUT_ID = 18' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'CONFIG_VIRTIO_INPUT=y' tools/vessel_native/kernel/build_uml_smp_android.sh
-          grep -F 'display_bridge=android-hardware-buffer-syncfd-v1' app/src/main/assets/vessel/runtime-build.txt
-          grep -F 'runtime=v39-self-contained-ahb-syncfd-virtio-input-r5' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'display_bridge=android-hardware-buffer-syncfd-v2' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'runtime=v39-self-contained-ahb-syncfd-virtio-input-r6' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'virgl_sync=resource-scoped' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'damage_updates=enabled' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'uml_vcpus=1' app/src/main/assets/vessel/runtime-build.txt
           grep -F 'nativeAhbAttachSurface' app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt
+          grep -F 'nativeAhbSurfaceChanged' app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt
           grep -F 'AHardwareBuffer_sendHandleToUnixSocket' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'eglDupNativeFenceFDANDROID' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'glFenceSync' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'glWaitSync' tools/vessel_native/vessel_ahb_bridge.cpp
+          grep -F 'pending_damage' tools/vessel_native/vessel_ahb_bridge.cpp
+          grep -F 'vessel_ahb_wait_context' tools/vessel_native/vessel_ahb_bridge.cpp
+          ! grep -Fq 'wait_for_render_contexts' tools/vessel_native/vessel_ahb_bridge.cpp
           ! grep -Eq '\bglFinish[[:space:]]*\(' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME' app/src/main/cpp/vessel_ahb_presenter.cpp
+          grep -F 'VK_SEMAPHORE_IMPORT_TEMPORARY_BIT' app/src/main/cpp/vessel_ahb_presenter.cpp
           grep -F 'vkImportSemaphoreFdKHR' app/src/main/cpp/vessel_ahb_presenter.cpp
-          grep -F 'vessel_ahb_note_submit' tools/vessel_native/patch_vhost_gpu_android_ahb.py
+          grep -F 'swapchain_dirty_' app/src/main/cpp/vessel_ahb_presenter.cpp
+          grep -F 'VK_ERROR_OUT_OF_DATE_KHR' app/src/main/cpp/vessel_ahb_presenter.cpp
+          grep -F 'VESSEL_ANDROID_AHB_SCANOUT_V3' tools/vessel_native/patch_vhost_gpu_android_ahb.py
+          grep -F 'vessel_contexts' tools/vessel_native/patch_vhost_gpu_android_ahb.py
+          grep -F 'vessel_ahb_wait_context' tools/vessel_native/patch_vhost_gpu_android_ahb.py
+          grep -F 'app-catalog-v2.json' app/src/main/assets/vessel/app_discovery.py
+          ! grep -Fq 'appstreamcli refresh-cache --force' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          ! grep -Fq -- '--no-install-recommends' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'kde-plasma-desktop' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
           grep -F 'VesselHostDebug' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           ! test -e app/src/main/assets/vessel/guest_input_agent.py
           ! grep -R -E 'VesselFrameTcpBridge|47635|47633|guest_input_agent|com\.termux\.permission\.RUN_COMMAND' \
@@ -216,17 +237,17 @@ jobs:
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
-          cp "$DEBUG_APK" build/deliverables/Vessel-protocol39-self-contained-arm64.apk
-          cp "$RELEASE_APK" build/deliverables/Vessel-protocol39-r8-release-unsigned-arm64.apk
+          cp "$DEBUG_APK" build/deliverables/Vessel-2.1.0-alpha1-arm64.apk
+          cp "$RELEASE_APK" build/deliverables/Vessel-2.1.0-alpha1-release-unsigned-arm64.apk
           sha256sum build/deliverables/*.apk | tee build/deliverables/SHA256SUMS.txt
 
       - name: Upload finished Vessel APKs
         uses: actions/upload-artifact@v4
         with:
-          name: vessel-protocol39-self-contained-arm64
+          name: vessel-self-contained-arm64
           path: |
-            build/deliverables/Vessel-protocol39-self-contained-arm64.apk
-            build/deliverables/Vessel-protocol39-r8-release-unsigned-arm64.apk
+            build/deliverables/Vessel-2.1.0-alpha1-arm64.apk
+            build/deliverables/Vessel-2.1.0-alpha1-release-unsigned-arm64.apk
             build/deliverables/SHA256SUMS.txt
             app/src/main/assets/vessel/runtime-build.txt
           if-no-files-found: error
