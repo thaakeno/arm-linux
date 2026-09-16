@@ -150,6 +150,10 @@ DamageRect full_damage(const ScanoutState& state) {
     return DamageRect{0, 0, state.width, state.height, state.width != 0 && state.height != 0};
 }
 
+DamageRect full_damage(uint32_t width, uint32_t height) {
+    return DamageRect{0, 0, width, height, width != 0 && height != 0};
+}
+
 DamageRect union_damage(const DamageRect& a, const DamageRect& b) {
     if (!a.valid) return b;
     if (!b.valid) return a;
@@ -411,7 +415,7 @@ int allocate_slot(BufferSlot& slot, uint32_t width, uint32_t height, uint32_t in
     slot.width = width;
     slot.height = height;
     slot.content_valid = false;
-    slot.pending_damage = full_damage(ScanoutState{.width = width, .height = height});
+    slot.pending_damage = full_damage(width, height);
     logi("allocated pipeline slot=" + std::to_string(index) + " size=" + std::to_string(width) + "x" + std::to_string(height));
     return 0;
 }
@@ -636,8 +640,7 @@ extern "C" int vessel_ahb_wait_context(uint32_t ctx_id) {
 extern "C" int vessel_ahb_set_scanout(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> guard(g_lock);
     if (scanout_id >= MAX_SCANOUTS || !width || !height) return EINVAL;
-    const ScanoutState temporary{.x = x, .y = y, .width = width, .height = height};
-    const DamageRect full = full_damage(temporary);
+    const DamageRect full = full_damage(width, height);
     const int rc = submit_resource(resource_id, scanout_id, x, y, width, height, full);
     if (rc) loge("SET_SCANOUT failed resource=" + std::to_string(resource_id) + " rc=" + std::to_string(rc));
     return rc;
