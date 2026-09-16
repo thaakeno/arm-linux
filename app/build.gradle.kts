@@ -98,12 +98,26 @@ dependencies {
   implementation(libs.androidx.compose.ui)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.compose.material3)
-  implementation(libs.androidx.compose.material.icons.extended)
-  implementation(libs.androidx.navigation.compose)
-  implementation(libs.androidx.lifecycle.viewmodel.ktx)
-  implementation(libs.androidx.datastore.preferences)
-  implementation(libs.androidx.documentfile)
-  implementation(libs.androidx.work.runtime.ktx)
-  implementation(libs.androidx.core.splashscreen)
+  implementation("androidx.compose.material:material-icons-extended")
   debugImplementation(libs.androidx.compose.ui.tooling)
+  androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+  debugImplementation(libs.androidx.compose.ui.test.manifest)
+  testImplementation(libs.junit)
+  testImplementation(libs.kotlinx.coroutines.test)
+  androidTestImplementation(libs.androidx.test.core)
+  androidTestImplementation(libs.androidx.test.ext.junit)
+  androidTestImplementation(libs.androidx.test.runner)
+  androidTestImplementation(libs.androidx.test.espresso.core)
+  implementation(libs.androidx.navigation3.ui)
+  implementation(libs.androidx.navigation3.runtime)
+  implementation(libs.androidx.lifecycle.viewmodel.navigation3)
+}
+
+val testLabel = if (localTest) "localtest-" else ""
+val stagedApkName = "Vessel-${testLabel}${android.defaultConfig.versionName}-${displayRevision}-arm64.apk"
+tasks.register<Copy>("stageDebugApk") {
+    dependsOn("assembleDebug")
+    from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
+    into(layout.buildDirectory.dir("staged"))
+    rename { stagedApkName }
 }
