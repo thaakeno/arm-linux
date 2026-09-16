@@ -153,16 +153,16 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.1.0-alpha1"' app/build.gradle.kts
+          grep -F 'versionName = "2.1.0-alpha2"' app/build.gradle.kts
           grep -F 'softwareFallback", false' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
-          grep -F 'UML_VCPUS = 1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'UML_VCPUS = 6' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'VIRTIO_INPUT_ID = 18' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'CONFIG_VIRTIO_INPUT=y' tools/vessel_native/kernel/build_uml_smp_android.sh
           grep -F 'display_bridge=android-hardware-buffer-syncfd-v2' app/src/main/assets/vessel/runtime-build.txt
-          grep -F 'runtime=v39-self-contained-ahb-syncfd-virtio-input-r6' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'runtime=v39-self-contained-ahb-syncfd-virtio-input-r7' app/src/main/assets/vessel/runtime-build.txt
           grep -F 'virgl_sync=resource-scoped' app/src/main/assets/vessel/runtime-build.txt
           grep -F 'damage_updates=enabled' app/src/main/assets/vessel/runtime-build.txt
-          grep -F 'uml_vcpus=1' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'uml_vcpus=6' app/src/main/assets/vessel/runtime-build.txt
           grep -F 'nativeAhbAttachSurface' app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt
           grep -F 'nativeAhbSurfaceChanged' app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt
           grep -F 'AHardwareBuffer_sendHandleToUnixSocket' tools/vessel_native/vessel_ahb_bridge.cpp
@@ -177,6 +177,7 @@ jobs:
           grep -F 'VK_SEMAPHORE_IMPORT_TEMPORARY_BIT' app/src/main/cpp/vessel_ahb_presenter.cpp
           grep -F 'vkImportSemaphoreFdKHR' app/src/main/cpp/vessel_ahb_presenter.cpp
           grep -F 'swapchain_dirty_' app/src/main/cpp/vessel_ahb_presenter.cpp
+          grep -F 'repainted retained GPU frame after surface resize' app/src/main/cpp/vessel_ahb_presenter.cpp
           grep -F 'VK_ERROR_OUT_OF_DATE_KHR' app/src/main/cpp/vessel_ahb_presenter.cpp
           grep -F 'VESSEL_ANDROID_AHB_SCANOUT_V3' tools/vessel_native/patch_vhost_gpu_android_ahb.py
           grep -F 'vessel_contexts' tools/vessel_native/patch_vhost_gpu_android_ahb.py
@@ -185,6 +186,14 @@ jobs:
           ! grep -Fq 'appstreamcli refresh-cache --force' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
           ! grep -Fq -- '--no-install-recommends' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
           grep -F 'kde-plasma-desktop' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'kf5-applications.menu' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'update_initramfs=no' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'qml-module-qtquick-templates2' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'state.value.stage != "ready"' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'base64 -d | /bin/bash' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          ! grep -Fq 'ARM64 SMP containment' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          ! grep -Fq '/etc/xdg/menus/plasma-applications.menu' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          ! grep -Fq '/etc/xdg/menus/plasma-applications.menu' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
           grep -F 'VesselHostDebug' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           ! test -e app/src/main/assets/vessel/guest_input_agent.py
           ! grep -R -E 'VesselFrameTcpBridge|47635|47633|guest_input_agent|com\.termux\.permission\.RUN_COMMAND' \
@@ -237,8 +246,8 @@ jobs:
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
-          cp "$DEBUG_APK" build/deliverables/Vessel-2.1.0-alpha1-arm64.apk
-          cp "$RELEASE_APK" build/deliverables/Vessel-2.1.0-alpha1-release-unsigned-arm64.apk
+          cp "$DEBUG_APK" build/deliverables/Vessel-2.1.0-alpha2-arm64.apk
+          cp "$RELEASE_APK" build/deliverables/Vessel-2.1.0-alpha2-release-unsigned-arm64.apk
           sha256sum build/deliverables/*.apk | tee build/deliverables/SHA256SUMS.txt
 
       - name: Upload finished Vessel APKs
@@ -246,8 +255,8 @@ jobs:
         with:
           name: vessel-self-contained-arm64
           path: |
-            build/deliverables/Vessel-2.1.0-alpha1-arm64.apk
-            build/deliverables/Vessel-2.1.0-alpha1-release-unsigned-arm64.apk
+            build/deliverables/Vessel-2.1.0-alpha2-arm64.apk
+            build/deliverables/Vessel-2.1.0-alpha2-release-unsigned-arm64.apk
             build/deliverables/SHA256SUMS.txt
             app/src/main/assets/vessel/runtime-build.txt
           if-no-files-found: error
