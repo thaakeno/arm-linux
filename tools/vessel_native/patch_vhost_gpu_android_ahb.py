@@ -21,10 +21,10 @@ ffi = r'''
 // VESSEL_ANDROID_AHB_SCANOUT_V3
 // VirGL remains GPU accelerated. Each VirGL context publishes its latest
 // producer GL sync, while each resource records only the contexts attached to
-// that resource. Scanout context 0 waits only those producer contexts before
-// reading the resource. The AHB copy then exports an Android native sync FD to
-// Vulkan. No CPU readback, global all-context barrier, glFinish, software
-// renderer, or framebuffer streaming path is involved.
+// or explicitly writing that resource. Scanout context 0 waits only those
+// producer contexts before reading the resource. The AHB copy then exports an
+// Android native sync FD to Vulkan. No CPU readback, global all-context barrier,
+// glFinish, software renderer, or framebuffer streaming path is involved.
 extern "C" {
     fn vessel_ahb_note_submit(ctx_id: u32) -> libc::c_int;
     fn vessel_ahb_wait_context(ctx_id: u32) -> libc::c_int;
@@ -63,9 +63,10 @@ if text.count(resource_init) != 1:
 text = text.replace(resource_init, resource_init + "            vessel_contexts: HashSet::new(),\n", 1)
 
 # Transfer writes are resource-writing paths too. Publish the producer context
-# after virglrenderer has queued the write so flush_resource can order it.
+# after virglrenderer has queued the write and remember it on this resource even
+# if that transfer path did not go through ctx_attach_resource first.
 transfer1 = '''        self.renderer\n            .transfer_write(resource_id, ctx_id, transfer.into(), None)?;\n        Ok(OkNoData)\n'''
-transfer_new = '''        self.renderer\n            .transfer_write(resource_id, ctx_id, transfer.into(), None)?;\n        // SAFETY: process-local C ABI and virglrenderer left this context current.\n        let sync_rc = unsafe { vessel_ahb_note_submit(ctx_id) };\n        if sync_rc != 0 {\n            error!("Vessel failed to publish VirGL transfer sync ctx={ctx_id} resource={resource_id}: rc={sync_rc}");\n            return Err(ErrUnspec);\n        }\n        Ok(OkNoData)\n'''
+transfer_new = '''        self.renderer\n            .transfer_write(resource_id, ctx_id, transfer.into(), None)?;\n        self.resources\n            .get_mut(&resource_id)\n            .ok_or(ErrInvalidResourceId)?\n            .vessel_contexts\n            .insert(ctx_id);\n        // SAFETY: process-local C ABI and virglrenderer left this context current.\n        let sync_rc = unsafe { vessel_ahb_note_submit(ctx_id) };\n        if sync_rc != 0 {\n            error!("Vessel failed to publish VirGL transfer sync ctx={ctx_id} resource={resource_id}: rc={sync_rc}");\n            return Err(ErrUnspec);\n        }\n        Ok(OkNoData)\n'''
 if text.count(transfer1) != 2:
     raise SystemExit("unexpected transfer_write layouts")
 text = text.replace(transfer1, transfer_new, 2)
@@ -179,7 +180,7 @@ new_set = r'''    fn set_scanout(
         self.renderer.force_ctx_0();
         for ctx_id in producer_contexts {
             // SAFETY: process-local C ABI; producer context came from the
-            // resource's virgl context-attachment set.
+            // resource's virgl context-attachment/write set.
             let rc = unsafe { vessel_ahb_wait_context(ctx_id) };
             if rc != 0 {
                 error!("Vessel resource-scoped sync failed resource={resource_id} ctx={ctx_id}: rc={rc}");
@@ -226,8 +227,8 @@ new_flush = r'''    fn flush_resource(&mut self, resource_id: u32, rect: virtio_
             .ok_or(ErrInvalidResourceId)?
             .clone();
 
-        // Resource-scoped ordering: only producer contexts attached to this
-        // resource are dependencies of this scanout update.
+        // Resource-scoped ordering: only producer contexts attached to or
+        // explicitly writing this resource are dependencies of this scanout.
         self.renderer.force_ctx_0();
         for ctx_id in &resource.vessel_contexts {
             // SAFETY: process-local C ABI; IDs are renderer-owned.
