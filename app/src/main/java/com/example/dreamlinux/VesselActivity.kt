@@ -13,6 +13,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -376,10 +377,9 @@ class VesselActivity : ComponentActivity() {
                 }
             } else {
                 Surface(
-                    Modifier.align(Alignment.TopCenter).padding(top=5.dp),
+                    modifier=Modifier.align(Alignment.TopCenter).padding(top=5.dp).clickable { controlsVisible=true },
                     shape=RoundedCornerShape(999.dp),
                     color=Color(0x8A101512),
-                    onClick={controlsVisible=true},
                 ) {
                     Box(Modifier.width(58.dp).height(14.dp), contentAlignment=Alignment.Center) {
                         Surface(Modifier.width(28.dp).height(3.dp), shape=RoundedCornerShape(999.dp), color=MaterialTheme.colorScheme.onSurfaceVariant) {}
