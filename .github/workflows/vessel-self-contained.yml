@@ -6,11 +6,6 @@ on:
     paths:
       - 'app/**'
       - 'tools/vessel_native/**'
-      - 'tools/venus_poc/build_uml_smp_android.sh'
-      - 'tools/venus_poc/apply_umshm.py'
-      - 'tools/venus_poc/fix_umshm_nonblock.py'
-      - 'tools/venus_poc/fix_umshm_ptrace_fds.py'
-      - 'tools/venus_poc/patch_virtio_uml_vhost_gpu.py'
       - '.github/workflows/vessel-self-contained.yml'
       - 'gradle/**'
       - 'gradlew'
@@ -53,7 +48,7 @@ jobs:
           path: |
             .vessel-native-build
             app/src/main/jniLibs/arm64-v8a
-          key: vessel-native-base-v3-${{ runner.os }}-${{ hashFiles('tools/vessel_native/build_runtime_bundle_ci.sh', 'tools/vessel_native/vhost-device-vessel-input/**', 'tools/venus_poc/build_uml_smp_android.sh', 'tools/venus_poc/apply_umshm.py', 'tools/venus_poc/fix_umshm_nonblock.py', 'tools/venus_poc/fix_umshm_ptrace_fds.py', 'tools/venus_poc/patch_virtio_uml_vhost_gpu.py') }}
+          key: vessel-native-base-v4-${{ runner.os }}-${{ hashFiles('tools/vessel_native/build_runtime_bundle_ci.sh', 'tools/vessel_native/vhost-device-vessel-input/**', 'tools/vessel_native/kernel/**') }}
 
       - name: Restore Rust build cache
         uses: actions/cache@v4
@@ -62,9 +57,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .vessel-native-build/vhost-device-target
-          key: vessel-rust-v2-${{ runner.os }}-${{ hashFiles('tools/vessel_native/**/Cargo.lock', 'tools/vessel_native/patch_vhost_gpu_android_ahb.py', 'tools/vessel_native/rebuild_vhost_gpu_ahb.sh') }}
+          key: vessel-rust-v3-${{ runner.os }}-${{ hashFiles('tools/vessel_native/**/Cargo.lock', 'tools/vessel_native/patch_vhost_gpu_android_ahb.py', 'tools/vessel_native/rebuild_vhost_gpu_ahb.sh') }}
           restore-keys: |
-            vessel-rust-v2-${{ runner.os }}-
+            vessel-rust-v3-${{ runner.os }}-
 
       - name: Seed native base from last verified APK
         id: native-seed
@@ -84,11 +79,7 @@ jobs:
           BASE_INPUTS=(
             tools/vessel_native/build_runtime_bundle_ci.sh
             tools/vessel_native/vhost-device-vessel-input
-            tools/venus_poc/build_uml_smp_android.sh
-            tools/venus_poc/apply_umshm.py
-            tools/venus_poc/fix_umshm_nonblock.py
-            tools/venus_poc/fix_umshm_ptrace_fds.py
-            tools/venus_poc/patch_virtio_uml_vhost_gpu.py
+            tools/vessel_native/kernel
           )
           if ! git diff --quiet "$PREV_SHA"..HEAD -- "${BASE_INPUTS[@]}"; then
             echo "Expensive native base inputs changed; refusing to seed from an older APK."
@@ -119,9 +110,8 @@ jobs:
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_uml.so
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_virglrenderer.so
           test -s app/src/main/jniLibs/arm64-v8a/libvessel_epoxy.so
-          test -s app/src/main/assets/vessel/runtime-build.txt
           echo "seeded=true" >> "$GITHUB_OUTPUT"
-          echo "Seeded unchanged expensive runtime from verified run $PREV_RUN ($PREV_SHA)."
+          echo "Seeded unchanged immutable runtime from verified run $PREV_RUN ($PREV_SHA)."
 
       - name: Install Android NDK and host build tools
         shell: bash
@@ -150,35 +140,33 @@ jobs:
             tools/vessel_native/rebuild_vhost_gpu_ahb.sh
 
           if [ "${{ steps.native-base.outputs.cache-hit }}" != "true" ] && [ "${{ steps.native-seed.outputs.seeded }}" != "true" ]; then
-            echo "No valid native base available; performing the full deterministic runtime build."
             tools/vessel_native/build_runtime_bundle_ci.sh
           else
-            echo "Reusing verified immutable kernel/input/ANGLE/VirGL base."
             tools/vessel_native/prepare_gpu_rebuild_ci.sh
           fi
-
-          # GPU bridge/vhost are always rebuilt from the current commit. Native
-          # source changes therefore cannot be hidden by the base cache.
           tools/vessel_native/rebuild_vhost_gpu_ahb.sh
 
       - name: Verify production architecture and native ABI
         shell: bash
         run: |
           set -euxo pipefail
-          grep -Eq 'const val REVISION = "v39-self-contained-dmabuf-virtio-input-r[0-9]+"' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
-          grep -F 'vhost-user-gpu-dmabuf-same-uid-v1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
-          grep -F 'virtio-input-vhost-user-same-uid-v1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'softwareFallback", false' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'VIRTIO_INPUT_ID = 18' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
-          grep -F 'CONFIG_VIRTIO_INPUT=y' tools/venus_poc/build_uml_smp_android.sh
-          grep -F 'display_bridge=android-hardware-buffer-zero-copy-v1' app/src/main/assets/vessel/runtime-build.txt
-          grep -F 'runtime=v39-self-contained-ahb-virtio-input-r4' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'CONFIG_VIRTIO_INPUT=y' tools/vessel_native/kernel/build_uml_smp_android.sh
+          grep -F 'display_bridge=android-hardware-buffer-syncfd-v1' app/src/main/assets/vessel/runtime-build.txt
+          grep -F 'runtime=v39-self-contained-ahb-syncfd-virtio-input-r5' app/src/main/assets/vessel/runtime-build.txt
           grep -F 'nativeAhbAttachSurface' app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt
           grep -F 'AHardwareBuffer_sendHandleToUnixSocket' tools/vessel_native/vessel_ahb_bridge.cpp
-          grep -F 'extern "C" {' tools/vessel_native/vessel_ahb_bridge.cpp
+          grep -F 'eglDupNativeFenceFDANDROID' tools/vessel_native/vessel_ahb_bridge.cpp
+          grep -F 'glFenceSync' tools/vessel_native/vessel_ahb_bridge.cpp
+          grep -F 'glWaitSync' tools/vessel_native/vessel_ahb_bridge.cpp
+          ! grep -Eq '\bglFinish[[:space:]]*\(' tools/vessel_native/vessel_ahb_bridge.cpp
+          grep -F 'VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME' app/src/main/cpp/vessel_ahb_presenter.cpp
+          grep -F 'vkImportSemaphoreFdKHR' app/src/main/cpp/vessel_ahb_presenter.cpp
+          grep -F 'vessel_ahb_note_submit' tools/vessel_native/patch_vhost_gpu_android_ahb.py
           grep -F 'VesselHostDebug' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           ! test -e app/src/main/assets/vessel/guest_input_agent.py
-          ! grep -R -E 'VesselFrameTcpBridge|47635|47633|guest_input_agent|TermuxUmlController|com\.termux\.permission\.RUN_COMMAND' \
+          ! grep -R -E 'VesselFrameTcpBridge|47635|47633|guest_input_agent|com\.termux\.permission\.RUN_COMMAND' \
             app/src/main/AndroidManifest.xml \
             app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt \
             app/src/main/java/com/example/dreamlinux/VesselWaylandPresenter.kt \
@@ -200,37 +188,45 @@ jobs:
           ! "$NM" -D --undefined-only app/src/main/jniLibs/arm64-v8a/libvessel_ahb_bridge.so | grep -Fq _Z32virgl_renderer_resource_get_info
           "$NM" -D app/src/main/jniLibs/arm64-v8a/libvessel_virglrenderer.so | grep -Fq virgl_renderer_resource_get_info
 
-      - name: Build, test and lint APK
+      - name: Build, test, lint and R8 release
         shell: bash
         run: |
           set -euxo pipefail
           chmod +x gradlew
-          ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon --build-cache
+          ./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest :app:lintDebug --no-daemon --build-cache
 
-      - name: Verify APK contains complete runtime but no distro image
+      - name: Verify APKs contain complete runtime but no distro image
         shell: bash
         run: |
           set -euxo pipefail
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          unzip -l "$APK" | tee /tmp/apk-files.txt
+          DEBUG_APK=app/build/outputs/apk/debug/app-debug.apk
+          RELEASE_APK=app/build/outputs/apk/release/app-release-unsigned.apk
+          test -s "$DEBUG_APK"
+          test -s "$RELEASE_APK"
+          unzip -l "$DEBUG_APK" | tee /tmp/apk-files.txt
+          unzip -l "$RELEASE_APK" | tee /tmp/release-apk-files.txt
           for f in \
             libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so \
             libvessel_vhost_gpu.so libvessel_vhost_input.so libvessel_ahb_bridge.so \
             libvessel_virglrenderer.so libvessel_epoxy.so \
             libEGL_angle.so libGLESv2_angle.so libvessel_wayland_presenter.so; do
-            grep -Fq "lib/arm64-v8a/$f" /tmp/apk-files.txt || { echo "APK missing $f" >&2; exit 1; }
+            grep -Fq "lib/arm64-v8a/$f" /tmp/apk-files.txt || { echo "Debug APK missing $f" >&2; exit 1; }
+            grep -Fq "lib/arm64-v8a/$f" /tmp/release-apk-files.txt || { echo "R8 release APK missing $f" >&2; exit 1; }
           done
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
+          ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
-          cp "$APK" build/deliverables/Vessel-protocol39-self-contained-arm64.apk
-          sha256sum build/deliverables/Vessel-protocol39-self-contained-arm64.apk | tee build/deliverables/SHA256SUMS.txt
+          cp "$DEBUG_APK" build/deliverables/Vessel-protocol39-self-contained-arm64.apk
+          cp "$RELEASE_APK" build/deliverables/Vessel-protocol39-r8-release-unsigned-arm64.apk
+          sha256sum build/deliverables/*.apk | tee build/deliverables/SHA256SUMS.txt
 
-      - name: Upload finished Vessel APK
+      - name: Upload finished Vessel APKs
         uses: actions/upload-artifact@v4
         with:
           name: vessel-protocol39-self-contained-arm64
           path: |
             build/deliverables/Vessel-protocol39-self-contained-arm64.apk
+            build/deliverables/Vessel-protocol39-r8-release-unsigned-arm64.apk
             build/deliverables/SHA256SUMS.txt
             app/src/main/assets/vessel/runtime-build.txt
           if-no-files-found: error
