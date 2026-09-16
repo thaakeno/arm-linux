@@ -1,5 +1,9 @@
 #!/bin/bash
 set -eu
+if pgrep -u vessel -x kwin_wayland >/dev/null 2>&1; then
+  echo VESSEL_WAYLAND_CLEAN_ALREADY_RUNNING
+  exit 0
+fi
 pkill -u vessel -x kwin_x11 2>/dev/null || true
 pkill -u vessel -x kwin_wayland 2>/dev/null || true
 pkill -u vessel -x plasmashell 2>/dev/null || true
