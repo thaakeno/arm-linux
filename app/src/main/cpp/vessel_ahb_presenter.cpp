@@ -188,9 +188,16 @@ public:
             status_ = "presenter-error:ahb-surface";
             return;
         }
+        const uint32_t native_width = static_cast<uint32_t>(std::max(1, ANativeWindow_getWidth(window)));
+        const uint32_t native_height = static_cast<uint32_t>(std::max(1, ANativeWindow_getHeight(window)));
         std::lock_guard<std::mutex> guard(lock_);
-        if (window_ == window && device_) {
+        if (window_ == window) {
             ANativeWindow_release(window);
+            surface_width_ = native_width;
+            surface_height_ = native_height;
+            if (device_ && (extent_.width != native_width || extent_.height != native_height)) {
+                swapchain_dirty_ = true;
+            }
             return;
         }
         if (device_) {
@@ -200,13 +207,27 @@ public:
         destroy_vulkan_locked();
         release_window_locked();
         window_ = window;
+        surface_width_ = native_width;
+        surface_height_ = native_height;
+        swapchain_dirty_ = false;
         status_ = "surface-attached";
-        logi("Android surface attached");
+        logi("Android surface attached size=" + std::to_string(native_width) + "x" + std::to_string(native_height));
         if (latest_slot_ < FRAME_SLOTS && sources_[latest_slot_].buffer) {
             if (create_vulkan_locked() && present_locked(-1, 0, latest_slot_, 0, -1, false)) {
                 status_ = "presenting-ahardwarebuffer";
                 logi("repainted retained GPU frame after surface attach");
             }
+        }
+    }
+
+    void surface_changed(uint32_t width, uint32_t height) {
+        if (!width || !height) return;
+        std::lock_guard<std::mutex> guard(lock_);
+        surface_width_ = width;
+        surface_height_ = height;
+        if (device_ && (extent_.width != width || extent_.height != height)) {
+            swapchain_dirty_ = true;
+            logi("Surface extent changed to " + std::to_string(width) + "x" + std::to_string(height) + "; swapchain recreation queued");
         }
     }
 
@@ -246,6 +267,9 @@ private:
     std::string status_ = "not-started";
     uint32_t preferred_width_ = 1920;
     uint32_t preferred_height_ = 1080;
+    uint32_t surface_width_ = 0;
+    uint32_t surface_height_ = 0;
+    bool swapchain_dirty_ = false;
     uint32_t latest_width_ = 0;
     uint32_t latest_height_ = 0;
     uint32_t latest_slot_ = UINT32_MAX;
@@ -277,6 +301,9 @@ private:
 
     void release_window_locked() {
         if (window_) { ANativeWindow_release(window_); window_ = nullptr; }
+        surface_width_ = 0;
+        surface_height_ = 0;
+        swapchain_dirty_ = false;
     }
 
     void destroy_source_import_locked(SourceSlot& source) {
@@ -414,11 +441,13 @@ private:
 
         extent_ = caps.currentExtent;
         if (extent_.width == UINT32_MAX) {
-            extent_.width = static_cast<uint32_t>(std::max(1, ANativeWindow_getWidth(window_)));
-            extent_.height = static_cast<uint32_t>(std::max(1, ANativeWindow_getHeight(window_)));
-            extent_.width = std::clamp(extent_.width, caps.minImageExtent.width, caps.maxImageExtent.width);
-            extent_.height = std::clamp(extent_.height, caps.minImageExtent.height, caps.maxImageExtent.height);
+            const uint32_t nw = surface_width_ ? surface_width_ : static_cast<uint32_t>(std::max(1, ANativeWindow_getWidth(window_)));
+            const uint32_t nh = surface_height_ ? surface_height_ : static_cast<uint32_t>(std::max(1, ANativeWindow_getHeight(window_)));
+            extent_.width = std::clamp(nw, caps.minImageExtent.width, caps.maxImageExtent.width);
+            extent_.height = std::clamp(nh, caps.minImageExtent.height, caps.maxImageExtent.height);
         }
+        surface_width_ = extent_.width;
+        surface_height_ = extent_.height;
 
         uint32_t mode_count = 0;
         vkGetPhysicalDeviceSurfacePresentModesKHR(physical_, surface_, &mode_count, nullptr);
@@ -474,7 +503,9 @@ private:
                 return false;
             }
         }
-        logi(std::string("Vulkan presenter ready presentMode=") + (present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO") + " frames=3 producerSyncFd=1");
+        swapchain_dirty_ = false;
+        logi(std::string("Vulkan presenter ready extent=") + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) +
+             " presentMode=" + (present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO") + " frames=3 producerSyncFd=1");
         status_ = "ahb-vulkan-ready";
         return true;
     }
@@ -580,8 +611,34 @@ private:
             finish_pending_locked(client_fd_, true);
             vkDeviceWaitIdle(device_);
         }
+        logi("recreating Vulkan swapchain for Surface extent");
         destroy_vulkan_locked();
         return create_vulkan_locked();
+    }
+
+    bool ensure_surface_extent_locked() {
+        if (!window_ || !device_) return true;
+        VkSurfaceCapabilitiesKHR caps{};
+        const VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_, surface_, &caps);
+        if (result != VK_SUCCESS) {
+            status_ = vk_error("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", result);
+            return false;
+        }
+        uint32_t wanted_w = 0;
+        uint32_t wanted_h = 0;
+        if (caps.currentExtent.width != UINT32_MAX) {
+            wanted_w = caps.currentExtent.width;
+            wanted_h = caps.currentExtent.height;
+        } else {
+            wanted_w = surface_width_ ? surface_width_ : static_cast<uint32_t>(std::max(1, ANativeWindow_getWidth(window_)));
+            wanted_h = surface_height_ ? surface_height_ : static_cast<uint32_t>(std::max(1, ANativeWindow_getHeight(window_)));
+            wanted_w = std::clamp(wanted_w, caps.minImageExtent.width, caps.maxImageExtent.width);
+            wanted_h = std::clamp(wanted_h, caps.minImageExtent.height, caps.maxImageExtent.height);
+        }
+        if (!swapchain_dirty_ && extent_.width == wanted_w && extent_.height == wanted_h) return true;
+        surface_width_ = wanted_w;
+        surface_height_ = wanted_h;
+        return recreate_swapchain_locked();
     }
 
     bool present_locked(int fd, uint32_t scanout, uint32_t slot_index, uint32_t serial, int producer_fence_fd, bool allow_recreate = true) {
@@ -597,6 +654,11 @@ private:
             }
             status_ = "frame-ready-waiting-for-surface";
             return send_ack(fd, scanout, slot_index, serial, ok);
+        }
+        if (!create_vulkan_locked() || !ensure_surface_extent_locked()) {
+            if (producer_fence_fd >= 0) close(producer_fence_fd);
+            send_ack(fd, scanout, slot_index, serial, false);
+            return false;
         }
         if (!import_source_locked(slot_index)) {
             if (producer_fence_fd >= 0) close(producer_fence_fd);
@@ -615,6 +677,7 @@ private:
         uint32_t image_index = 0;
         VkResult result = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, frame.acquire, VK_NULL_HANDLE, &image_index);
         if (result == VK_ERROR_OUT_OF_DATE_KHR && allow_recreate) {
+            swapchain_dirty_ = true;
             if (!recreate_swapchain_locked()) {
                 if (producer_fence_fd >= 0) close(producer_fence_fd);
                 send_ack(fd, scanout, slot_index, serial, false);
@@ -628,6 +691,7 @@ private:
             send_ack(fd, scanout, slot_index, serial, false);
             return false;
         }
+        if (result == VK_SUBOPTIMAL_KHR) swapchain_dirty_ = true;
 
         const bool has_producer_fence = producer_fence_fd >= 0;
         if (has_producer_fence && !import_producer_fence_locked(frame, producer_fence_fd)) {
@@ -700,6 +764,7 @@ private:
         frame.slot = slot_index;
         frame.serial = serial;
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+            swapchain_dirty_ = true;
             status_ = "presenting-ahardwarebuffer";
             return true;
         }
@@ -735,6 +800,7 @@ private:
         queue_ = VK_NULL_HANDLE;
         queue_family_ = UINT32_MAX;
         swapchain_ = VK_NULL_HANDLE;
+        extent_ = {};
         swapchain_images_.clear();
         command_pool_ = VK_NULL_HANDLE;
         get_ahb_properties_ = nullptr;
@@ -884,6 +950,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VesselWaylandPrese
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VesselWaylandPresenter_nativeAhbStart(JNIEnv*, jclass) { g_ahb.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VesselWaylandPresenter_nativeAhbStop(JNIEnv*, jclass) { g_ahb.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VesselWaylandPresenter_nativeAhbAttachSurface(JNIEnv* env, jclass, jobject surface) { g_ahb.attach(env, surface); }
+extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VesselWaylandPresenter_nativeAhbSurfaceChanged(JNIEnv*, jclass, jint width, jint height) { g_ahb.surface_changed(static_cast<uint32_t>(width), static_cast<uint32_t>(height)); }
 extern "C" JNIEXPORT void JNICALL Java_com_example_dreamlinux_VesselWaylandPresenter_nativeAhbDetachSurface(JNIEnv*, jclass) { g_ahb.detach(); }
 extern "C" JNIEXPORT jstring JNICALL Java_com_example_dreamlinux_VesselWaylandPresenter_nativeAhbStatus(JNIEnv* env, jclass) { const std::string status = g_ahb.status(); return env->NewStringUTF(status.c_str()); }
 extern "C" JNIEXPORT jint JNICALL Java_com_example_dreamlinux_VesselWaylandPresenter_nativeAhbGuestWidth(JNIEnv*, jclass) { return static_cast<jint>(g_ahb.width()); }
