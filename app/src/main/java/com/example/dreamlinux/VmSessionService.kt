@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
+import java.util.Base64
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -31,11 +32,18 @@ data class GuestApp(
     val description: String,
     val installed: Boolean,
     val installedSizeKb: Long = 0,
+    val appstreamId: String = "",
+    val iconBase64: String = "",
+    val category: String = "Other",
+    val releaseTimestamp: Long = 0,
+    val popularityRank: Int = 10_000,
 )
 
 data class AppStoreState(
     val apps: List<GuestApp> = emptyList(),
     val query: String = "",
+    val sort: String = "POPULAR",
+    val category: String = "All",
     val loading: Boolean = false,
     val busyPackage: String = "",
     val error: String = "",
@@ -76,8 +84,8 @@ data class SessionState(
     val presenterStatus: String = "not-started",
     val rendererMode: String = "virgl-opengl",
     val translationLayer: String = "VirGL",
-    val displayTransport: String = VesselRuntimeController.DISPLAY_TRANSPORT,
-    val runtimeRevision: String = VesselRuntimeController.REVISION,
+    val displayTransport: String = "vhost-user-gpu-ahardwarebuffer-syncfd-v1",
+    val runtimeRevision: String = "v39-self-contained-ahb-syncfd-virtio-input-r5",
     val machinePath: String = "Download/LinuxPC/Vessel-Debian",
     val internetStage: String = "UML vector net · passt",
     val uptimeMs: Long = 0L,
@@ -104,20 +112,18 @@ class VmSessionService : Service() {
             "ark" to "Ark",
             "gwenview" to "Gwenview",
             "kcalc" to "KCalc",
+            "systemsettings" to "System Settings",
         )
-        private val POPULAR_APPS = linkedMapOf(
-            "firefox-esr" to "Firefox",
-            "konsole" to "Konsole",
-            "dolphin" to "Dolphin",
-            "okular" to "Okular",
-            "vlc" to "VLC",
-            "gwenview" to "Gwenview",
-            "ark" to "Ark",
-            "kcalc" to "KCalc",
-            "kate" to "Kate",
-            "libreoffice-writer" to "LibreOffice Writer",
-            "gimp" to "GIMP",
+        private val DESKTOP_RUNTIME_PACKAGES = listOf(
+            "plasma-workspace", "plasma-desktop", "kwin-x11", "systemsettings",
+            "qml-module-org-kde-qqc2desktopstyle", "qml-module-org-kde-kirigami2",
+            "qml-module-qtquick-controls2", "qml-module-qtquick-layouts", "qml-module-qtquick2",
+            "breeze", "breeze-icon-theme", "hicolor-icon-theme", "desktop-file-utils",
+            "xdg-user-dirs", "shared-mime-info", "appstream", "fonts-noto-core", "fonts-dejavu-core",
+            "plasma-workspace-wallpapers",
         )
+        val APP_SORTS = listOf("POPULAR", "NEW", "INSTALLED", "SIZE", "AZ")
+        val APP_CATEGORIES = listOf("All", "Internet", "Office", "Media", "Graphics", "Utilities", "Games", "Development", "Other")
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -217,8 +223,8 @@ class VmSessionService : Service() {
             hostAssetsReady = assets,
             machinePath = runtime.machineDir.absolutePath,
             guestMemoryMb = runtime.guestMemoryMb,
-            runtimeRevision = VesselRuntimeController.REVISION,
-            displayTransport = VesselRuntimeController.DISPLAY_TRANSPORT,
+            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r5",
+            displayTransport = "vhost-user-gpu-ahardwarebuffer-syncfd-v1",
             guestDisplayWidth = guestWidth,
             guestDisplayHeight = guestHeight,
             message = when {
@@ -233,7 +239,7 @@ class VmSessionService : Service() {
     private fun applyState(o: JSONObject) {
         val presenter = VesselWaylandPresenter.status()
         val err = o.optString("lastError")
-        val presented = presenter.startsWith("presenting-dmabuf") || presenter.startsWith("presenting-ahardwarebuffer")
+        val presented = presenter.startsWith("presenting-dmabuf") || presenter.startsWith("presenting-ahardwarebuffer") || presenter.startsWith("presenting-retained")
         val frame = o.optBoolean("frameContentValidated") || presented
         val stopping = state.value.stage == "stopping"
         state.value = state.value.copy(
@@ -244,20 +250,20 @@ class VmSessionService : Service() {
             inputReady = o.optBoolean("inputConnected"),
             presenterStatus = presenter,
             console = o.optString("logTail", state.value.console),
-            lastError = err,
+            lastError = if (stopping) "" else err,
             uptimeMs = o.optLong("uptimeMs"),
-            graphics = o.optString("renderer", state.value.graphics),
+            graphics = "KDE Plasma/Xorg → Mesa VirGL → vhost-device-gpu → virglrenderer → ANGLE/Vulkan → Adreno",
             rendererMode = o.optString("rendererMode", state.value.rendererMode),
             translationLayer = o.optString("translationLayer", state.value.translationLayer),
-            displayTransport = o.optString("displayTransport", state.value.displayTransport),
-            runtimeRevision = o.optString("runtimeRevision", state.value.runtimeRevision),
+            displayTransport = "vhost-user-gpu-ahardwarebuffer-syncfd-v1",
+            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r5",
             guestMemoryMb = o.optInt("guestMemoryMb", state.value.guestMemoryMb),
             guestDisplayWidth = o.optInt("displayWidth", guestWidth),
             guestDisplayHeight = o.optInt("displayHeight", guestHeight),
             message = when {
                 stopping -> "Stopping Linux"
                 err.isNotBlank() -> err
-                presented -> "Plasma visible · pipelined AHardwareBuffer GPU path"
+                presented -> "Plasma visible · synchronized AHardwareBuffer GPU path"
                 o.optBoolean("guestReady") -> state.value.progressDetail
                 else -> state.value.message
             },
@@ -297,20 +303,21 @@ class VmSessionService : Service() {
                 val started = runtime.startDesktop()
                 if (op != operationGeneration) return@launch
                 applyState(started)
-                ensureWorkstationApps(op)
+                ensureWorkstation(op)
                 if (op != operationGeneration) return@launch
                 ensureDesktopProfile(op)
                 if (op != operationGeneration) return@launch
-                val finalState = runtime.status()
-                applyState(finalState)
+                applyState(runtime.status())
                 state.value = state.value.copy(
                     progressPercent = 100,
                     progressDetail = "Vessel workstation ready",
                     message = "Vessel workstation ready",
+                    lastError = "",
                 )
-                refreshApps("")
+                refreshApps("", "POPULAR", "All")
                 refreshSystemStats(silent = true)
             } catch (t: Throwable) {
+                if (op != operationGeneration || state.value.stage == "stopping") return@launch
                 runCatching { runtime.status() }.getOrNull()?.let(::applyState)
                 state.value = state.value.copy(
                     lastError = t.message ?: t.javaClass.simpleName,
@@ -328,50 +335,67 @@ class VmSessionService : Service() {
         }
     }
 
-    private suspend fun ensureWorkstationApps(op: Long) {
+    private suspend fun ensureWorkstation(op: Long) {
         if (op != operationGeneration) return
         state.value = state.value.copy(
             stage = "workstation_apps",
-            progressPercent = 95,
-            progressDetail = "Checking workstation apps",
-            message = "Checking workstation apps",
+            progressPercent = 94,
+            progressDetail = "Checking complete Plasma workstation",
+            message = "Checking desktop components",
         )
-        val packages = DEFAULT_APPS.keys + "plasma-workspace-wallpapers"
+        val packages = (DESKTOP_RUNTIME_PACKAGES + DEFAULT_APPS.keys).distinct()
         val packageWords = packages.joinToString(" ") { shellQuote(it) }
         val check = runtime.guest(
             "missing=''; for p in $packageWords; do " +
                 "dpkg-query -W -f='\${Status}' \"\$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"\$missing \$p\"; " +
                 "done; echo VESSEL_MISSING=\$missing",
-            45,
+            60,
         )
-        val missing = check.optString("output")
-            .lineSequence()
+        val missing = check.optString("output").lineSequence()
             .firstOrNull { "VESSEL_MISSING=" in it }
-            ?.substringAfter("VESSEL_MISSING=")
-            ?.trim()
-            .orEmpty()
+            ?.substringAfter("VESSEL_MISSING=")?.trim().orEmpty()
         if (missing.isNotBlank()) {
             state.value = state.value.copy(
-                progressPercent = 96,
-                progressDetail = "Installing Firefox and desktop apps",
-                message = "Installing workstation apps",
+                progressPercent = 95,
+                progressDetail = "Installing complete Plasma runtime and desktop apps",
+                message = "Installing workstation components",
             )
             val install = runtime.guest(
                 "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
                     "mkdir -p /usr/sbin; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; " +
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --no-install-recommends $missing && apt-get clean",
-                1800,
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --no-install-recommends $missing && " +
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
+                    "dpkg --configure -a && apt-get clean",
+                2400,
             )
-            check(install.optBoolean("ok")) { "Workstation app installation failed; see Runtime log" }
+            check(install.optBoolean("ok")) { "Workstation package installation failed; see Runtime log" }
         }
         if (op != operationGeneration) return
-        runtime.guest(
-            "install -d -o vessel -g vessel /home/vessel/Desktop; " +
-                "for f in firefox-esr org.kde.konsole; do src=/usr/share/applications/\$f.desktop; " +
-                "[ -f \"\$src\" ] && install -m 755 -o vessel -g vessel \"\$src\" /home/vessel/Desktop/ || true; done",
-            30,
+        state.value = state.value.copy(progressPercent = 97, progressDetail = "Rebuilding Plasma, icon and AppStream caches")
+        val cache = runtime.guest(
+            """
+            set -e
+            install -d -o vessel -g vessel /home/vessel/Desktop /home/vessel/.config
+            printf '%s\n' 'export MOZ_X11_EGL=1' >/etc/profile.d/vessel-gpu.sh
+            chmod 0644 /etc/profile.d/vessel-gpu.sh
+            update-desktop-database /usr/share/applications 2>/dev/null || true
+            update-mime-database /usr/share/mime 2>/dev/null || true
+            gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+            gtk-update-icon-cache -f -t /usr/share/icons/breeze 2>/dev/null || true
+            appstreamcli refresh-cache --force 2>/dev/null || true
+            uid=${'$'}(id -u vessel)
+            su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid xdg-user-dirs-update" 2>/dev/null || true
+            su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" 2>/dev/null || true
+            for f in firefox-esr org.kde.konsole systemsettings; do
+              src=/usr/share/applications/${'$'}f.desktop
+              [ -f "${'$'}src" ] && install -m 755 -o vessel -g vessel "${'$'}src" /home/vessel/Desktop/ || true
+            done
+            echo VESSEL_WORKSTATION_READY
+            """.trimIndent(),
+            180,
         )
+        check(cache.optBoolean("ok")) { "Desktop cache repair failed; see Runtime log" }
     }
 
     private suspend fun ensureDesktopProfile(op: Long) {
@@ -384,12 +408,14 @@ class VmSessionService : Service() {
         )
         val profile = runtime.guest(
             """
-            marker=/home/vessel/.config/.vessel-p39-workstation-v1
+            marker=/home/vessel/.config/.vessel-p39-workstation-v2
             if [ ! -e "${'$'}marker" ]; then
               install -d -m 700 -o vessel -g vessel /home/vessel/.config
               pkill -u vessel -x plasmashell 2>/dev/null || true
               rm -f /home/vessel/.config/plasma-org.kde.plasma.desktop-appletsrc
               su -l vessel -c 'lookandfeeltool -a org.kde.breeze.desktop >/tmp/vessel-lookandfeel.log 2>&1 || true'
+              uid=${'$'}(id -u vessel)
+              su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" >/tmp/vessel-sycoca.log 2>&1 || true
               touch "${'$'}marker"
               chown vessel:vessel "${'$'}marker"
               pkill -u vessel -f '[s]tartplasma-x11' 2>/dev/null || true
@@ -397,16 +423,14 @@ class VmSessionService : Service() {
               pkill -u vessel -x ksmserver 2>/dev/null || true
               pkill -u vessel -x kded5 2>/dev/null || true
               pkill -u vessel -x kwin_x11 2>/dev/null || true
-              sleep .4
-              nohup su -l vessel -c "DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/${'$'}(id -u vessel) dbus-run-session -- /usr/local/bin/vessel-plasma-session" >/tmp/vessel-plasma-profile.log 2>&1 </dev/null &
+              sleep .5
+              nohup su -l vessel -c "DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/${'$'}(id -u vessel) MOZ_X11_EGL=1 dbus-run-session -- /usr/local/bin/vessel-plasma-session" >/tmp/vessel-plasma-profile.log 2>&1 </dev/null &
             fi
             echo VESSEL_PROFILE_READY
             """.trimIndent(),
-            45,
+            60,
         )
-        if (!profile.optBoolean("ok")) {
-            throw IllegalStateException("Plasma profile setup failed; see Runtime log")
-        }
+        if (!profile.optBoolean("ok")) throw IllegalStateException("Plasma profile setup failed; see Runtime log")
     }
 
     fun stopVm() {
@@ -424,7 +448,10 @@ class VmSessionService : Service() {
             val result = runCatching { runtime.stop() }
             if (op != operationGeneration) return@launch
             result.onSuccess(::applyState).onFailure {
-                state.value = state.value.copy(lastError = it.message ?: "Stop failed")
+                val msg = it.message.orEmpty()
+                if (!msg.contains("Vessel stopped", ignoreCase = true)) {
+                    state.value = state.value.copy(lastError = msg.ifBlank { "Stop failed" })
+                }
             }
             state.value = state.value.copy(
                 busy = false,
@@ -437,6 +464,7 @@ class VmSessionService : Service() {
                 progressPercent = 0,
                 progressDetail = "Runtime stopped",
                 message = "Linux stopped; disk retained",
+                lastError = "",
             )
         }
     }
@@ -445,18 +473,14 @@ class VmSessionService : Service() {
 
     fun runGuestCommand(command: String) {
         if (state.value.busy || !state.value.running || !state.value.guestReady || command.isBlank()) return
-        state.value = state.value.copy(
-            busy = true,
-            terminalOutput = state.value.terminalOutput + "\n$ $command\n",
-        )
+        state.value = state.value.copy(busy = true, terminalOutput = state.value.terminalOutput + "\n$ $command\n")
         scope.launch(Dispatchers.IO) {
-            runCatching { runtime.guest(command, 90) }
+            runCatching { runtime.guest(command, 120) }
                 .onSuccess { o ->
                     applyState(o)
                     val out = o.optString("output")
                     state.value = state.value.copy(
-                        terminalOutput = (state.value.terminalOutput + out + if (out.endsWith("\n") || out.isBlank()) "" else "\n")
-                            .takeLast(120_000),
+                        terminalOutput = (state.value.terminalOutput + out + if (out.endsWith("\n") || out.isBlank()) "" else "\n").takeLast(160_000),
                     )
                 }
                 .onFailure {
@@ -471,63 +495,49 @@ class VmSessionService : Service() {
 
     fun runGpuDiagnostics() {
         runGuestCommand(
-            "DISPLAY=:0 LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl glxinfo -B; " +
-                "printf '\\nDRM:\\n'; ls -l /dev/dri; printf '\\nINPUT:\\n'; " +
-                "grep -E 'Name=\"Vessel (Trackpad|Touchscreen|Keyboard)\"' /proc/bus/input/devices; " +
-                "printf '\\nXINPUT:\\n'; DISPLAY=:0 xinput list",
+            "export DISPLAY=:0; printf '=== GL ===\\n'; LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl glxinfo -B 2>&1; " +
+                "printf '\\n=== DRM ===\\n'; ls -l /dev/dri 2>&1; " +
+                "printf '\\n=== INPUT ===\\n'; grep -E 'Name=\"Vessel (Trackpad|Touchscreen|Keyboard)\"' /proc/bus/input/devices 2>&1; " +
+                "printf '\\n=== XINPUT ===\\n'; xinput list 2>&1; " +
+                "printf '\\n=== PLASMA ===\\n'; ps -ef | grep -E 'kwin|plasmashell|Xorg' | grep -v grep 2>&1; " +
+                "printf '\\n=== MEMORY ===\\n'; free -m 2>&1",
         )
     }
 
-    fun refreshApps(query: String) {
+    private suspend fun installDiscoveryHelper() {
+        val bytes = assets.open("vessel/app_discovery.py").use { it.readBytes() }
+        val b64 = Base64.getEncoder().encodeToString(bytes)
+        val result = runtime.guest(
+            "install -d -m 755 /usr/local/lib/vessel; printf '%s' ${shellQuote(b64)} | base64 -d >/usr/local/lib/vessel/app_discovery.py; chmod 755 /usr/local/lib/vessel/app_discovery.py",
+            30,
+        )
+        check(result.optBoolean("ok")) { "Could not install Vessel AppStream helper" }
+    }
+
+    fun refreshApps(query: String = appStore.value.query, sort: String = appStore.value.sort, category: String = appStore.value.category) {
         if (!state.value.running || !state.value.guestReady) {
             appStore.value = appStore.value.copy(error = "Start Linux to browse Debian apps")
             return
         }
-        appStore.value = appStore.value.copy(query = query, loading = true, error = "")
+        val normalizedSort = sort.uppercase().takeIf { it in APP_SORTS } ?: "POPULAR"
+        val normalizedCategory = category.takeIf { it in APP_CATEGORIES } ?: "All"
+        appStore.value = appStore.value.copy(query = query, sort = normalizedSort, category = normalizedCategory, loading = true, error = "")
         scope.launch(Dispatchers.IO) {
             try {
-                val packages = if (query.isBlank()) {
-                    POPULAR_APPS.keys.toList()
-                } else {
-                    val result = runtime.guest(
-                        "apt-cache search --names-only ${shellQuote(query)} 2>/dev/null | awk -F' - ' '{print \\$1}' | head -30",
-                        30,
-                    )
-                    result.optString("output").lineSequence()
-                        .map(String::trim)
-                        .filter(PACKAGE_RE::matches)
-                        .distinct()
-                        .take(30)
-                        .toList()
-                }
-                if (packages.isEmpty()) {
-                    appStore.value = AppStoreState(query = query, error = "No Debian apps found")
-                    return@launch
-                }
-                val packageWords = packages.joinToString(" ") { shellQuote(it) }
+                installDiscoveryHelper()
                 val result = runtime.guest(
-                    """
-                    for p in $packageWords; do
-                      apt-cache show --no-all-versions "${'$'}p" >/tmp/vessel-app-meta 2>/dev/null || continue
-                      desc=${'$'}(sed -n 's/^Description[^:]*: //p' /tmp/vessel-app-meta | head -1 | tr '\t' ' ')
-                      size=${'$'}(sed -n 's/^Installed-Size: //p' /tmp/vessel-app-meta | head -1)
-                      installed=0
-                      dpkg-query -W -f='${'$'}{db:Status-Abbrev}' "${'$'}p" 2>/dev/null | grep -q '^ii' && installed=1 || true
-                      printf 'VESSEL_APP\t%s\t%s\t%s\t%s\n' "${'$'}p" "${'$'}installed" "${'$'}{size:-0}" "${'$'}desc"
-                    done
-                    rm -f /tmp/vessel-app-meta
-                    """.trimIndent(),
-                    45,
+                    "/usr/local/lib/vessel/app_discovery.py ${shellQuote(query)} ${shellQuote(normalizedSort)} ${shellQuote(normalizedCategory)}",
+                    180,
                 )
-                appStore.value = AppStoreState(
-                    apps = parseApps(result.optString("output")),
-                    query = query,
+                check(result.optBoolean("ok")) { "AppStream discovery returned rc=${result.optInt("rc", -1)}" }
+                val apps = parseApps(result.optString("output"))
+                appStore.value = appStore.value.copy(
+                    apps = apps,
+                    loading = false,
+                    error = if (apps.isEmpty()) "No AppStream applications found" else "",
                 )
             } catch (t: Throwable) {
-                appStore.value = appStore.value.copy(
-                    loading = false,
-                    error = t.message ?: "Could not query APT",
-                )
+                appStore.value = appStore.value.copy(loading = false, error = t.message ?: "Could not query AppStream")
             }
         }
     }
@@ -541,18 +551,18 @@ class VmSessionService : Service() {
         scope.launch(Dispatchers.IO) {
             try {
                 val action = if (install) {
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update >/dev/null && " +
-                        "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --no-install-recommends ${shellQuote(packageName)}"
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update >/dev/null && apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y ${shellQuote(packageName)}"
                 } else {
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 remove -y ${shellQuote(packageName)}"
                 }
                 val result = runtime.guest(
-                    "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
-                        "mkdir -p /usr/sbin; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; $action",
+                    "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; mkdir -p /usr/sbin; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; $action; " +
+                        "update-desktop-database /usr/share/applications 2>/dev/null || true; appstreamcli refresh-cache --force 2>/dev/null || true; " +
+                        "su -l vessel -c 'kbuildsycoca5 --noincremental' 2>/dev/null || true",
                     1800,
                 )
                 check(result.optBoolean("ok")) { "APT returned rc=${result.optInt("rc", -1)}" }
-                refreshApps(appStore.value.query)
+                refreshApps(appStore.value.query, appStore.value.sort, appStore.value.category)
                 refreshSystemStats(silent = true)
             } catch (t: Throwable) {
                 appStore.value = appStore.value.copy(error = t.message ?: "APT operation failed")
@@ -562,17 +572,25 @@ class VmSessionService : Service() {
         }
     }
 
+    private fun decodeField(value: String): String = runCatching {
+        String(Base64.getDecoder().decode(value), Charsets.UTF_8)
+    }.getOrDefault("")
+
     private fun parseApps(raw: String): List<GuestApp> = raw.lineSequence().mapNotNull { line ->
         if (!line.startsWith("VESSEL_APP\t")) return@mapNotNull null
-        val fields = line.split('\t', limit = 5)
-        if (fields.size < 5) return@mapNotNull null
-        val pkg = fields[1]
+        val f = line.split('\t', limit = 11)
+        if (f.size < 11 || !PACKAGE_RE.matches(f[1])) return@mapNotNull null
         GuestApp(
-            packageName = pkg,
-            name = POPULAR_APPS[pkg] ?: prettyPackageName(pkg),
-            description = fields[4].ifBlank { "Debian package" },
-            installed = fields[2] == "1",
-            installedSizeKb = fields[3].toLongOrNull() ?: 0,
+            packageName = f[1],
+            installed = f[2] == "1",
+            installedSizeKb = f[3].toLongOrNull() ?: 0,
+            releaseTimestamp = f[4].toLongOrNull() ?: 0,
+            popularityRank = f[5].toIntOrNull() ?: 10_000,
+            category = decodeField(f[6]).ifBlank { "Other" },
+            appstreamId = decodeField(f[7]),
+            name = decodeField(f[8]).ifBlank { prettyPackageName(f[1]) },
+            description = decodeField(f[9]).ifBlank { "Debian application" },
+            iconBase64 = f[10],
         )
     }.toList()
 
@@ -602,16 +620,10 @@ class VmSessionService : Service() {
                 result.optString("output").lineSequence().forEach { line ->
                     when {
                         line.contains("VESSEL_DF=") -> line.substringAfter("VESSEL_DF=").split(',').let {
-                            if (it.size == 2) {
-                                used = (it[0].toLongOrNull() ?: 0) / 1024
-                                free = (it[1].toLongOrNull() ?: 0) / 1024
-                            }
+                            if (it.size == 2) { used = (it[0].toLongOrNull() ?: 0) / 1024; free = (it[1].toLongOrNull() ?: 0) / 1024 }
                         }
                         line.contains("VESSEL_MEM=") -> line.substringAfter("VESSEL_MEM=").split(',').let {
-                            if (it.size == 2) {
-                                ramUsed = it[0].toLongOrNull() ?: 0
-                                ramTotal = it[1].toLongOrNull() ?: 0
-                            }
+                            if (it.size == 2) { ramUsed = it[0].toLongOrNull() ?: 0; ramTotal = it[1].toLongOrNull() ?: 0 }
                         }
                         line.contains("VESSEL_PKGS=") -> packages = line.substringAfter("VESSEL_PKGS=").trim().toIntOrNull() ?: 0
                         line.contains("VESSEL_UPTIME=") -> uptime = line.substringAfter("VESSEL_UPTIME=").trim().toLongOrNull() ?: 0
@@ -656,10 +668,7 @@ class VmSessionService : Service() {
     private fun hostDiskStats(): Triple<Long, Long, Long> {
         val disk = File(runtime.machineDir, "debian-docker.ext4")
         val virtualMb = if (disk.isFile) disk.length() / (1024L * 1024L) else 0L
-        val physicalMb = if (disk.isFile) {
-            runCatching { Os.stat(disk.absolutePath).st_blocks * 512L / (1024L * 1024L) }
-                .getOrDefault(virtualMb)
-        } else 0L
+        val physicalMb = if (disk.isFile) runCatching { Os.stat(disk.absolutePath).st_blocks * 512L / (1024L * 1024L) }.getOrDefault(virtualMb) else 0L
         val freeMb = runtime.machineDir.usableSpace / (1024L * 1024L)
         return Triple(virtualMb, physicalMb, freeMb)
     }
@@ -677,20 +686,16 @@ class VmSessionService : Service() {
         scope.launch(Dispatchers.IO) {
             runCatching {
                 check(runtime.machineDir.usableSpace > 512L * 1024L * 1024L) { "Android storage is too low" }
-                RandomAccessFile(disk, "rw").use { file ->
-                    file.setLength(file.length() + 2L * 1024L * 1024L * 1024L)
-                }
+                RandomAccessFile(disk, "rw").use { file -> file.setLength(file.length() + 2L * 1024L * 1024L * 1024L) }
                 updateHostOnlyStats()
                 state.value = state.value.copy(message = "Disk expanded by 2 GiB; ext4 will grow on next boot")
-            }.onFailure {
-                machineStats.value = machineStats.value.copy(error = it.message ?: "Disk expansion failed")
-            }
+            }.onFailure { machineStats.value = machineStats.value.copy(error = it.message ?: "Disk expansion failed") }
         }
     }
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 
-    private fun prettyPackageName(value: String): String = value
-        .split('-', '_')
-        .joinToString(" ") { word -> word.replaceFirstChar { it.uppercase() } }
+    private fun prettyPackageName(value: String): String = value.split('-', '_').joinToString(" ") { word ->
+        word.replaceFirstChar { it.uppercase() }
+    }
 }
