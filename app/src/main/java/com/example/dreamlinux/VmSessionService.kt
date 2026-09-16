@@ -321,16 +321,24 @@ class VmSessionService : Service() {
             } catch (t: Throwable) {
                 if (op != operationGeneration || state.value.stage == "stopping") return@launch
                 runCatching { runtime.status() }.getOrNull()?.let(::applyState)
+                val message = t.message ?: t.javaClass.simpleName
                 state.value = state.value.copy(
-                    lastError = t.message ?: t.javaClass.simpleName,
-                    message = t.message ?: "Startup failed",
+                    lastError = message,
+                    progressPercent = 0,
+                    progressDetail = "Workstation setup failed",
+                    message = message,
+                    stage = "setup_error",
                 )
             } finally {
                 if (op == operationGeneration) {
                     val current = state.value
                     state.value = current.copy(
                         busy = false,
-                        stage = if (current.running) "ready" else "idle",
+                        stage = when {
+                            current.lastError.isNotBlank() -> "setup_error"
+                            current.running -> "ready"
+                            else -> "idle"
+                        },
                     )
                 }
             }
@@ -637,7 +645,7 @@ class VmSessionService : Service() {
                     diskVirtualMb = host.first,
                     diskPhysicalMb = host.second,
                     hostFreeMb = host.third,
-                    vcpus = 1,
+                    vcpus = VesselRuntimeController.UML_VCPUS,
                 )
             } catch (t: Throwable) {
                 val host = hostDiskStats()

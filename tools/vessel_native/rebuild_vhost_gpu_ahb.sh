@@ -96,6 +96,7 @@ grep -Fq 'VESSEL_ANDROID_AHB_SCANOUT_V3' "$VHOST/vhost-device-gpu/src/backend/vi
 grep -Fq 'vessel_ahb_note_submit' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
 grep -Fq 'vessel_ahb_wait_context' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
 grep -Fq 'vessel_contexts' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
+grep -Fq 'vessel_dirty_contexts' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
 grep -Fq 'vessel_ahb_set_scanout' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
 grep -Fq 'vessel_ahb_update' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
 ! grep -A130 'fn set_scanout' "$VHOST/vhost-device-gpu/src/backend/virgl.rs" | head -130 | grep -q 'export_resource_dmabuf'

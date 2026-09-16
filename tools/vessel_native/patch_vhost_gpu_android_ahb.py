@@ -265,6 +265,133 @@ new_flush = r'''    fn flush_resource(&mut self, resource_id: u32, rect: virtio_
 '''
 text = text[:flush_start] + new_flush + text[blob_start:]
 
+# VESSEL_SCANOUT_DIRTY_CONTEXT_SYNC
+# Narrow the V3 resource context set to writers that dirtied an active scanout
+# since its previous flush. This preserves resource ordering without fencing
+# every off-screen VirGL command stream in the VM.
+text = text.replace(
+    "    pub vessel_contexts: HashSet<u32>,\n",
+    "    pub vessel_contexts: HashSet<u32>,\n    pub vessel_dirty_contexts: HashSet<u32>,\n",
+    1,
+)
+text = text.replace(
+    "            vessel_contexts: HashSet::new(),\n",
+    "            vessel_contexts: HashSet::new(),\n            vessel_dirty_contexts: HashSet::new(),\n",
+    1,
+)
+
+transfer_old = '''        self.renderer
+            .transfer_write(resource_id, ctx_id, transfer.into(), None)?;
+        self.resources
+            .get_mut(&resource_id)
+            .ok_or(ErrInvalidResourceId)?
+            .vessel_contexts
+            .insert(ctx_id);
+        // SAFETY: process-local C ABI and virglrenderer left this context current.
+        let sync_rc = unsafe { vessel_ahb_note_submit(ctx_id) };
+        if sync_rc != 0 {
+            error!("Vessel failed to publish VirGL transfer sync ctx={ctx_id} resource={resource_id}: rc={sync_rc}");
+            return Err(ErrUnspec);
+        }
+        Ok(OkNoData)
+'''
+transfer_new_dirty = '''        self.renderer
+            .transfer_write(resource_id, ctx_id, transfer.into(), None)?;
+        let scanout_write = {
+            let resource = self.resources
+                .get_mut(&resource_id)
+                .ok_or(ErrInvalidResourceId)?;
+            resource.vessel_contexts.insert(ctx_id);
+            if resource.scanouts.has_any_enabled() {
+                resource.vessel_dirty_contexts.insert(ctx_id);
+                true
+            } else {
+                false
+            }
+        };
+        if scanout_write {
+            // SAFETY: process-local C ABI and virglrenderer left this context current.
+            let sync_rc = unsafe { vessel_ahb_note_submit(ctx_id) };
+            if sync_rc != 0 {
+                error!("Vessel failed to publish active-scanout transfer sync ctx={ctx_id} resource={resource_id}: rc={sync_rc}");
+                return Err(ErrUnspec);
+            }
+        }
+        Ok(OkNoData)
+'''
+if text.count(transfer_old) != 2:
+    raise SystemExit(f"unexpected generated transfer sync blocks: {text.count(transfer_old)}")
+text = text.replace(transfer_old, transfer_new_dirty, 2)
+
+submit_old = '''        // virglrenderer has queued this context's command stream and leaves the
+        // shared host GL context current. Publish only this context's newest
+        // producer fence; resource flush later waits it iff the resource is
+        // actually attached to this context.
+        // SAFETY: process-local C ABI, scalar context ID only.
+        let sync_rc = unsafe { vessel_ahb_note_submit(ctx_id) };
+        if sync_rc != 0 {
+            error!("Vessel failed to publish VirGL context sync ctx={ctx_id}: rc={sync_rc}");
+            return Err(ErrUnspec);
+        }
+        Ok(OkNoData)
+'''
+submit_new_dirty = '''        // Only a context that can directly write an active scanout needs a
+        // producer fence. Off-screen Firefox/KWin/app resources stay fully GPU
+        // accelerated without a glFenceSync+glFlush after every submission.
+        let mut scanout_write = false;
+        for resource in self.resources.values_mut() {
+            if resource.scanouts.has_any_enabled() && resource.vessel_contexts.contains(&ctx_id) {
+                resource.vessel_dirty_contexts.insert(ctx_id);
+                scanout_write = true;
+            }
+        }
+        if scanout_write {
+            // SAFETY: process-local C ABI, scalar context ID only.
+            let sync_rc = unsafe { vessel_ahb_note_submit(ctx_id) };
+            if sync_rc != 0 {
+                error!("Vessel failed to publish active-scanout VirGL sync ctx={ctx_id}: rc={sync_rc}");
+                return Err(ErrUnspec);
+            }
+        }
+        Ok(OkNoData)
+'''
+if text.count(submit_old) != 1:
+    raise SystemExit("unexpected generated submit sync block")
+text = text.replace(submit_old, submit_new_dirty, 1)
+
+text = text.replace(
+    "            resource.vessel_contexts.remove(&ctx_id);\n        }\n        Ok(OkNoData)\n",
+    "            resource.vessel_contexts.remove(&ctx_id);\n            resource.vessel_dirty_contexts.remove(&ctx_id);\n        }\n        Ok(OkNoData)\n",
+    1,
+)
+text = text.replace(
+    "            resource.vessel_contexts.remove(&ctx_id);\n        }\n        Ok(OkNoData)\n",
+    "            resource.vessel_contexts.remove(&ctx_id);\n            resource.vessel_dirty_contexts.remove(&ctx_id);\n        }\n        Ok(OkNoData)\n",
+    1,
+)
+
+flush_start_dirty = text.index("    fn flush_resource(")
+blob_start_dirty = text.index("    fn resource_create_blob(", flush_start_dirty)
+flush_dirty = text[flush_start_dirty:blob_start_dirty]
+if flush_dirty.count("for ctx_id in &resource.vessel_contexts") != 1:
+    raise SystemExit("unexpected flush resource context wait")
+flush_dirty = flush_dirty.replace(
+    "for ctx_id in &resource.vessel_contexts",
+    "for ctx_id in &resource.vessel_dirty_contexts",
+    1,
+)
+flush_dirty = flush_dirty.replace(
+    "        for scanout_id in resource.scanouts.iter_enabled() {\n",
+    "        if let Some(current) = self.resources.get_mut(&resource_id) {\n"
+    "            for ctx_id in &resource.vessel_dirty_contexts {\n"
+    "                current.vessel_dirty_contexts.remove(ctx_id);\n"
+    "            }\n"
+    "        }\n\n"
+    "        for scanout_id in resource.scanouts.iter_enabled() {\n",
+    1,
+)
+text = text[:flush_start_dirty] + flush_dirty + text[blob_start_dirty:]
+
 path.write_text(text)
 final = path.read_text()
 for needle in (

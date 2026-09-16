@@ -588,7 +588,7 @@ class VesselRuntimeController(
     private fun plasmaReadyCommand(): String =
         "missing=''; " +
             "for c in startplasma-x11 Xorg xrandr xinput systemsettings konsole firefox-esr; do command -v \"\$c\" >/dev/null 2>&1 || missing=\"\$missing cmd:\$c\"; done; " +
-            "for p in qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects plasma-integration libkf5service-data; do " +
+            "for p in qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects plasma-integration libkf5service-data fonts-noto-color-emoji; do " +
             "dpkg-query -W -f='\${Status}' \"\$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"\$missing pkg:\$p\"; done; " +
             "qml=/usr/lib/aarch64-linux-gnu/qt5/qml; " +
             "test -d /usr/share/icons/breeze || missing=\"\$missing path:/usr/share/icons/breeze\"; " +
@@ -715,7 +715,7 @@ class VesselRuntimeController(
             "breeze breeze-icon-theme hicolor-icon-theme desktop-file-utils xdg-user-dirs shared-mime-info menu appstream python3-yaml " +
             "qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons " +
             "qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects plasma-integration libkf5service-data " +
-            "fonts-noto-core fonts-dejavu-core fonts-liberation firefox-esr konsole dolphin ark kcalc okular gwenview kate && " +
+            "fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation firefox-esr konsole dolphin ark kcalc okular gwenview kate && " +
             "dpkg --configure -a && apt-get clean"
         val (rc, out) = guestBlocking(cmd, 2400, reporter::onLine)
         if (rc != 0) {
