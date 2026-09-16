@@ -1,6 +1,9 @@
 #!/bin/bash
+set -eu
 for i in $(seq 1 600); do
-  if pgrep -u vessel -x kwin_wayland >/dev/null && pgrep -u vessel -x plasmashell >/dev/null && find /run/user -maxdepth 2 -type s -name 'wayland-*' -print -quit 2>/dev/null | grep -q .; then
+  if pgrep -u vessel -x kwin_wayland >/dev/null 2>&1 &&
+     pgrep -u vessel -x plasmashell >/dev/null 2>&1 &&
+     find /run/user -maxdepth 2 -type s -name 'wayland-*' -print -quit 2>/dev/null | grep -q .; then
     echo VESSEL_WAYLAND_READY
     exit 0
   fi
