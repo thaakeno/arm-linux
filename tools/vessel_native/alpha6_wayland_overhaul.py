@@ -128,3 +128,7 @@ if service.exists():
     ))
 
 print("[alpha6.3] staged detached Wayland launch + command timeout diagnostics applied")
+
+transport_fix = Path(__file__).with_name("alpha6_wayland_transport_fix.py")
+sys.argv = [str(transport_fix), *args]
+runpy.run_path(str(transport_fix), run_name="__main__")
