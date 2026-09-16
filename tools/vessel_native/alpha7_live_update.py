@@ -162,17 +162,15 @@ activity = replace_once(
     override fun onWindowFocusChanged''',
     "activity pending installer resume",
 )
+# Alpha4's Experiment Lab inserts additional state directly after machineStats,
+# so patch the stable one-line anchor instead of assuming LaunchedEffect follows
+# immediately. This keeps the post-build patch deterministic across alpha layers.
 activity = replace_once(
     activity,
-    '''    private fun SystemPage(state: SessionState) {
-        val stats by VmSessionService.machineStats.collectAsStateWithLifecycle()
-        LaunchedEffect(state.guestReady, state.running) { VmSessionService.active?.refreshSystemStats() }
-''',
-    '''    private fun SystemPage(state: SessionState) {
-        val stats by VmSessionService.machineStats.collectAsStateWithLifecycle()
+    '        val stats by VmSessionService.machineStats.collectAsStateWithLifecycle()\n',
+    '''        val stats by VmSessionService.machineStats.collectAsStateWithLifecycle()
         val updates by VesselUpdateManager.state.collectAsStateWithLifecycle()
         val updateScope = rememberCoroutineScope()
-        LaunchedEffect(state.guestReady, state.running) { VmSessionService.active?.refreshSystemStats() }
 ''',
     "system page updater state",
 )
