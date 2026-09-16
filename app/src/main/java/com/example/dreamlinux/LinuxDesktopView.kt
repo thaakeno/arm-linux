@@ -157,9 +157,9 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        // A Surface resize does not mean a new Surface. Re-attaching here used to
-        // tear down/rebuild Vulkan during Compose/fullscreen layout changes and
-        // caused black frames. The swapchain handles resize/out-of-date itself.
+        // A resize can keep the same ANativeWindow object. Tell native Vulkan the
+        // new extent without detaching the retained AHardwareBuffer frame.
+        VesselWaylandPresenter.surfaceChanged(width, height)
         val refresh = display?.refreshRate ?: 60f
         if (Build.VERSION.SDK_INT >= 30) {
             runCatching { holder.surface.setFrameRate(refresh, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT) }
