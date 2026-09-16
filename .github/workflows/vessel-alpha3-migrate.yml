@@ -1,0 +1,45 @@
+name: Vessel alpha3 stabilization migration
+
+on:
+  push:
+    branches: [ arch/vessel-self-contained ]
+    paths:
+      - 'tools/vessel_migration/alpha3.py'
+      - '.github/workflows/vessel-alpha3-migrate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: arch/vessel-self-contained
+          fetch-depth: 0
+
+      - name: Apply physical-device stabilization fixes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 tools/vessel_migration/alpha3.py
+          git checkout -- .github/workflows/vessel-alpha3-migrate.yml
+          git checkout -- tools/vessel_migration/alpha3.py
+          git diff --check
+          grep -F 'vcpus = vcpus' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'fonts-noto-color-emoji' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'vessel_dirty_contexts' tools/vessel_native/patch_vhost_gpu_android_ahb.py
+          grep -F 'vessel_dirty_contexts' tools/vessel_native/rebuild_vhost_gpu_ahb.sh
+
+      - name: Commit migrated source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'Vessel CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add app tools/vessel_native
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix(vessel): repair startup stats and reduce VirGL scanout stalls'
+          git push origin HEAD:arch/vessel-self-contained
