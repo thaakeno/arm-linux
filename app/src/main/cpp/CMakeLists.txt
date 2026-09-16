@@ -17,13 +17,12 @@ target_link_libraries(dev1_payload PRIVATE dl)
 # guest-networking input fallback.
 add_library(vessel_wayland_presenter SHARED
     vessel_native_presenter.cpp
-    vessel_ahb_presenter.cpp
+    vessel_surface_presenter.cpp
     vessel_virtio_input.cpp
 )
 target_compile_features(vessel_wayland_presenter PRIVATE cxx_std_17)
-target_compile_definitions(vessel_wayland_presenter PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
 target_compile_options(vessel_wayland_presenter PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers -Wno-misleading-indentation -Wno-unused-function)
-target_link_libraries(vessel_wayland_presenter PRIVATE android log vulkan)
+target_link_libraries(vessel_wayland_presenter PRIVATE android log EGL GLESv3)
 
 # Loaded into vhost-device-gpu before virglrenderer. Termux's Android libepoxy
 # exposes epoxy_set_library_path(); this selects the ANGLE DSOs packaged next

@@ -3,9 +3,9 @@ package com.example.dreamlinux
 import android.view.Surface
 
 /**
- * Same-UID graphics frontend. Standard vhost-user-gpu remains responsible for
- * EDID/cursor control; scanout pixels stay on the GPU and are shared through
- * Android HardwareBuffer into the Vulkan presenter.
+ * Same-UID graphics frontend. Standard vhost-user-gpu owns EDID/cursor control.
+ * AHardwareBuffer is only the cross-process GPU handoff; the final frame is drawn
+ * straight into the Android Surface BufferQueue with EGL/GLES and SurfaceFlinger.
  */
 object VesselWaylandPresenter {
     @Volatile private var started = false
@@ -57,12 +57,12 @@ object VesselWaylandPresenter {
         val ahb = runCatching { nativeAhbStatus() }.getOrElse { "presenter-error:${it.message}" }
         val standard = runCatching { nativeStatus() }.getOrElse { "presenter-error:${it.message}" }
         val s = when {
-            ahb == "presenting-ahardwarebuffer" -> "presenting-ahardwarebuffer"
+            ahb == "presenting-native-surface" -> "presenting-native-surface"
             ahb.startsWith("presenter-error") -> ahb
             standard.startsWith("presenter-error") || standard.contains("failed") -> standard
             else -> ahb
         }
-        if (s.startsWith("presenting-ahardwarebuffer")) everPresented = true
+        if (s.startsWith("presenting-native-surface")) everPresented = true
         return if (everPresented && (s == "surface-detached" || s.contains("waiting-for-surface"))) {
             "presenting-retained:$s"
         } else {

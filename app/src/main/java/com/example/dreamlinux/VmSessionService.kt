@@ -80,12 +80,12 @@ data class SessionState(
     val lastError: String = "",
     val console: String = "",
     val terminalOutput: String = "",
-    val graphics: String = "VirtIO GPU · VirGL · ANGLE · AHardwareBuffer · Vulkan · Adreno",
+    val graphics: String = "VirtIO GPU · VirGL · ANGLE · Android Surface · Adreno",
     val presenterStatus: String = "not-started",
     val rendererMode: String = "virgl-opengl",
     val translationLayer: String = "VirGL",
-    val displayTransport: String = "vhost-user-gpu-ahardwarebuffer-syncfd-v2",
-    val runtimeRevision: String = "v39-self-contained-ahb-syncfd-virtio-input-r7",
+    val displayTransport: String = "vhost-user-gpu-ahb-native-surface-v3",
+    val runtimeRevision: String = "v40-native-surface-egl-virtio-input-r1",
     val machinePath: String = "Download/LinuxPC/Vessel-Debian",
     val internetStage: String = "UML vector net · passt",
     val uptimeMs: Long = 0L,
@@ -119,8 +119,8 @@ class VmSessionService : Service() {
             "kde-plasma-desktop", "plasma-workspace", "plasma-desktop", "plasma-framework", "kwin-x11", "systemsettings",
             "qml-module-org-kde-qqc2desktopstyle", "qml-module-org-kde-kirigami2", "qml-module-org-kde-kitemmodels",
             "qml-module-org-kde-kquickcontrolsaddons", "qml-module-qtquick-controls", "qml-module-qtquick-controls2", "qml-module-qtquick-layouts",
-            "qml-module-qtquick-window2", "qml-module-qtquick2", "qml-module-qtquick-templates2", "qml-module-qtgraphicaleffects",
-            "plasma-integration", "libkf5service-data", "breeze", "breeze-icon-theme", "hicolor-icon-theme",
+            "qml-module-qtquick-window2", "qml-module-qtquick2", "qml-module-qtquick-templates2", "qml-module-qtgraphicaleffects", "qml-module-qt-labs-platform",
+            "plasma-integration", "plasma-pa", "kactivitymanagerd", "libkf5service-data", "breeze", "breeze-icon-theme", "hicolor-icon-theme",
             "desktop-file-utils", "xdg-user-dirs", "shared-mime-info", "menu", "appstream", "python3-yaml",
             "fonts-noto-core", "fonts-noto-color-emoji", "fonts-dejavu-core", "fonts-liberation", "plasma-workspace-wallpapers",
         )
@@ -225,8 +225,8 @@ class VmSessionService : Service() {
             hostAssetsReady = assets,
             machinePath = runtime.machineDir.absolutePath,
             guestMemoryMb = runtime.guestMemoryMb,
-            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r7",
-            displayTransport = "vhost-user-gpu-ahardwarebuffer-syncfd-v2",
+            runtimeRevision = "v40-native-surface-egl-virtio-input-r1",
+            displayTransport = "vhost-user-gpu-ahb-native-surface-v3",
             guestDisplayWidth = guestWidth,
             guestDisplayHeight = guestHeight,
             message = when {
@@ -241,7 +241,7 @@ class VmSessionService : Service() {
     private fun applyState(o: JSONObject) {
         val presenter = VesselWaylandPresenter.status()
         val err = o.optString("lastError")
-        val presented = presenter.startsWith("presenting-dmabuf") || presenter.startsWith("presenting-ahardwarebuffer") || presenter.startsWith("presenting-retained")
+        val presented = presenter.startsWith("presenting-native-surface") || presenter.startsWith("presenting-retained")
         val frame = o.optBoolean("frameContentValidated") || presented
         val stopping = state.value.stage == "stopping"
         state.value = state.value.copy(
@@ -254,18 +254,18 @@ class VmSessionService : Service() {
             console = o.optString("logTail", state.value.console),
             lastError = if (stopping) "" else err,
             uptimeMs = o.optLong("uptimeMs"),
-            graphics = "KDE Plasma/Xorg → Mesa VirGL → vhost-device-gpu → virglrenderer → ANGLE/Vulkan → Adreno",
+            graphics = "KDE Plasma/Xorg → Mesa VirGL → virglrenderer → ANGLE → Android Surface → Adreno",
             rendererMode = o.optString("rendererMode", state.value.rendererMode),
             translationLayer = o.optString("translationLayer", state.value.translationLayer),
-            displayTransport = "vhost-user-gpu-ahardwarebuffer-syncfd-v2",
-            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r7",
+            displayTransport = "vhost-user-gpu-ahb-native-surface-v3",
+            runtimeRevision = "v40-native-surface-egl-virtio-input-r1",
             guestMemoryMb = o.optInt("guestMemoryMb", state.value.guestMemoryMb),
             guestDisplayWidth = o.optInt("displayWidth", guestWidth),
             guestDisplayHeight = o.optInt("displayHeight", guestHeight),
             message = when {
                 stopping -> "Stopping Linux"
                 err.isNotBlank() -> err
-                presented -> "Plasma visible · synchronized AHardwareBuffer GPU path"
+                presented -> "Plasma visible · Android native Surface GPU path"
                 o.optBoolean("guestReady") -> state.value.progressDetail
                 else -> state.value.message
             },
@@ -368,6 +368,8 @@ class VmSessionService : Service() {
             test -f "${'$'}qml/QtQuick/Templates.2/qmldir"
             test -f "${'$'}qml/QtGraphicalEffects/qmldir"
             test -f "${'$'}qml/org/kde/kirigami.2/qmldir"
+            test -f "${'$'}qml/Qt/labs/platform/qmldir"
+            test -f "${'$'}qml/org/kde/plasma/private/volume/qmldir"
             test -d /usr/share/icons/breeze
             test -x /usr/bin/systemsettings || test -x /usr/bin/systemsettings5
             install -d -o vessel -g vessel /home/vessel/Desktop /home/vessel/.config
@@ -520,8 +522,8 @@ class VmSessionService : Service() {
             appStore.value = appStore.value.copy(loading = false, error = "Start Linux to browse Debian apps")
             return
         }
-        if (state.value.busy || state.value.stage != "ready") {
-            appStore.value = appStore.value.copy(loading = false, error = "Finish workstation setup before browsing apps")
+        if (state.value.busy) {
+            appStore.value = appStore.value.copy(loading = false, error = "Wait for the current Debian operation to finish")
             return
         }
         val normalizedSort = sort.uppercase().takeIf { it in APP_SORTS } ?: "POPULAR"

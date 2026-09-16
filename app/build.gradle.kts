@@ -23,7 +23,7 @@ android {
         versionCode = 3000 + buildRevision
         // Physical-device stabilization qualification: six-vCPU reporting, persistent Plasma repair,
         // and active-scanout dirty-context VirGL synchronization are included in this build line.
-        versionName = "2.1.0-alpha2"
+        versionName = "2.1.0-alpha3"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
         ndk { abiFilters += "arm64-v8a" }

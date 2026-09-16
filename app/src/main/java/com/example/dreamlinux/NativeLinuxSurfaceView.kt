@@ -44,7 +44,7 @@ class NativeLinuxSurfaceView(context: Context) : SurfaceView(context), SurfaceHo
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        VesselWaylandPresenter.attach(holder.surface)
+        VesselWaylandPresenter.surfaceChanged(width, height)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {

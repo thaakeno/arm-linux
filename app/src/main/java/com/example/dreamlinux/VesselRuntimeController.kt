@@ -34,9 +34,9 @@ class VesselRuntimeController(
     private val progress: (String, Int, String) -> Unit,
 ) {
     companion object {
-        const val PROTOCOL = 39
-        const val REVISION = "v39-self-contained-ahb-syncfd-virtio-input-r7"
-        const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahardwarebuffer-syncfd-v2"
+        const val PROTOCOL = 40
+        const val REVISION = "v40-native-surface-egl-virtio-input-r1"
+        const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahb-native-surface-v3"
         const val INPUT_TRANSPORT = "virtio-input-vhost-user-same-uid-v1"
         const val UML_VCPUS = 6
         private const val ROOTFS_URL = "https://github.com/zalexdev/linux-um-arm64/releases/download/prebuilt-20260816/debian-docker.ext4.gz"
@@ -182,7 +182,7 @@ class VesselRuntimeController(
     private fun logTail(): String = synchronized(logLock) { log.takeLast(180_000).toString() }
     private fun inputBackendsAlive(): Boolean = inputProcesses.size == inputSpecs.size && inputProcesses.all { it.isAlive }
     private fun presenterVisible(status: String): Boolean =
-        status.startsWith("presenting-ahardwarebuffer") || status.startsWith("presenting-retained") || status.startsWith("presenting-dmabuf")
+        status.startsWith("presenting-native-surface") || status.startsWith("presenting-retained")
 
     private fun baseState(ok: Boolean = true): JSONObject = JSONObject()
         .put("ok", ok)
@@ -714,7 +714,7 @@ class VesselRuntimeController(
             "xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt " +
             "breeze breeze-icon-theme hicolor-icon-theme desktop-file-utils xdg-user-dirs shared-mime-info menu appstream python3-yaml " +
             "qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons " +
-            "qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects plasma-integration libkf5service-data " +
+            "qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects qml-module-qt-labs-platform plasma-integration plasma-pa kactivitymanagerd libkf5service-data " +
             "fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation firefox-esr konsole dolphin ark kcalc okular gwenview kate && " +
             "dpkg --configure -a && apt-get clean"
         val (rc, out) = guestBlocking(cmd, 2400, reporter::onLine)
@@ -846,7 +846,7 @@ class VesselRuntimeController(
             awaitVirtioInputDevices()
             ensurePlasma()
             launchDesktop()
-            progress("frame", 88, "Waiting for synchronized AHardwareBuffer scanout")
+            progress("frame", 88, "Waiting for Android native Surface frame")
 
             var tries = 0
             while (tries++ < 600) {
@@ -855,7 +855,7 @@ class VesselRuntimeController(
                 if (presenterVisible(ps)) {
                     desktopReady = true
                     lastError = ""
-                    progress("ready", 100, "Plasma visible through synchronized AHardwareBuffer")
+                    progress("ready", 100, "Plasma visible through Android native Surface")
                     return@withContext baseState().put("presenter", ps)
                 }
                 if (displayFailureStatus(ps)) {
@@ -873,7 +873,7 @@ class VesselRuntimeController(
             }
 
             val ps = VesselWaylandPresenter.status()
-            lastError = "Desktop is running, but no synchronized AHardwareBuffer frame has arrived yet; presenter=$ps"
+            lastError = "Desktop is running, but no Android native Surface frame has arrived yet; presenter=$ps"
             append("[display] $lastError; Linux kept running for diagnostics\n")
             progress("display_wait", 94, "Desktop running · waiting for first GPU frame")
             baseState(false).put("presenter", ps)

@@ -215,7 +215,7 @@ class VesselActivity : ComponentActivity() {
                 Spacer(Modifier.width(11.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Vessel", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("Rootless ARM64 Linux · VirtIO GPU · AHardwareBuffer · Adreno", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Rootless ARM64 Linux · VirtIO GPU · Native Surface · Adreno", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 val label = when {
                     state.stage == "stopping" -> "STOPPING"
@@ -346,11 +346,15 @@ class VesselActivity : ComponentActivity() {
 
     @Composable
     private fun DesktopControls(mode: LinuxDesktopView.PointerMode, setMode: (LinuxDesktopView.PointerMode) -> Unit, fullscreen: () -> Unit) {
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            FilterChip(selected = mode == LinuxDesktopView.PointerMode.DIRECT, onClick = { setMode(LinuxDesktopView.PointerMode.DIRECT) }, label = { Text("Touch") }, leadingIcon = { Icon(Icons.Default.TouchApp, null) })
-            FilterChip(selected = mode == LinuxDesktopView.PointerMode.TRACKPAD, onClick = { setMode(LinuxDesktopView.PointerMode.TRACKPAD) }, label = { Text("Trackpad") }, leadingIcon = { Icon(Icons.Default.Mouse, null) })
-            AssistChip(onClick = { LinuxDesktopView.active?.showKeyboard() }, label = { Text("Keyboard") }, leadingIcon = { Icon(Icons.Default.Keyboard, null) })
-            AssistChip(onClick = fullscreen, label = { Text("Fullscreen") }, leadingIcon = { Icon(Icons.Default.OpenInFull, null) })
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                FilterChip(modifier = Modifier.weight(1f), selected = mode == LinuxDesktopView.PointerMode.DIRECT, onClick = { setMode(LinuxDesktopView.PointerMode.DIRECT) }, label = { Text("Touch") }, leadingIcon = { Icon(Icons.Default.TouchApp, null) })
+                FilterChip(modifier = Modifier.weight(1f), selected = mode == LinuxDesktopView.PointerMode.TRACKPAD, onClick = { setMode(LinuxDesktopView.PointerMode.TRACKPAD) }, label = { Text("Trackpad") }, leadingIcon = { Icon(Icons.Default.Mouse, null) })
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                AssistChip(modifier = Modifier.weight(1f), onClick = { LinuxDesktopView.active?.showKeyboard() }, label = { Text("Keyboard") }, leadingIcon = { Icon(Icons.Default.Keyboard, null) })
+                AssistChip(modifier = Modifier.weight(1f), onClick = fullscreen, label = { Text("Fullscreen") }, leadingIcon = { Icon(Icons.Default.OpenInFull, null) })
+            }
         }
     }
 
@@ -411,7 +415,7 @@ class VesselActivity : ComponentActivity() {
         val store by VmSessionService.appStore.collectAsStateWithLifecycle()
         var query by remember { mutableStateOf(store.query) }
         LaunchedEffect(state.guestReady, state.busy, state.stage) {
-            if (state.guestReady && !state.busy && state.stage == "ready" && store.apps.isEmpty() && !store.loading) {
+            if (state.guestReady && !state.busy && store.apps.isEmpty() && !store.loading) {
                 VmSessionService.active?.refreshApps("", "POPULAR", "All")
             }
         }
