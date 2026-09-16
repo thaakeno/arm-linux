@@ -6,8 +6,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import java.io.InputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -87,13 +86,27 @@ object VesselAudioBridge {
         }
     }
 
+    private fun readAsciiLine(input: InputStream, maxBytes: Int = 256): String? {
+        val bytes = ArrayList<Byte>(64)
+        while (bytes.size < maxBytes) {
+            val value = input.read()
+            if (value < 0) return if (bytes.isEmpty()) null else bytes.toByteArray().toString(Charsets.US_ASCII)
+            if (value == '\n'.code) return bytes.toByteArray().toString(Charsets.US_ASCII)
+            if (value != '\r'.code) bytes += value.toByte()
+        }
+        error("PCM header is too long")
+    }
+
     private fun handle(socket: Socket) {
         var track: AudioTrack? = null
+        var streamCounted = false
         try {
             socket.tcpNoDelay = true
+            socket.keepAlive = true
             val input = socket.getInputStream()
-            val reader = BufferedReader(InputStreamReader(input, Charsets.US_ASCII), 4096)
-            val header = reader.readLine() ?: error("missing PCM header")
+            // Read exactly through the newline. A BufferedReader can prefetch raw
+            // PCM bytes past the header and make the first audio block disappear.
+            val header = readAsciiLine(input) ?: error("missing PCM header")
             // VESSELAUDIO/1 <rate> <channels> <bits> <format>
             val f = header.trim().split(Regex("\\s+"))
             check(f.size >= 5 && f[0] == "VESSELAUDIO/1") { "bad PCM header" }
@@ -149,6 +162,7 @@ object VesselAudioBridge {
             lastError = ""
             refreshSpatialStatus(attrs, format)
             activeStreams.incrementAndGet()
+            streamCounted = true
             track.play()
 
             val bytes = ByteArray(32 * 1024)
@@ -170,8 +184,8 @@ object VesselAudioBridge {
                 runCatching { track.flush() }
                 runCatching { track.stop() }
                 runCatching { track.release() }
-                activeStreams.decrementAndGet().coerceAtLeast(0)
             }
+            if (streamCounted) activeStreams.decrementAndGet()
             clients -= socket
             runCatching { socket.close() }
         }
