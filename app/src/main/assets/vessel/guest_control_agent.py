@@ -11,6 +11,7 @@ import time
 HOST = sys.argv[1] if len(sys.argv) > 1 else "10.0.2.2"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 TOKEN = sys.argv[3] if len(sys.argv) > 3 else ""
+PIDFILE = "/run/vessel-control-agent.pid"
 
 
 def send_line(sock, obj):
@@ -111,6 +112,13 @@ def session():
 def main():
     if PORT <= 0 or not TOKEN:
         return 2
+    try:
+        os.makedirs(os.path.dirname(PIDFILE), exist_ok=True)
+        with open(PIDFILE, "w", encoding="ascii") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
+
     delay = 0.2
     while True:
         try:
