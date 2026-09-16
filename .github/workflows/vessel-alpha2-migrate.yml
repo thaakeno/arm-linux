@@ -23,6 +23,9 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          # The workstation function is replaced wholesale earlier in the migration,
+          # so this obsolete post-replacement assertion is intentionally removed.
+          sed -i "/replace_once(svc, '            rm -f \/var\/cache\/vessel\/app-catalog-v2.json\\\\n', '')/d" tools/vessel_migration/alpha2.py
           python3 tools/vessel_migration/alpha2.py
           rm -f tools/vessel_migration/alpha2.py .github/workflows/vessel-alpha2-migrate.yml
           rmdir tools/vessel_migration 2>/dev/null || true
