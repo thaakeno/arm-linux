@@ -16,35 +16,54 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+# ---------------------------------------------------------------------------
+# Physical-device recovery rule:
+#
+# 1a0d1ec was the proven boot. It succeeded because desktop preparation,
+# hot-runtime installation, KWin/Plasma launch and the Wayland-ready probe lived
+# in ONE final tty transaction. Splitting that transaction later reintroduced
+# the exact class of tty/daemon lifetime bug that the single-RPC design solved.
+# Keep that architecture and only make potentially risky prep operations bounded.
+# ---------------------------------------------------------------------------
 text = CONTROLLER.read_text()
 
-# Physical alpha9 logs show the audio/control setup completing, then the giant
-# desktop-prep + Wayland command timing out before VESSEL_WAYLAND_BOOTSTRAP_BEGIN.
-# The prep still contained a recursive chown of the entire persistent Firefox
-# profile. That is cheap on a fresh image but can become arbitrarily expensive
-# after real browsing and makes later boots look randomly broken. Only chown the
-# files/directories Vessel itself creates; Firefox-owned descendants stay owned
-# by the vessel user naturally.
+# Never recursively walk the persistent Firefox profile on every boot. A real
+# browsing profile can contain thousands of files and make startup time depend on
+# user data. Only fix ownership of the files/directories Vessel itself creates.
 text = replace_once(
     text,
     "            chown -R vessel:vessel /home/vessel/.mozilla /home/vessel/.config\n",
-    """            chown vessel:vessel /home/vessel/.mozilla /home/vessel/.mozilla/firefox /home/vessel/.mozilla/firefox/vessel.default /home/vessel/.config\n            chown vessel:vessel /home/vessel/.mozilla/firefox/profiles.ini /home/vessel/.mozilla/firefox/vessel.default/user.js\n            echo VESSEL_PREP_STAGE=profile-ready\n""",
+    """            chown vessel:vessel /home/vessel/.mozilla /home/vessel/.mozilla/firefox /home/vessel/.mozilla/firefox/vessel.default /home/vessel/.config
+            chown vessel:vessel /home/vessel/.mozilla/firefox/profiles.ini /home/vessel/.mozilla/firefox/vessel.default/user.js
+            echo VESSEL_PREP_STAGE=profile-ready
+""",
     "remove recursive persistent-profile chown",
 )
 
-# Make the remaining host-device preparation bounded. udevadm trigger has no
-# built-in timeout and a wedged coldplug must never keep the Android boot RPC
-# open forever. The DRM/input nodes were already verified earlier in startup, so
-# timing out this refresh is non-fatal.
+# systemd-udevd is useful for the desktop session but Vessel does not run a real
+# systemd PID1. On a phone boot it must therefore be best-effort and bounded.
+# The DRM and input device nodes were already verified before launchDesktop().
+udev_daemon_old = "            (pgrep -x systemd-udevd >/dev/null || (/lib/systemd/systemd-udevd --daemon 2>/tmp/vessel-udev.log || /usr/lib/systemd/systemd-udevd --daemon 2>/tmp/vessel-udev.log))\n"
+udev_daemon_new = """            if ! pgrep -x systemd-udevd >/dev/null 2>&1; then
+              timeout 6s /lib/systemd/systemd-udevd --daemon 2>/tmp/vessel-udev.log || timeout 6s /usr/lib/systemd/systemd-udevd --daemon 2>/tmp/vessel-udev.log || true
+            fi
+            echo VESSEL_PREP_STAGE=udevd-ready
+"""
+text = replace_once(text, udev_daemon_old, udev_daemon_new, "bound udev daemon startup")
+
 text = replace_once(
     text,
     "            udevadm trigger --action=add || true\n            udevadm settle --timeout=10 || true\n",
-    """            echo VESSEL_PREP_STAGE=udev\n            timeout 8s udevadm trigger --action=add || true\n            timeout 12s udevadm settle --timeout=10 || true\n            echo VESSEL_PREP_STAGE=udev-ready\n""",
+    """            echo VESSEL_PREP_STAGE=udev
+            timeout 8s udevadm trigger --action=add || true
+            timeout 12s udevadm settle --timeout=10 || true
+            echo VESSEL_PREP_STAGE=udev-ready
+""",
     "bound udev coldplug",
 )
 
-# D-Bus is required for the ConsoleKit shim, but daemon startup should also be
-# bounded and produce a stage marker before KWin is ever launched.
+# D-Bus and the ConsoleKit compatibility broker are required by Bookworm KWin,
+# but neither daemon is allowed to own the UML boot tty or block it indefinitely.
 text = replace_once(
     text,
     "            dbus-daemon --system --fork 2>/tmp/vessel-dbus.log || { echo VESSEL_DBUS_START_FAILED; cat /tmp/vessel-dbus.log; exit 48; }\n",
@@ -54,13 +73,11 @@ text = replace_once(
 text = replace_once(
     text,
     "            dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames >/dev/null 2>&1 || { echo VESSEL_DBUS_HEALTHCHECK_FAILED; cat /tmp/vessel-dbus.log 2>/dev/null || true; exit 48; }\n",
-    """            dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames >/dev/null 2>&1 || { echo VESSEL_DBUS_HEALTHCHECK_FAILED; cat /tmp/vessel-dbus.log 2>/dev/null || true; exit 48; }\n            echo VESSEL_PREP_STAGE=dbus-ready\n""",
+    """            dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames >/dev/null 2>&1 || { echo VESSEL_DBUS_HEALTHCHECK_FAILED; cat /tmp/vessel-dbus.log 2>/dev/null || true; exit 48; }
+            echo VESSEL_PREP_STAGE=dbus-ready
+""",
     "dbus stage marker",
 )
-
-# The ConsoleKit broker is long-lived. Do not start it as an ordinary '&' child
-# of the boot shell: detach it with setsid -f and close stdin so it cannot retain
-# the command pipeline or delay the completion marker on any shell/pty variant.
 text = replace_once(
     text,
     "            nohup /usr/bin/python3 /usr/local/lib/vessel/consolekit_shim.py >/tmp/vessel-consolekit.log 2>&1 &\n",
@@ -70,46 +87,71 @@ text = replace_once(
 text = replace_once(
     text,
     "            dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ConsoleKit 2>/dev/null | grep -q 'boolean true' || { cat /tmp/vessel-consolekit.log; exit 47; }\n",
-    """            dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ConsoleKit 2>/dev/null | grep -q 'boolean true' || { cat /tmp/vessel-consolekit.log; exit 47; }\n            echo VESSEL_PREP_STAGE=consolekit-ready\n""",
+    """            dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ConsoleKit 2>/dev/null | grep -q 'boolean true' || { cat /tmp/vessel-consolekit.log; exit 47; }
+            echo VESSEL_PREP_STAGE=consolekit-ready
+""",
     "ConsoleKit stage marker",
 )
 
-# Most importantly, never send one opaque mega-command that contains both all
-# setup work and the compositor launch. Keep tty0 for exactly two bounded phases:
-#   1) non-graphical prep while tty0 is known-good;
-#   2) the authoritative Wayland bootstrap as the final tty transaction.
-# Once phase 2 reports KWin/Plasma/Wayland ready, alpha9's existing early return
-# guarantees no follow-up graphical-tty RPC is issued.
-text = replace_once(
-    text,
-    "        var preparedDesktop = prep\n",
-    "        var preparedDesktop = \"\"\n",
-    "separate prep from Wayland bootstrap",
-)
+# Keep alpha9's proven single authoritative tty transaction. This is the key
+# regression fix: do NOT split prep and Wayland bootstrap into separate guest
+# RPCs. Hot v49 Wayland files + post-prep hook + nonblocking control-agent
+# dispatch remain folded into preparedDesktop by alpha9/alpha13.
 text = replace_once(
     text,
     "        val prepResult = guestBlocking(preparedDesktop, 90)\n",
-    """        append("[desktop] prep stage 1/2: bounded non-graphical setup\\n")
-        val prepResult = guestBlocking(prep, 75)
-        if (prepResult.first == 0 && backend == "wayland") {
-            check(preparedDesktop.isNotBlank()) { "Wayland bootstrap command was empty" }
-            append("[desktop] prep stage 2/2: authoritative Wayland bootstrap\\n")
-            val bootstrapResult = guestBlocking(preparedDesktop, 90)
-            check(bootstrapResult.first == 0) {
-                "Wayland bootstrap failed: ${bootstrapResult.second.takeLast(12000)}"
-            }
-        }
+    """        append("[desktop] authoritative single-RPC prep + Wayland bootstrap\\n")
+        val prepResult = guestBlocking(preparedDesktop, 120)
 """,
-    "two-phase Wayland boot",
+    "single authoritative Wayland transaction",
 )
 
-text = text.replace("v53-nonblocking-control-plane-r1", "v54-staged-prep-no-recursive-chown-r1")
+text = text.replace("v53-nonblocking-control-plane-r1", "v55-restored-single-rpc-r1")
 CONTROLLER.write_text(text)
 
-if SERVICE.exists():
-    SERVICE.write_text(SERVICE.read_text().replace(
-        "v53-nonblocking-control-plane-r1",
-        "v54-staged-prep-no-recursive-chown-r1",
-    ))
+# ---------------------------------------------------------------------------
+# Apps: the first successful graphics build exposed another tty problem: the
+# App page sent post-boot commands through the graphical tty and could sit on a
+# spinner until a 180s timeout. Alpha10 moved post-boot work to the reconnecting
+# guest agent. Make discovery explicitly wait for that authenticated transport,
+# fail fast instead of spinning forever, and keep the local AppStream cache.
+# ---------------------------------------------------------------------------
+service = SERVICE.read_text()
+service = replace_once(
+    service,
+    """        scope.launch(Dispatchers.IO) {
+            try {
+                installDiscoveryHelper()
+""",
+    """        scope.launch(Dispatchers.IO) {
+            try {
+                if (!VesselGuestAgent.waitUntilConnected(8_000)) {
+                    appStore.value = appStore.value.copy(
+                        loading = false,
+                        error = "Debian app service is still connecting. Tap Search or a filter to retry.",
+                    )
+                    return@launch
+                }
+                installDiscoveryHelper()
+""",
+    "Apps wait for authenticated control transport",
+)
 
-print("[alpha14] persistent-profile recursive chown removed; udev/dbus/ConsoleKit bounded; Wayland prep split into two deterministic RPCs")
+# Cold local AppStream parsing should normally take seconds on four vCPUs. Keep
+# enough headroom for a large catalog, but do not leave the UI looking hung for
+# two minutes if the guest helper is unhealthy.
+service = service.replace(
+    """                    120,
+                )
+                check(result.optBoolean("ok")) { "Debian app discovery returned rc=${result.optInt("rc", -1)}" }
+""",
+    """                    60,
+                )
+                check(result.optBoolean("ok")) { "Debian app discovery returned rc=${result.optInt("rc", -1)}" }
+""",
+    1,
+)
+service = service.replace("v53-nonblocking-control-plane-r1", "v55-restored-single-rpc-r1")
+SERVICE.write_text(service)
+
+print("[alpha14] restored proven single-RPC Wayland boot; bounded udev/dbus/ConsoleKit; Apps wait on the post-boot control agent and fail fast")
