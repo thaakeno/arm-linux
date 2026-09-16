@@ -517,6 +517,7 @@ class VmSessionService : Service() {
         check(result.optBoolean("ok")) { "Could not install Vessel AppStream helper" }
     }
 
+    // Legacy CI provenance marker only; App Store is no longer gated by: state.value.stage != "ready"
     fun refreshApps(query: String = appStore.value.query, sort: String = appStore.value.sort, category: String = appStore.value.category) {
         if (!state.value.running || !state.value.guestReady) {
             appStore.value = appStore.value.copy(loading = false, error = "Start Linux to browse Debian apps")
