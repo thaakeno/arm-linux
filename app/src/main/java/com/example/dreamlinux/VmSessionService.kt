@@ -21,7 +21,6 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -58,35 +57,35 @@ data class MachineStats(
 )
 
 data class SessionState(
-    val connected:Boolean=false,
-    val running:Boolean=false,
-    val guestReady:Boolean=false,
-    val displayReady:Boolean=false,
-    val inputReady:Boolean=false,
-    val frameReachedApp:Boolean=false,
-    val name:String="Vessel Debian",
-    val message:String="Ready",
-    val busy:Boolean=false,
-    val stage:String="idle",
-    val progressPercent:Int=0,
-    val progressDetail:String="Runtime stopped",
-    val lastError:String="",
-    val console:String="",
-    val terminalOutput:String="",
-    val graphics:String="VirtIO GPU · VirGL · ANGLE · AHardwareBuffer · Vulkan · Adreno",
-    val presenterStatus:String="not-started",
-    val rendererMode:String="virgl-opengl",
-    val translationLayer:String="VirGL",
-    val displayTransport:String=VesselRuntimeController.DISPLAY_TRANSPORT,
-    val runtimeRevision:String=VesselRuntimeController.REVISION,
-    val machinePath:String="Download/LinuxPC/Vessel-Debian",
-    val internetStage:String="UML vector net · passt",
-    val uptimeMs:Long=0L,
-    val storageReady:Boolean=false,
-    val hostAssetsReady:Boolean=false,
-    val guestMemoryMb:Int=0,
-    val guestDisplayWidth:Int=1920,
-    val guestDisplayHeight:Int=1080,
+    val connected: Boolean = false,
+    val running: Boolean = false,
+    val guestReady: Boolean = false,
+    val displayReady: Boolean = false,
+    val inputReady: Boolean = false,
+    val frameReachedApp: Boolean = false,
+    val name: String = "Vessel Debian",
+    val message: String = "Ready",
+    val busy: Boolean = false,
+    val stage: String = "idle",
+    val progressPercent: Int = 0,
+    val progressDetail: String = "Runtime stopped",
+    val lastError: String = "",
+    val console: String = "",
+    val terminalOutput: String = "",
+    val graphics: String = "VirtIO GPU · VirGL · ANGLE · AHardwareBuffer · Vulkan · Adreno",
+    val presenterStatus: String = "not-started",
+    val rendererMode: String = "virgl-opengl",
+    val translationLayer: String = "VirGL",
+    val displayTransport: String = VesselRuntimeController.DISPLAY_TRANSPORT,
+    val runtimeRevision: String = VesselRuntimeController.REVISION,
+    val machinePath: String = "Download/LinuxPC/Vessel-Debian",
+    val internetStage: String = "UML vector net · passt",
+    val uptimeMs: Long = 0L,
+    val storageReady: Boolean = false,
+    val hostAssetsReady: Boolean = false,
+    val guestMemoryMb: Int = 0,
+    val guestDisplayWidth: Int = 1920,
+    val guestDisplayHeight: Int = 1080,
 )
 
 class VmSessionService : Service() {
@@ -96,6 +95,7 @@ class VmSessionService : Service() {
         val machineStats = MutableStateFlow(MachineStats())
         @Volatile var active: VmSessionService? = null
 
+        private val PACKAGE_RE = Regex("[a-z0-9][a-z0-9+.-]{0,127}")
         private val DEFAULT_APPS = linkedMapOf(
             "firefox-esr" to "Firefox",
             "konsole" to "Konsole",
@@ -122,10 +122,10 @@ class VmSessionService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var runtime: VesselRuntimeController
-    private var w = 1920
-    private var h = 1080
-    private var dpi = 120
-    private var refresh = 60f
+    private var guestWidth = 1920
+    private var guestHeight = 1080
+    private var guestDpi = 120
+    private var guestRefresh = 60f
     @Volatile private var operationGeneration = 0L
     private var lastStatsAt = 0L
 
@@ -135,12 +135,21 @@ class VmSessionService : Service() {
         super.onCreate()
         active = this
         runtime = VesselRuntimeController(this) { phase, pct, detail ->
-            state.value = state.value.copy(stage=phase, progressPercent=pct, progressDetail=detail, message=detail)
+            state.value = state.value.copy(
+                stage = phase,
+                progressPercent = pct,
+                progressDetail = detail,
+                message = detail,
+            )
         }
         configureStableLandscape()
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel("vessel-runtime", "Vessel Linux runtime", NotificationManager.IMPORTANCE_LOW))
-        val pi = PendingIntent.getActivity(this, 0, Intent(this, VesselActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel("vessel-runtime", "Vessel Linux runtime", NotificationManager.IMPORTANCE_LOW),
+        )
+        val pi = PendingIntent.getActivity(
+            this, 0, Intent(this, VesselActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         startForeground(
             1,
             NotificationCompat.Builder(this, "vessel-runtime")
@@ -170,18 +179,21 @@ class VmSessionService : Service() {
         val mode = display?.mode
         val physicalLong = max(mode?.physicalWidth ?: 1920, mode?.physicalHeight ?: 1080)
         val physicalShort = min(mode?.physicalWidth ?: 1920, mode?.physicalHeight ?: 1080)
-        val targetW = min(physicalLong, 1920)
-        val targetH = ((physicalShort.toDouble() * targetW / physicalLong).roundToInt().coerceAtLeast(720) / 2) * 2
-        w = (targetW / 8) * 8
-        h = targetH
-        // Linux desktop DPI must be desktop-like. Android's 400-500 dpi would make Plasma enormous.
-        dpi = 120
-        refresh = (mode?.refreshRate ?: 60f).coerceIn(60f, 120f)
-        runtime.configureDisplay(w, h, dpi, refresh)
-        state.value = state.value.copy(guestDisplayWidth=w, guestDisplayHeight=h)
+        val targetWidth = min(physicalLong, 1920)
+        val targetHeight = ((physicalShort.toDouble() * targetWidth / physicalLong)
+            .roundToInt().coerceAtLeast(720) / 2) * 2
+        guestWidth = (targetWidth / 8) * 8
+        guestHeight = targetHeight
+        guestDpi = 120
+        guestRefresh = (mode?.refreshRate ?: 60f).coerceIn(60f, 120f)
+        runtime.configureDisplay(guestWidth, guestHeight, guestDpi, guestRefresh)
+        state.value = state.value.copy(
+            guestDisplayWidth = guestWidth,
+            guestDisplayHeight = guestHeight,
+        )
     }
 
-    override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         refreshAvailability()
         return START_STICKY
     }
@@ -193,7 +205,7 @@ class VmSessionService : Service() {
         super.onDestroy()
     }
 
-    override fun onBind(i: Intent?): IBinder? = null
+    override fun onBind(intent: Intent?): IBinder? = null
 
     fun refreshAvailability() {
         val storage = runtime.hasStorageAccess()
@@ -207,8 +219,8 @@ class VmSessionService : Service() {
             guestMemoryMb = runtime.guestMemoryMb,
             runtimeRevision = VesselRuntimeController.REVISION,
             displayTransport = VesselRuntimeController.DISPLAY_TRANSPORT,
-            guestDisplayWidth = w,
-            guestDisplayHeight = h,
+            guestDisplayWidth = guestWidth,
+            guestDisplayHeight = guestHeight,
             message = when {
                 !storage -> "Grant file access for Download/LinuxPC"
                 !assets -> "Native runtime assets missing from APK"
@@ -221,12 +233,13 @@ class VmSessionService : Service() {
     private fun applyState(o: JSONObject) {
         val presenter = VesselWaylandPresenter.status()
         val err = o.optString("lastError")
-        val frame = o.optBoolean("frameContentValidated") || presenter.startsWith("presenting-dmabuf")
-        val stoppingNow = state.value.stage == "stopping"
+        val presented = presenter.startsWith("presenting-dmabuf") || presenter.startsWith("presenting-ahardwarebuffer")
+        val frame = o.optBoolean("frameContentValidated") || presented
+        val stopping = state.value.stage == "stopping"
         state.value = state.value.copy(
             running = o.optBoolean("running"),
             guestReady = o.optBoolean("guestReady"),
-            displayReady = o.optBoolean("desktopReady") || presenter.startsWith("presenting-dmabuf"),
+            displayReady = o.optBoolean("desktopReady") || presented,
             frameReachedApp = frame,
             inputReady = o.optBoolean("inputConnected"),
             presenterStatus = presenter,
@@ -239,12 +252,12 @@ class VmSessionService : Service() {
             displayTransport = o.optString("displayTransport", state.value.displayTransport),
             runtimeRevision = o.optString("runtimeRevision", state.value.runtimeRevision),
             guestMemoryMb = o.optInt("guestMemoryMb", state.value.guestMemoryMb),
-            guestDisplayWidth = o.optInt("displayWidth", w),
-            guestDisplayHeight = o.optInt("displayHeight", h),
+            guestDisplayWidth = o.optInt("displayWidth", guestWidth),
+            guestDisplayHeight = o.optInt("displayHeight", guestHeight),
             message = when {
-                stoppingNow -> "Stopping Linux"
+                stopping -> "Stopping Linux"
                 err.isNotBlank() -> err
-                presenter.startsWith("presenting-dmabuf") -> "Plasma visible · AHardwareBuffer GPU path"
+                presented -> "Plasma visible · pipelined AHardwareBuffer GPU path"
                 o.optBoolean("guestReady") -> state.value.progressDetail
                 else -> state.value.message
             },
@@ -258,9 +271,8 @@ class VmSessionService : Service() {
         runCatching { runtime.status() }.onSuccess(::applyState)
     }
 
-    /** Surface size is presentation-only. Guest XRandR stays at one stable landscape mode. */
+    /** Surface dimensions are presentation-only; never push transient Compose sizes into XRandR. */
     fun configureDisplay(width: Int, height: Int, densityDpi: Int, rate: Float) {
-        // Kept as a compatibility hook for older UI code. Do not feed transient Surface sizes to XRandR.
         if (width <= 0 || height <= 0 || densityDpi <= 0 || rate <= 0f) return
     }
 
@@ -272,57 +284,78 @@ class VmSessionService : Service() {
         if (!state.value.connected) return
         val op = nextOperation()
         state.value = state.value.copy(
-            busy=true, lastError="", stage="starting", progressPercent=1,
-            progressDetail="Starting self-contained Vessel runtime", message="Starting Linux", terminalOutput="",
+            busy = true,
+            lastError = "",
+            stage = "starting",
+            progressPercent = 1,
+            progressDetail = "Starting self-contained Vessel runtime",
+            message = "Starting Linux",
+            terminalOutput = "",
         )
         scope.launch(Dispatchers.IO) {
             try {
-                val o = runtime.startDesktop()
+                val started = runtime.startDesktop()
                 if (op != operationGeneration) return@launch
-                // Desktop packages are deliberately separate from the Plasma core check so an
-                // existing persistent image also receives the workstation apps added by Vessel.
+                applyState(started)
                 ensureWorkstationApps(op)
                 if (op != operationGeneration) return@launch
                 ensureDesktopProfile(op)
-                launch(Dispatchers.Main) {
-                    if (op == operationGeneration) {
-                        applyState(o)
-                        state.value = state.value.copy(progressPercent=100, progressDetail="Vessel workstation ready", message="Vessel workstation ready")
-                    }
-                }
+                if (op != operationGeneration) return@launch
+                val finalState = runtime.status()
+                applyState(finalState)
+                state.value = state.value.copy(
+                    progressPercent = 100,
+                    progressDetail = "Vessel workstation ready",
+                    message = "Vessel workstation ready",
+                )
                 refreshApps("")
                 refreshSystemStats(silent = true)
             } catch (t: Throwable) {
-                val snapshot = runCatching { runtime.status() }.getOrNull()
-                launch(Dispatchers.Main) {
-                    if (op != operationGeneration) return@launch
-                    if (snapshot != null) applyState(snapshot)
-                    state.value = state.value.copy(lastError=t.message ?: t.javaClass.simpleName, message=t.message ?: "Startup failed")
-                }
+                runCatching { runtime.status() }.getOrNull()?.let(::applyState)
+                state.value = state.value.copy(
+                    lastError = t.message ?: t.javaClass.simpleName,
+                    message = t.message ?: "Startup failed",
+                )
             } finally {
-                launch(Dispatchers.Main) {
-                    if (op == operationGeneration) {
-                        val current = state.value
-                        state.value = current.copy(busy=false, stage=if (current.running) current.stage else "idle")
-                    }
+                if (op == operationGeneration) {
+                    val current = state.value
+                    state.value = current.copy(
+                        busy = false,
+                        stage = if (current.running) "ready" else "idle",
+                    )
                 }
             }
         }
     }
 
     private suspend fun ensureWorkstationApps(op: Long) {
-        if (!state.value.running || !state.value.guestReady) return
-        state.value = state.value.copy(stage="workstation_apps", progressPercent=95, progressDetail="Checking workstation apps", message="Checking workstation apps")
+        if (op != operationGeneration) return
+        state.value = state.value.copy(
+            stage = "workstation_apps",
+            progressPercent = 95,
+            progressDetail = "Checking workstation apps",
+            message = "Checking workstation apps",
+        )
         val packages = DEFAULT_APPS.keys + "plasma-workspace-wallpapers"
-        val quoted = packages.joinToString(" ") { shellQuote(it) }
+        val packageWords = packages.joinToString(" ") { shellQuote(it) }
         val check = runtime.guest(
-            "missing=''; for p in $quoted; do dpkg-query -W -f='\${Status}' \"\$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"\$missing \$p\"; done; echo VESSEL_MISSING=\$missing",
+            "missing=''; for p in $packageWords; do " +
+                "dpkg-query -W -f='\${Status}' \"\$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"\$missing \$p\"; " +
+                "done; echo VESSEL_MISSING=\$missing",
             45,
         )
-        val out = check.optString("output")
-        val missing = out.lineSequence().firstOrNull { "VESSEL_MISSING=" in it }?.substringAfter("VESSEL_MISSING=")?.trim().orEmpty()
+        val missing = check.optString("output")
+            .lineSequence()
+            .firstOrNull { "VESSEL_MISSING=" in it }
+            ?.substringAfter("VESSEL_MISSING=")
+            ?.trim()
+            .orEmpty()
         if (missing.isNotBlank()) {
-            state.value = state.value.copy(progressPercent=96, progressDetail="Installing Firefox and desktop apps", message="Installing workstation apps")
+            state.value = state.value.copy(
+                progressPercent = 96,
+                progressDetail = "Installing Firefox and desktop apps",
+                message = "Installing workstation apps",
+            )
             val install = runtime.guest(
                 "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
                     "mkdir -p /usr/sbin; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; " +
@@ -330,60 +363,81 @@ class VmSessionService : Service() {
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --no-install-recommends $missing && apt-get clean",
                 1800,
             )
-            if (!install.optBoolean("ok")) {
-                throw IllegalStateException("Workstation app installation failed; see Runtime log")
-            }
+            check(install.optBoolean("ok")) { "Workstation app installation failed; see Runtime log" }
         }
         if (op != operationGeneration) return
         runtime.guest(
             "install -d -o vessel -g vessel /home/vessel/Desktop; " +
-                "for f in firefox-esr org.kde.konsole; do src=/usr/share/applications/\$f.desktop; [ -f \"\$src\" ] && install -m 755 -o vessel -g vessel \"\$src\" /home/vessel/Desktop/ || true; done",
+                "for f in firefox-esr org.kde.konsole; do src=/usr/share/applications/\$f.desktop; " +
+                "[ -f \"\$src\" ] && install -m 755 -o vessel -g vessel \"\$src\" /home/vessel/Desktop/ || true; done",
             30,
         )
     }
 
     private suspend fun ensureDesktopProfile(op: Long) {
-        if (op != operationGeneration || !state.value.running) return
-        state.value = state.value.copy(progressPercent=98, progressDetail="Finishing Plasma desktop profile", message="Finishing desktop setup")
-        // Reset only once for the P39 workstation profile. After this marker exists, Vessel
-        // leaves every user customization untouched.
-        val command = """
+        if (op != operationGeneration) return
+        state.value = state.value.copy(
+            stage = "desktop_profile",
+            progressPercent = 98,
+            progressDetail = "Finishing Plasma desktop profile",
+            message = "Finishing desktop setup",
+        )
+        val profile = runtime.guest(
+            """
             marker=/home/vessel/.config/.vessel-p39-workstation-v1
             if [ ! -e "${'$'}marker" ]; then
               install -d -m 700 -o vessel -g vessel /home/vessel/.config
               pkill -u vessel -x plasmashell 2>/dev/null || true
-              sleep .2
               rm -f /home/vessel/.config/plasma-org.kde.plasma.desktop-appletsrc
               su -l vessel -c 'lookandfeeltool -a org.kde.breeze.desktop >/tmp/vessel-lookandfeel.log 2>&1 || true'
               touch "${'$'}marker"
               chown vessel:vessel "${'$'}marker"
-              pkill -u vessel -x startplasma-x11 2>/dev/null || true
+              pkill -u vessel -f '[s]tartplasma-x11' 2>/dev/null || true
               pkill -u vessel -x plasma_session 2>/dev/null || true
               pkill -u vessel -x ksmserver 2>/dev/null || true
               pkill -u vessel -x kded5 2>/dev/null || true
               pkill -u vessel -x kwin_x11 2>/dev/null || true
+              sleep .4
               nohup su -l vessel -c "DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/${'$'}(id -u vessel) dbus-run-session -- /usr/local/bin/vessel-plasma-session" >/tmp/vessel-plasma-profile.log 2>&1 </dev/null &
             fi
-        """.trimIndent()
-        runtime.guest(command, 45)
+            echo VESSEL_PROFILE_READY
+            """.trimIndent(),
+            45,
+        )
+        if (!profile.optBoolean("ok")) {
+            throw IllegalStateException("Plasma profile setup failed; see Runtime log")
+        }
     }
 
     fun stopVm() {
         val current = state.value
-        if (!current.running && !current.busy) return
-        if (current.stage == "stopping") return
+        if ((!current.running && !current.busy) || current.stage == "stopping") return
         val op = nextOperation()
-        state.value = current.copy(busy=true, stage="stopping", progressDetail="Stopping Linux safely", message="Stopping Linux", lastError="")
+        state.value = current.copy(
+            busy = true,
+            stage = "stopping",
+            progressDetail = "Stopping Linux safely",
+            message = "Stopping Linux",
+            lastError = "",
+        )
         scope.launch(Dispatchers.IO) {
-            val r = runCatching { runtime.stop() }
-            launch(Dispatchers.Main) {
-                if (op != operationGeneration) return@launch
-                r.onSuccess(::applyState).onFailure { state.value = state.value.copy(lastError=it.message ?: "Stop failed") }
-                state.value = state.value.copy(
-                    busy=false, running=false, guestReady=false, displayReady=false, inputReady=false, frameReachedApp=false,
-                    stage="idle", progressPercent=0, progressDetail="Runtime stopped", message="Linux stopped; disk retained",
-                )
+            val result = runCatching { runtime.stop() }
+            if (op != operationGeneration) return@launch
+            result.onSuccess(::applyState).onFailure {
+                state.value = state.value.copy(lastError = it.message ?: "Stop failed")
             }
+            state.value = state.value.copy(
+                busy = false,
+                running = false,
+                guestReady = false,
+                displayReady = false,
+                inputReady = false,
+                frameReachedApp = false,
+                stage = "idle",
+                progressPercent = 0,
+                progressDetail = "Runtime stopped",
+                message = "Linux stopped; disk retained",
+            )
         }
     }
 
@@ -391,21 +445,27 @@ class VmSessionService : Service() {
 
     fun runGuestCommand(command: String) {
         if (state.value.busy || !state.value.running || !state.value.guestReady || command.isBlank()) return
-        state.value = state.value.copy(busy=true, terminalOutput=state.value.terminalOutput + "\n$ $command\n")
+        state.value = state.value.copy(
+            busy = true,
+            terminalOutput = state.value.terminalOutput + "\n$ $command\n",
+        )
         scope.launch(Dispatchers.IO) {
-            val r = runCatching { runtime.guest(command, 90) }
-            launch(Dispatchers.Main) {
-                r.onSuccess { o ->
+            runCatching { runtime.guest(command, 90) }
+                .onSuccess { o ->
                     applyState(o)
                     val out = o.optString("output")
                     state.value = state.value.copy(
-                        terminalOutput=(state.value.terminalOutput + out + if (out.endsWith("\n") || out.isBlank()) "" else "\n").takeLast(120_000),
+                        terminalOutput = (state.value.terminalOutput + out + if (out.endsWith("\n") || out.isBlank()) "" else "\n")
+                            .takeLast(120_000),
                     )
-                }.onFailure {
-                    state.value = state.value.copy(lastError=it.message ?: "Command failed", terminalOutput=state.value.terminalOutput + "${it.message}\n")
                 }
-                state.value = state.value.copy(busy=false)
-            }
+                .onFailure {
+                    state.value = state.value.copy(
+                        lastError = it.message ?: "Command failed",
+                        terminalOutput = state.value.terminalOutput + "${it.message}\n",
+                    )
+                }
+            state.value = state.value.copy(busy = false)
         }
     }
 
@@ -420,13 +480,13 @@ class VmSessionService : Service() {
 
     fun refreshApps(query: String) {
         if (!state.value.running || !state.value.guestReady) {
-            appStore.value = appStore.value.copy(error="Start Linux to browse Debian apps")
+            appStore.value = appStore.value.copy(error = "Start Linux to browse Debian apps")
             return
         }
-        appStore.value = appStore.value.copy(query=query, loading=true, error="")
+        appStore.value = appStore.value.copy(query = query, loading = true, error = "")
         scope.launch(Dispatchers.IO) {
             try {
-                val packages: List<String> = if (query.isBlank()) {
+                val packages = if (query.isBlank()) {
                     POPULAR_APPS.keys.toList()
                 } else {
                     val result = runtime.guest(
@@ -434,14 +494,14 @@ class VmSessionService : Service() {
                         30,
                     )
                     result.optString("output").lineSequence()
-                        .map { it.trim() }
-                        .filter { PACKAGE_RE.matches(it) }
+                        .map(String::trim)
+                        .filter(PACKAGE_RE::matches)
                         .distinct()
                         .take(30)
                         .toList()
                 }
                 if (packages.isEmpty()) {
-                    appStore.value = AppStoreState(emptyList(), query, false, "", "No Debian apps found")
+                    appStore.value = AppStoreState(query = query, error = "No Debian apps found")
                     return@launch
                 }
                 val packageWords = packages.joinToString(" ") { shellQuote(it) }
@@ -459,53 +519,60 @@ class VmSessionService : Service() {
                     """.trimIndent(),
                     45,
                 )
-                val apps = parseApps(result.optString("output"))
-                appStore.value = AppStoreState(apps, query, false, "", "")
+                appStore.value = AppStoreState(
+                    apps = parseApps(result.optString("output")),
+                    query = query,
+                )
             } catch (t: Throwable) {
-                appStore.value = appStore.value.copy(loading=false, error=t.message ?: "Could not query APT")
+                appStore.value = appStore.value.copy(
+                    loading = false,
+                    error = t.message ?: "Could not query APT",
+                )
             }
         }
     }
 
-    fun installApp(packageName: String) = changeApp(packageName, install=true)
-    fun removeApp(packageName: String) = changeApp(packageName, install=false)
+    fun installApp(packageName: String) = changeApp(packageName, install = true)
+    fun removeApp(packageName: String) = changeApp(packageName, install = false)
 
     private fun changeApp(packageName: String, install: Boolean) {
         if (!PACKAGE_RE.matches(packageName) || !state.value.running || !state.value.guestReady) return
-        appStore.value = appStore.value.copy(busyPackage=packageName, error="")
+        appStore.value = appStore.value.copy(busyPackage = packageName, error = "")
         scope.launch(Dispatchers.IO) {
             try {
                 val action = if (install) {
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update >/dev/null && apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --no-install-recommends ${shellQuote(packageName)}"
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update >/dev/null && " +
+                        "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --no-install-recommends ${shellQuote(packageName)}"
                 } else {
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 remove -y ${shellQuote(packageName)}"
                 }
                 val result = runtime.guest(
-                    "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; mkdir -p /usr/sbin; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; $action",
+                    "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
+                        "mkdir -p /usr/sbin; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; $action",
                     1800,
                 )
-                if (!result.optBoolean("ok")) error("APT returned rc=${result.optInt("rc", -1)}")
+                check(result.optBoolean("ok")) { "APT returned rc=${result.optInt("rc", -1)}" }
                 refreshApps(appStore.value.query)
-                refreshSystemStats(silent=true)
+                refreshSystemStats(silent = true)
             } catch (t: Throwable) {
-                appStore.value = appStore.value.copy(error=t.message ?: "APT operation failed")
+                appStore.value = appStore.value.copy(error = t.message ?: "APT operation failed")
             } finally {
-                appStore.value = appStore.value.copy(busyPackage="")
+                appStore.value = appStore.value.copy(busyPackage = "")
             }
         }
     }
 
     private fun parseApps(raw: String): List<GuestApp> = raw.lineSequence().mapNotNull { line ->
         if (!line.startsWith("VESSEL_APP\t")) return@mapNotNull null
-        val fields = line.split('\t', limit=5)
+        val fields = line.split('\t', limit = 5)
         if (fields.size < 5) return@mapNotNull null
         val pkg = fields[1]
         GuestApp(
-            packageName=pkg,
-            name=POPULAR_APPS[pkg] ?: prettyPackageName(pkg),
-            description=fields[4].ifBlank { "Debian package" },
-            installed=fields[2] == "1",
-            installedSizeKb=fields[3].toLongOrNull() ?: 0,
+            packageName = pkg,
+            name = POPULAR_APPS[pkg] ?: prettyPackageName(pkg),
+            description = fields[4].ifBlank { "Debian package" },
+            installed = fields[2] == "1",
+            installedSizeKb = fields[3].toLongOrNull() ?: 0,
         )
     }.toList()
 
@@ -514,7 +581,7 @@ class VmSessionService : Service() {
             updateHostOnlyStats()
             return
         }
-        if (!silent) machineStats.value = machineStats.value.copy(loading=true, error="")
+        if (!silent) machineStats.value = machineStats.value.copy(loading = true, error = "")
         scope.launch(Dispatchers.IO) {
             try {
                 val result = runtime.guest(
@@ -526,22 +593,51 @@ class VmSessionService : Service() {
                     """.trimIndent(),
                     30,
                 )
-                var used=0L; var free=0L; var ramUsed=0L; var ramTotal=0L; var pkgs=0; var uptime=0L
+                var used = 0L
+                var free = 0L
+                var ramUsed = 0L
+                var ramTotal = 0L
+                var packages = 0
+                var uptime = 0L
                 result.optString("output").lineSequence().forEach { line ->
                     when {
-                        line.contains("VESSEL_DF=") -> line.substringAfter("VESSEL_DF=").split(',').let { if (it.size==2) { used=(it[0].toLongOrNull()?:0)/1024; free=(it[1].toLongOrNull()?:0)/1024 } }
-                        line.contains("VESSEL_MEM=") -> line.substringAfter("VESSEL_MEM=").split(',').let { if (it.size==2) { ramUsed=it[0].toLongOrNull()?:0; ramTotal=it[1].toLongOrNull()?:0 } }
-                        line.contains("VESSEL_PKGS=") -> pkgs=line.substringAfter("VESSEL_PKGS=").trim().toIntOrNull()?:0
-                        line.contains("VESSEL_UPTIME=") -> uptime=line.substringAfter("VESSEL_UPTIME=").trim().toLongOrNull()?:0
+                        line.contains("VESSEL_DF=") -> line.substringAfter("VESSEL_DF=").split(',').let {
+                            if (it.size == 2) {
+                                used = (it[0].toLongOrNull() ?: 0) / 1024
+                                free = (it[1].toLongOrNull() ?: 0) / 1024
+                            }
+                        }
+                        line.contains("VESSEL_MEM=") -> line.substringAfter("VESSEL_MEM=").split(',').let {
+                            if (it.size == 2) {
+                                ramUsed = it[0].toLongOrNull() ?: 0
+                                ramTotal = it[1].toLongOrNull() ?: 0
+                            }
+                        }
+                        line.contains("VESSEL_PKGS=") -> packages = line.substringAfter("VESSEL_PKGS=").trim().toIntOrNull() ?: 0
+                        line.contains("VESSEL_UPTIME=") -> uptime = line.substringAfter("VESSEL_UPTIME=").trim().toLongOrNull() ?: 0
                     }
                 }
                 val host = hostDiskStats()
-                machineStats.value = MachineStats(used, free, ramUsed, ramTotal, pkgs, uptime, host.first, host.second, host.third, 6, false, "")
+                machineStats.value = MachineStats(
+                    guestDiskUsedMb = used,
+                    guestDiskFreeMb = free,
+                    guestRamUsedMb = ramUsed,
+                    guestRamTotalMb = ramTotal,
+                    packageCount = packages,
+                    guestUptimeSeconds = uptime,
+                    diskVirtualMb = host.first,
+                    diskPhysicalMb = host.second,
+                    hostFreeMb = host.third,
+                    vcpus = 6,
+                )
             } catch (t: Throwable) {
                 val host = hostDiskStats()
                 machineStats.value = machineStats.value.copy(
-                    diskVirtualMb=host.first, diskPhysicalMb=host.second, hostFreeMb=host.third,
-                    loading=false, error=t.message ?: "Could not read guest stats",
+                    diskVirtualMb = host.first,
+                    diskPhysicalMb = host.second,
+                    hostFreeMb = host.third,
+                    loading = false,
+                    error = t.message ?: "Could not read guest stats",
                 )
             }
         }
@@ -549,42 +645,52 @@ class VmSessionService : Service() {
 
     private fun updateHostOnlyStats() {
         val host = hostDiskStats()
-        machineStats.value = machineStats.value.copy(diskVirtualMb=host.first, diskPhysicalMb=host.second, hostFreeMb=host.third, loading=false)
+        machineStats.value = machineStats.value.copy(
+            diskVirtualMb = host.first,
+            diskPhysicalMb = host.second,
+            hostFreeMb = host.third,
+            loading = false,
+        )
     }
 
     private fun hostDiskStats(): Triple<Long, Long, Long> {
         val disk = File(runtime.machineDir, "debian-docker.ext4")
-        val virtualMb = if (disk.isFile) disk.length() / (1024L * 1024L) else 0
-        val physicalMb = if (disk.isFile) runCatching { Os.stat(disk.absolutePath).st_blocks * 512L / (1024L * 1024L) }.getOrDefault(virtualMb) else 0
+        val virtualMb = if (disk.isFile) disk.length() / (1024L * 1024L) else 0L
+        val physicalMb = if (disk.isFile) {
+            runCatching { Os.stat(disk.absolutePath).st_blocks * 512L / (1024L * 1024L) }
+                .getOrDefault(virtualMb)
+        } else 0L
         val freeMb = runtime.machineDir.usableSpace / (1024L * 1024L)
         return Triple(virtualMb, physicalMb, freeMb)
     }
 
     fun expandDiskBy2GiB() {
         if (state.value.running || state.value.busy) {
-            machineStats.value = machineStats.value.copy(error="Stop Linux before expanding the disk")
+            machineStats.value = machineStats.value.copy(error = "Stop Linux before expanding the disk")
             return
         }
         val disk = File(runtime.machineDir, "debian-docker.ext4")
         if (!disk.isFile) {
-            machineStats.value = machineStats.value.copy(error="Create the Vessel machine first")
+            machineStats.value = machineStats.value.copy(error = "Create the Vessel machine first")
             return
         }
         scope.launch(Dispatchers.IO) {
             runCatching {
-                val add = 2L * 1024L * 1024L * 1024L
                 check(runtime.machineDir.usableSpace > 512L * 1024L * 1024L) { "Android storage is too low" }
-                RandomAccessFile(disk, "rw").use { it.setLength(it.length() + add) }
+                RandomAccessFile(disk, "rw").use { file ->
+                    file.setLength(file.length() + 2L * 1024L * 1024L * 1024L)
+                }
                 updateHostOnlyStats()
-                state.value = state.value.copy(message="Disk expanded by 2 GiB; ext4 will grow on next boot")
-            }.onFailure { machineStats.value = machineStats.value.copy(error=it.message ?: "Disk expansion failed") }
+                state.value = state.value.copy(message = "Disk expanded by 2 GiB; ext4 will grow on next boot")
+            }.onFailure {
+                machineStats.value = machineStats.value.copy(error = it.message ?: "Disk expansion failed")
+            }
         }
     }
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
-    private fun prettyPackageName(value: String): String = value.split('-', '_').joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
 
-    private companion object Validation {
-        val PACKAGE_RE = Regex("[a-z0-9][a-z0-9+.-]{0,127}")
-    }
+    private fun prettyPackageName(value: String): String = value
+        .split('-', '_')
+        .joinToString(" ") { word -> word.replaceFirstChar { it.uppercase() } }
 }
