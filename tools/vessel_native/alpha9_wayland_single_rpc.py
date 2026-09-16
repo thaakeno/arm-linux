@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import base64
+import runpy
 import sys
 from pathlib import Path
 
@@ -138,3 +139,10 @@ if SERVICE.exists():
     ))
 
 print("[alpha9] Wayland startup is single-RPC and authoritative; obsolete post-ready guest RPCs skipped")
+
+# Physical v49 finally proves the graphics stack. Alpha10 deliberately runs
+# last and addresses the remaining product-level issues: post-boot RPC, audio,
+# restart cleanup, cursor alpha, 120 Hz defaults, Apps and fullscreen UX.
+next_patch = Path(__file__).with_name("alpha10_stability_polish.py")
+sys.argv = [str(next_patch), str(ROOT)]
+runpy.run_path(str(next_patch), run_name="__main__")
