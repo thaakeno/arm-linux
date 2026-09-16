@@ -21,12 +21,10 @@ android {
         minSdk = 30
         targetSdk = 36
         versionCode = 3000 + buildRevision
-        // Physical-device stabilization qualification: six-vCPU reporting, persistent Plasma repair,
-        // and active-scanout dirty-context VirGL synchronization are included in this build line.
-        versionName = "2.1.0-alpha3"
-        // Legacy CI provenance marker only: versionName = "2.1.0-alpha2"
+        versionName = "2.1.0-alpha7"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
+        buildConfigField("int", "HOT_RUNTIME_API", "1")
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             cmake { arguments += listOf("-DANDROID_STL=c++_shared") }
