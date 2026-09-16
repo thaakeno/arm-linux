@@ -121,9 +121,14 @@ control_nonblocking = Path(__file__).with_name("alpha13_nonblocking_control_plan
 sys.argv = [str(control_nonblocking), str(ROOT)]
 runpy.run_path(str(control_nonblocking), run_name="__main__")
 
-# Alpha14 is the physical-device boot regression fix: keep non-graphical prep
-# bounded and separate from the final Wayland transaction, and never recursively
-# chown a persistent Firefox profile on every start.
+# Alpha14 restores the proven no-post-ready-tty invariant and bounds old prep.
 staged_prep = Path(__file__).with_name("alpha14_staged_wayland_prep.py")
 sys.argv = [str(staged_prep), str(ROOT)]
 runpy.run_path(str(staged_prep), run_name="__main__")
+
+# Alpha15 fixes the remaining 72% physical stall by keeping the final tty
+# command tiny: stage scripts while the shell is healthy, skip global udev
+# coldplug, and execute one pre-staged Wayland bootstrap as tty0's last RPC.
+tty_safe = Path(__file__).with_name("alpha15_tty_safe_wayland.py")
+sys.argv = [str(tty_safe), str(ROOT)]
+runpy.run_path(str(tty_safe), run_name="__main__")
