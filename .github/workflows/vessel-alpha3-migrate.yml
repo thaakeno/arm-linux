@@ -4,7 +4,7 @@ on:
   push:
     branches: [ arch/vessel-self-contained ]
     paths:
-      - 'tools/vessel_migration/alpha3b.py'
+      - 'tools/vessel_migration/alpha3c.py'
       - '.github/workflows/vessel-alpha3-migrate.yml'
   workflow_dispatch:
 
@@ -24,13 +24,13 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          python3 tools/vessel_migration/alpha3b.py
+          python3 tools/vessel_migration/alpha3c.py
           git checkout -- .github/workflows/vessel-alpha3-migrate.yml
-          git checkout -- tools/vessel_migration/alpha3b.py
+          git checkout -- tools/vessel_migration/alpha3c.py
           git diff --check
-          grep -F 'vcpus = vcpus' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'vcpus = VesselRuntimeController.UML_VCPUS' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
           grep -F 'fonts-noto-color-emoji' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
-          grep -F 'vessel_dirty_contexts' tools/vessel_native/patch_vhost_gpu_android_ahb.py
+          grep -F 'VESSEL_SCANOUT_DIRTY_CONTEXT_SYNC' tools/vessel_native/patch_vhost_gpu_android_ahb.py
           grep -F 'vessel_dirty_contexts' tools/vessel_native/rebuild_vhost_gpu_ahb.sh
 
       - name: Commit migrated source
