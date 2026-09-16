@@ -1,2 +1,3 @@
 Vessel 2.1.0-alpha3
 Direct Android Surface EGL/GLES presentation qualification trigger.
+qualification=2
