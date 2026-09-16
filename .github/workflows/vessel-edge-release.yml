@@ -1,0 +1,139 @@
+name: Vessel Edge Release
+
+on:
+  workflow_run:
+    workflows: ["Vessel APK"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: vessel-edge-release
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'arch/vessel-self-contained'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download verified Vessel APK artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/vessel-artifact
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n vessel-self-contained-arm64 -D /tmp/vessel-artifact
+          find /tmp/vessel-artifact -maxdepth 2 -type f -print
+          APK="$(find /tmp/vessel-artifact -type f -name '*arm64.apk' ! -name '*unsigned*' -print -quit)"
+          test -n "$APK" -a -s "$APK"
+          echo "SOURCE_APK=$APK" >> "$GITHUB_ENV"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install APK signing tools
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "build-tools;36.0.0"
+          echo "$ANDROID_SDK_ROOT/build-tools/36.0.0" >> "$GITHUB_PATH"
+
+      - name: Restore stable Vessel edge signing identity
+        id: edge-signing
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/vessel-edge-signing
+          key: vessel-edge-signing-v1
+
+      - name: Create signing identity on first edge release
+        run: |
+          set -euo pipefail
+          SIGN_DIR="$HOME/.android/vessel-edge-signing"
+          mkdir -p "$SIGN_DIR"
+          if [ ! -s "$SIGN_DIR/vessel-edge.jks" ] || [ ! -s "$SIGN_DIR/password" ]; then
+            PASS="$(openssl rand -hex 32)"
+            printf '%s' "$PASS" > "$SIGN_DIR/password"
+            chmod 600 "$SIGN_DIR/password"
+            keytool -genkeypair -v \
+              -keystore "$SIGN_DIR/vessel-edge.jks" \
+              -storepass "$PASS" -keypass "$PASS" \
+              -alias vessel-edge -keyalg RSA -keysize 4096 -validity 3650 \
+              -dname "CN=Vessel Edge Development, OU=Vessel, O=Vessel, C=DE"
+          fi
+          test -s "$SIGN_DIR/vessel-edge.jks"
+          test -s "$SIGN_DIR/password"
+
+      - name: Re-sign APK with stable edge key
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euxo pipefail
+          mkdir -p build/edge
+          cp "$SOURCE_APK" build/edge/source.apk
+          # Remove the ephemeral Gradle debug v1 signature before applying the
+          # persistent edge identity. apksigner replaces v2/v3 blocks itself.
+          zip -dq build/edge/source.apk 'META-INF/*.RSA' 'META-INF/*.DSA' 'META-INF/*.EC' 'META-INF/*.SF' 'META-INF/*.MF' || true
+          zipalign -f 4 build/edge/source.apk build/edge/aligned.apk
+          PASS="$(cat "$HOME/.android/vessel-edge-signing/password")"
+          apksigner sign \
+            --ks "$HOME/.android/vessel-edge-signing/vessel-edge.jks" \
+            --ks-key-alias vessel-edge \
+            --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+            --out build/edge/Vessel-edge-arm64.apk \
+            build/edge/aligned.apk
+          apksigner verify --verbose --print-certs build/edge/Vessel-edge-arm64.apk | tee build/edge/APK-SIGNATURE.txt
+          AAPT="$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt"
+          BADGING="$($AAPT dump badging build/edge/Vessel-edge-arm64.apk | head -1)"
+          VERSION_CODE="$(sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" <<<"$BADGING")"
+          VERSION_NAME="$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" <<<"$BADGING")"
+          PACKAGE_NAME="$(sed -n "s/package: name='\([^']*\)'.*/\1/p" <<<"$BADGING")"
+          test "$PACKAGE_NAME" = "com.example.dreamlinux"
+          test -n "$VERSION_CODE" -a -n "$VERSION_NAME"
+          SHA="$(sha256sum build/edge/Vessel-edge-arm64.apk | awk '{print $1}')"
+          jq -n \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg versionName "$VERSION_NAME" \
+            --arg commit "$HEAD_SHA" \
+            --arg sha256 "$SHA" \
+            --arg apkAsset "Vessel-edge-arm64.apk" \
+            '{schema:1, versionCode:$versionCode, versionName:$versionName, commit:$commit, sha256:$sha256, apkAsset:$apkAsset}' \
+            > build/edge/vessel-edge.json
+          sha256sum build/edge/Vessel-edge-arm64.apk > build/edge/SHA256SUMS.txt
+          cat build/edge/vessel-edge.json
+
+      - name: Publish rolling edge release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euxo pipefail
+          gh release delete vessel-edge --repo "$GITHUB_REPOSITORY" --cleanup-tag -y || true
+          gh release create vessel-edge \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$HEAD_SHA" \
+            --title "Vessel Edge" \
+            --prerelease \
+            --notes "Rolling development build for Vessel's in-app updater. Runtime-only fixes normally use the live runtime channel instead." \
+            build/edge/Vessel-edge-arm64.apk \
+            build/edge/vessel-edge.json \
+            build/edge/SHA256SUMS.txt \
+            build/edge/APK-SIGNATURE.txt
+
+      - name: Upload stable-signed edge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vessel-edge-stable-signed-arm64
+          path: |
+            build/edge/Vessel-edge-arm64.apk
+            build/edge/vessel-edge.json
+            build/edge/SHA256SUMS.txt
+            build/edge/APK-SIGNATURE.txt
+          if-no-files-found: error
+          retention-days: 30
