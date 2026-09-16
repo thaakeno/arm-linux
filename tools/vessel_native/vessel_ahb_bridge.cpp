@@ -10,6 +10,7 @@ extern "C" {
 
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -17,22 +18,21 @@ extern "C" {
 #include <mutex>
 #include <string>
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 namespace {
 constexpr const char* TAG = "VesselAhbBridge";
-constexpr uint32_t MAGIC = 0x42484156u; // "VAHB" little-endian
-constexpr uint32_t VERSION = 1;
-constexpr uint32_t MSG_SCANOUT = 1;
-constexpr uint32_t MSG_UPDATE = 2;
+constexpr uint32_t MAGIC = 0x42484156u;
+constexpr uint32_t VERSION = 2;
+constexpr uint32_t MSG_REGISTER_FRAME = 1;
+constexpr uint32_t MSG_FRAME = 2;
 constexpr uint32_t MSG_DISABLE = 3;
 constexpr size_t MAX_SCANOUTS = 16;
+constexpr size_t FRAME_SLOTS = 3;
 
-// Internal diagnostic return codes. These are intentionally distinct so the
-// Rust vhost log tells us which exact bridge stage failed even if stderr is
-// truncated by the Android UI.
 constexpr int RC_EXTENSIONS = 101;
 constexpr int RC_CONTEXT = 102;
 constexpr int RC_AHB_ALLOC = 103;
@@ -51,26 +51,48 @@ struct AhbMessage {
     uint32_t version;
     uint32_t type;
     uint32_t scanout_id;
+    uint32_t slot;
+    uint32_t serial;
     uint32_t width;
     uint32_t height;
 };
+struct AckMessage {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t scanout_id;
+    uint32_t slot;
+    uint32_t serial;
+    uint32_t ok;
+};
 #pragma pack(pop)
 
-struct ScanoutState {
+struct BufferSlot {
     AHardwareBuffer* buffer = nullptr;
     EGLImageKHR image = EGL_NO_IMAGE_KHR;
     GLuint texture = 0;
     GLuint draw_fbo = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool registered = false;
+    bool busy = false;
+    uint32_t serial = 0;
+};
+
+struct ScanoutState {
+    std::array<BufferSlot, FRAME_SLOTS> slots{};
     uint32_t x = 0;
     uint32_t y = 0;
     uint32_t width = 0;
     uint32_t height = 0;
-    bool handle_sent = false;
+    uint32_t next_slot = 0;
+    uint32_t next_serial = 1;
 };
 
 std::mutex g_lock;
 std::array<ScanoutState, MAX_SCANOUTS> g_scanouts{};
 int g_socket = -1;
+uint64_t g_frame_count = 0;
+auto g_rate_started = std::chrono::steady_clock::now();
 
 using GetNativeClientBuffer = PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC;
 using CreateImage = PFNEGLCREATEIMAGEKHRPROC;
@@ -93,34 +115,16 @@ void emit_log(int priority, const char* level, const std::string& message) {
     std::fprintf(stderr, "[AHB/%s] %s\n", level, message.c_str());
     std::fflush(stderr);
 }
+void loge(const std::string& message) { emit_log(ANDROID_LOG_ERROR, "E", message); }
+void logw(const std::string& message) { emit_log(ANDROID_LOG_WARN, "W", message); }
+void logi(const std::string& message) { emit_log(ANDROID_LOG_INFO, "I", message); }
 
-void loge(const std::string& message) {
-    emit_log(ANDROID_LOG_ERROR, "E", message);
-}
-
-void logw(const std::string& message) {
-    emit_log(ANDROID_LOG_WARN, "W", message);
-}
-
-void logi(const std::string& message) {
-    emit_log(ANDROID_LOG_INFO, "I", message);
-}
-
-void clear_gl_errors() {
-    for (int i = 0; i < 16; ++i) {
-        if (glGetError() == GL_NO_ERROR) return;
-    }
-}
-
-void clear_egl_errors() {
-    for (int i = 0; i < 16; ++i) {
-        if (eglGetError() == EGL_SUCCESS) return;
-    }
-}
+void clear_gl_errors() { for (int i=0;i<16;++i) if (glGetError()==GL_NO_ERROR) return; }
+void clear_egl_errors() { for (int i=0;i<16;++i) if (eglGetError()==EGL_SUCCESS) return; }
 
 bool send_all(int fd, const void* data, size_t size) {
     const auto* p = static_cast<const uint8_t*>(data);
-    while (size > 0) {
+    while (size) {
         const ssize_t n = send(fd, p, size, MSG_NOSIGNAL);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return false;
@@ -130,46 +134,51 @@ bool send_all(int fd, const void* data, size_t size) {
     return true;
 }
 
-bool recv_ack(int fd) {
-    uint8_t ack = 0;
-    while (true) {
-        const ssize_t n = recv(fd, &ack, sizeof(ack), MSG_WAITALL);
+bool recv_all(int fd, void* data, size_t size) {
+    auto* p = static_cast<uint8_t*>(data);
+    while (size) {
+        const ssize_t n = recv(fd, p, size, MSG_WAITALL);
         if (n < 0 && errno == EINTR) continue;
-        return n == static_cast<ssize_t>(sizeof(ack)) && ack == 1;
+        if (n <= 0) return false;
+        p += static_cast<size_t>(n);
+        size -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
+void mark_transport_reset() {
+    for (auto& scanout : g_scanouts) {
+        for (auto& slot : scanout.slots) {
+            slot.registered = false;
+            slot.busy = false;
+            slot.serial = 0;
+        }
     }
 }
 
 void close_socket() {
     if (g_socket >= 0) close(g_socket);
     g_socket = -1;
-    for (auto& scanout : g_scanouts) scanout.handle_sent = false;
+    mark_transport_reset();
 }
 
 bool connect_socket() {
     if (g_socket >= 0) return true;
-
     const std::string name = "vessel-ahb-" + std::to_string(getuid());
     int last_errno = 0;
-    for (int attempt = 0; attempt < 100; ++attempt) {
+    for (int attempt=0; attempt<100; ++attempt) {
         const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        if (fd < 0) {
-            loge("socket(AF_UNIX) failed errno=" + std::to_string(errno));
-            return false;
-        }
-
+        if (fd < 0) { loge("socket(AF_UNIX) failed errno=" + std::to_string(errno)); return false; }
         sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
-        if (name.size() + 1 >= sizeof(addr.sun_path)) {
-            close(fd);
-            loge("AHB socket name is too long");
-            return false;
-        }
+        if (name.size()+1 >= sizeof(addr.sun_path)) { close(fd); loge("AHB socket name too long"); return false; }
         addr.sun_path[0] = '\0';
-        memcpy(addr.sun_path + 1, name.data(), name.size());
-        const socklen_t len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + name.size());
+        memcpy(addr.sun_path+1, name.data(), name.size());
+        const socklen_t len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path)+1+name.size());
         if (connect(fd, reinterpret_cast<sockaddr*>(&addr), len) == 0) {
             g_socket = fd;
-            logi("connected presenter side channel name=" + name);
+            mark_transport_reset();
+            logi("connected pipelined presenter side channel name=" + name + " protocol=2 slots=3");
             return true;
         }
         last_errno = errno;
@@ -181,6 +190,46 @@ bool connect_socket() {
     return false;
 }
 
+bool handle_ack(const AckMessage& ack) {
+    if (ack.magic != MAGIC || ack.version != VERSION || ack.scanout_id >= MAX_SCANOUTS) {
+        loge("invalid presenter ACK header");
+        return false;
+    }
+    if (ack.slot >= FRAME_SLOTS) return ack.ok != 0;
+    auto& slot = g_scanouts[ack.scanout_id].slots[ack.slot];
+    if (slot.busy && slot.serial == ack.serial) {
+        slot.busy = false;
+        slot.serial = 0;
+    }
+    if (!ack.ok) loge("presenter rejected frame serial=" + std::to_string(ack.serial));
+    return ack.ok != 0;
+}
+
+bool receive_one_ack(bool block) {
+    if (g_socket < 0) return false;
+    pollfd pfd{g_socket, POLLIN, 0};
+    const int rc = poll(&pfd, 1, block ? -1 : 0);
+    if (rc < 0 && errno == EINTR) return receive_one_ack(block);
+    if (rc <= 0) return false;
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) { close_socket(); return false; }
+    AckMessage ack{};
+    if (!recv_all(g_socket, &ack, sizeof(ack))) { close_socket(); return false; }
+    return handle_ack(ack);
+}
+
+void drain_acks() {
+    while (g_socket >= 0) {
+        pollfd pfd{g_socket, POLLIN, 0};
+        const int rc = poll(&pfd, 1, 0);
+        if (rc <= 0 || !(pfd.revents & POLLIN)) break;
+        AckMessage ack{};
+        if (!recv_all(g_socket, &ack, sizeof(ack)) || !handle_ack(ack)) {
+            if (ack.ok == 0) logw("frame ACK reported failure");
+            if (g_socket < 0) break;
+        }
+    }
+}
+
 bool load_extensions() {
     if (g_get_native_client_buffer && g_create_image && g_destroy_image && g_image_target_texture) return true;
     g_get_native_client_buffer = reinterpret_cast<GetNativeClientBuffer>(eglGetProcAddress("eglGetNativeClientBufferANDROID"));
@@ -188,172 +237,93 @@ bool load_extensions() {
     g_destroy_image = reinterpret_cast<DestroyImage>(eglGetProcAddress("eglDestroyImageKHR"));
     g_image_target_texture = reinterpret_cast<ImageTargetTexture>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
     if (!g_get_native_client_buffer || !g_create_image || !g_destroy_image || !g_image_target_texture) {
-        loge(
-            "missing EGL/AHB entry point: getNative=" + std::to_string(g_get_native_client_buffer != nullptr) +
-            " createImage=" + std::to_string(g_create_image != nullptr) +
-            " destroyImage=" + std::to_string(g_destroy_image != nullptr) +
-            " imageTarget=" + std::to_string(g_image_target_texture != nullptr));
+        loge("missing EGL/AHB entry point");
         return false;
     }
     logi("loaded EGL_ANDROID_image_native_buffer entry points");
     return true;
 }
 
-void destroy_scanout(ScanoutState& state) {
+void destroy_slot(BufferSlot& slot) {
     const EGLDisplay display = eglGetCurrentDisplay();
-    if (state.draw_fbo != 0) glDeleteFramebuffers(1, &state.draw_fbo);
-    if (state.texture != 0) glDeleteTextures(1, &state.texture);
-    if (state.image != EGL_NO_IMAGE_KHR && display != EGL_NO_DISPLAY && g_destroy_image) {
-        g_destroy_image(display, state.image);
-    }
-    if (state.buffer) AHardwareBuffer_release(state.buffer);
+    if (slot.draw_fbo) glDeleteFramebuffers(1, &slot.draw_fbo);
+    if (slot.texture) glDeleteTextures(1, &slot.texture);
+    if (slot.image != EGL_NO_IMAGE_KHR && display != EGL_NO_DISPLAY && g_destroy_image) g_destroy_image(display, slot.image);
+    if (slot.buffer) AHardwareBuffer_release(slot.buffer);
+    slot = {};
+}
+
+void destroy_scanout(ScanoutState& state) {
+    for (auto& slot : state.slots) destroy_slot(slot);
     state = {};
 }
 
-int allocate_scanout(ScanoutState& state, uint32_t width, uint32_t height) {
-    if (state.buffer && state.width == width && state.height == height) return 0;
-    destroy_scanout(state);
-
-    logi("allocate scanout begin size=" + std::to_string(width) + "x" + std::to_string(height));
+int allocate_slot(BufferSlot& slot, uint32_t width, uint32_t height, uint32_t index) {
+    if (slot.buffer && slot.width == width && slot.height == height) return 0;
+    destroy_slot(slot);
     if (!load_extensions()) return RC_EXTENSIONS;
-
     const EGLDisplay display = eglGetCurrentDisplay();
     const EGLContext context = eglGetCurrentContext();
     if (display == EGL_NO_DISPLAY || context == EGL_NO_CONTEXT) {
-        loge(
-            "VirGL context is not current while creating AHB: display=" +
-            std::to_string(display != EGL_NO_DISPLAY) + " context=" +
-            std::to_string(context != EGL_NO_CONTEXT));
+        loge("VirGL EGL context not current while allocating slot=" + std::to_string(index));
         return RC_CONTEXT;
     }
-    logi("VirGL EGL display/context are current");
 
     AHardwareBuffer_Desc desc{};
-    desc.width = width;
-    desc.height = height;
-    desc.layers = 1;
+    desc.width = width; desc.height = height; desc.layers = 1;
     desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
     desc.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER;
+    if (!AHardwareBuffer_isSupported(&desc)) { loge("AHB descriptor unsupported"); return RC_AHB_ALLOC; }
+    const int alloc_rc = AHardwareBuffer_allocate(&desc, &slot.buffer);
+    if (alloc_rc != 0 || !slot.buffer) { loge("AHardwareBuffer_allocate failed rc=" + std::to_string(alloc_rc)); return RC_AHB_ALLOC; }
 
-    const int supported = AHardwareBuffer_isSupported(&desc);
-    logi(
-        "AHB descriptor format=RGBA8 usage=" + std::to_string(desc.usage) +
-        " supported=" + std::to_string(supported));
-
-    const int alloc_rc = AHardwareBuffer_allocate(&desc, &state.buffer);
-    if (alloc_rc != 0 || !state.buffer) {
-        loge("AHardwareBuffer_allocate failed rc=" + std::to_string(alloc_rc));
-        state.buffer = nullptr;
-        return RC_AHB_ALLOC;
-    }
-
-    AHardwareBuffer_Desc actual{};
-    AHardwareBuffer_describe(state.buffer, &actual);
-    logi(
-        "AHB allocated width=" + std::to_string(actual.width) +
-        " height=" + std::to_string(actual.height) +
-        " stride=" + std::to_string(actual.stride) +
-        " format=" + std::to_string(actual.format) +
-        " usage=" + std::to_string(actual.usage));
-
-    EGLClientBuffer client = g_get_native_client_buffer(state.buffer);
-    if (!client) {
-        loge("eglGetNativeClientBufferANDROID returned null");
-        destroy_scanout(state);
-        return RC_AHB_CLIENT;
-    }
-    logi("eglGetNativeClientBufferANDROID OK");
-
+    EGLClientBuffer client = g_get_native_client_buffer(slot.buffer);
+    if (!client) { destroy_slot(slot); return RC_AHB_CLIENT; }
     clear_egl_errors();
     const EGLint attrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
-    state.image = g_create_image(display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, client, attrs);
-    if (state.image == EGL_NO_IMAGE_KHR) {
-        const EGLint egl_error = eglGetError();
-        loge("eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID) failed eglError=" + hex_value(static_cast<uint32_t>(egl_error)));
-        destroy_scanout(state);
-        return RC_EGL_IMAGE;
+    slot.image = g_create_image(display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, client, attrs);
+    if (slot.image == EGL_NO_IMAGE_KHR) {
+        loge("eglCreateImageKHR failed eglError=" + hex_value(static_cast<uint32_t>(eglGetError())));
+        destroy_slot(slot); return RC_EGL_IMAGE;
     }
-    logi("eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID) OK");
 
-    GLint old_texture = 0;
-    GLint old_draw = 0;
+    GLint old_texture=0, old_draw=0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &old_texture);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw);
-
     clear_gl_errors();
-    glGenTextures(1, &state.texture);
-    glBindTexture(GL_TEXTURE_2D, state.texture);
+    glGenTextures(1, &slot.texture);
+    glBindTexture(GL_TEXTURE_2D, slot.texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    g_image_target_texture(GL_TEXTURE_2D, state.image);
-    const GLenum image_target_error = glGetError();
-    if (image_target_error != GL_NO_ERROR) {
-        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(old_texture));
-        loge("glEGLImageTargetTexture2DOES failed glError=" + hex_value(image_target_error));
-        destroy_scanout(state);
-        return RC_AHB_TEXTURE;
+    g_image_target_texture(GL_TEXTURE_2D, slot.image);
+    if (glGetError() != GL_NO_ERROR) { glBindTexture(GL_TEXTURE_2D, old_texture); destroy_slot(slot); return RC_AHB_TEXTURE; }
+    glGenFramebuffers(1, &slot.draw_fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, slot.draw_fbo);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, slot.texture, 0);
+    const GLenum status = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+    const GLenum err = glGetError();
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw);
+    glBindTexture(GL_TEXTURE_2D, old_texture);
+    if (status != GL_FRAMEBUFFER_COMPLETE || err != GL_NO_ERROR) {
+        loge("AHB destination FBO failed status=" + hex_value(status) + " glError=" + hex_value(err));
+        destroy_slot(slot); return RC_DST_FBO;
     }
-    logi("AHB EGLImage bound to GLES texture id=" + std::to_string(state.texture));
-
-    glGenFramebuffers(1, &state.draw_fbo);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state.draw_fbo);
-    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, state.texture, 0);
-    const GLenum fbo_status = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
-    const GLenum fbo_error = glGetError();
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(old_draw));
-    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(old_texture));
-    if (fbo_status != GL_FRAMEBUFFER_COMPLETE || fbo_error != GL_NO_ERROR) {
-        loge(
-            "AHB destination FBO failed status=" + hex_value(fbo_status) +
-            " glError=" + hex_value(fbo_error));
-        destroy_scanout(state);
-        return RC_DST_FBO;
-    }
-
-    state.width = width;
-    state.height = height;
-    state.handle_sent = false;
-    logi("AHB destination framebuffer complete fbo=" + std::to_string(state.draw_fbo));
+    slot.width = width; slot.height = height;
+    logi("allocated pipeline slot=" + std::to_string(index) + " size=" + std::to_string(width) + "x" + std::to_string(height));
     return 0;
 }
 
-int copy_resource(uint32_t resource_id, ScanoutState& state, bool verbose) {
+int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
     virgl_renderer_resource_info info{};
     const int info_rc = virgl_renderer_resource_get_info(static_cast<int>(resource_id), &info);
+    if (!info.tex_id) { loge("resource has no GL texture id=" + std::to_string(resource_id)); return RC_RESOURCE_INFO; }
+    if (info_rc != 0) logw("resource metadata rc=" + std::to_string(info_rc) + " ignored; tex_id is valid");
 
-    // virgl_renderer_resource_get_info fills tex_id before asking the EGL winsys
-    // for DRM-fourcc/export metadata. ANGLE can reject that metadata query even
-    // though the GL texture itself is completely valid. This AHB path only needs
-    // tex_id, so a non-zero metadata return is non-fatal when tex_id is present.
-    if (info.tex_id == 0) {
-        loge(
-            "resource info has no GL texture resource=" + std::to_string(resource_id) +
-            " infoRc=" + std::to_string(info_rc));
-        return RC_RESOURCE_INFO;
-    }
-    if (info_rc != 0) {
-        logw(
-            "resource metadata query returned rc=" + std::to_string(info_rc) +
-            " but tex_id=" + std::to_string(info.tex_id) +
-            " is valid; ignoring winsys/export metadata failure");
-    }
-    if (verbose) {
-        logi(
-            "VirGL resource=" + std::to_string(resource_id) +
-            " tex_id=" + std::to_string(info.tex_id) +
-            " size=" + std::to_string(info.width) + "x" + std::to_string(info.height) +
-            " format=" + std::to_string(info.virgl_format) +
-            " drm_fourcc=" + std::to_string(info.drm_fourcc) +
-            " infoRc=" + std::to_string(info_rc));
-    }
-
-    GLint old_read = 0;
-    GLint old_draw = 0;
+    GLint old_read=0, old_draw=0;
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw);
-
     clear_gl_errors();
-    GLuint read_fbo = 0;
+    GLuint read_fbo=0;
     glGenFramebuffers(1, &read_fbo);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
     glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, info.tex_id, 0);
@@ -361,168 +331,138 @@ int copy_resource(uint32_t resource_id, ScanoutState& state, bool verbose) {
     const GLenum read_status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
     const GLenum read_error = glGetError();
     if (read_status != GL_FRAMEBUFFER_COMPLETE || read_error != GL_NO_ERROR) {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(old_read));
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(old_draw));
-        glDeleteFramebuffers(1, &read_fbo);
-        loge(
-            "VirGL source FBO failed resource=" + std::to_string(resource_id) +
-            " tex_id=" + std::to_string(info.tex_id) +
-            " status=" + hex_value(read_status) +
-            " glError=" + hex_value(read_error));
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read); glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw); glDeleteFramebuffers(1,&read_fbo);
+        loge("VirGL source FBO failed status=" + hex_value(read_status) + " glError=" + hex_value(read_error));
         return RC_SRC_FBO;
     }
-    if (verbose) logi("VirGL source framebuffer complete");
-
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state.draw_fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, slot.draw_fbo);
     const GLenum draw_buffer = GL_COLOR_ATTACHMENT0;
     glDrawBuffers(1, &draw_buffer);
     clear_gl_errors();
-    glBlitFramebuffer(
-        static_cast<GLint>(state.x), static_cast<GLint>(state.y),
-        static_cast<GLint>(state.x + state.width), static_cast<GLint>(state.y + state.height),
-        0, 0, static_cast<GLint>(state.width), static_cast<GLint>(state.height),
-        GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBlitFramebuffer(static_cast<GLint>(x), static_cast<GLint>(y), static_cast<GLint>(x+width), static_cast<GLint>(y+height),
+                      0, 0, static_cast<GLint>(width), static_cast<GLint>(height), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    // Producer completion remains explicit. The three-slot ring removes the much larger
+    // producer<->presenter round-trip serialization without allowing Vulkan to read a slot
+    // while ANGLE is still writing it.
     glFinish();
     const GLenum blit_error = glGetError();
-
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(old_read));
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(old_draw));
-    glDeleteFramebuffers(1, &read_fbo);
-
-    if (blit_error != GL_NO_ERROR) {
-        loge(
-            "GPU blit VirGL->AHB failed resource=" + std::to_string(resource_id) +
-            " glError=" + hex_value(blit_error));
-        return RC_GPU_BLIT;
-    }
-    if (verbose) logi("GPU blit VirGL->AHB complete");
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read); glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw); glDeleteFramebuffers(1,&read_fbo);
+    if (blit_error != GL_NO_ERROR) { loge("GPU blit failed glError=" + hex_value(blit_error)); return RC_GPU_BLIT; }
     return 0;
 }
 
-int send_scanout(uint32_t scanout_id, ScanoutState& state) {
+int wait_for_free_slot(uint32_t scanout_id, ScanoutState& state) {
+    for (;;) {
+        drain_acks();
+        for (size_t n=0; n<FRAME_SLOTS; ++n) {
+            const uint32_t idx = (state.next_slot + static_cast<uint32_t>(n)) % FRAME_SLOTS;
+            if (!state.slots[idx].busy) { state.next_slot = (idx+1)%FRAME_SLOTS; return static_cast<int>(idx); }
+        }
+        if (!connect_socket() || !receive_one_ack(true)) {
+            if (g_socket < 0) continue;
+            loge("failed waiting for free AHB slot scanout=" + std::to_string(scanout_id));
+            return -1;
+        }
+    }
+}
+
+bool wait_scanout_idle(ScanoutState& state) {
+    for (;;) {
+        drain_acks();
+        bool busy=false;
+        for (const auto& slot : state.slots) busy = busy || slot.busy;
+        if (!busy) return true;
+        if (!connect_socket() || !receive_one_ack(true)) {
+            if (g_socket < 0) return true;
+            return false;
+        }
+    }
+}
+
+int send_frame(uint32_t scanout_id, uint32_t slot_index, ScanoutState& state) {
     if (!connect_socket()) return RC_SOCKET;
-    const AhbMessage message{MAGIC, VERSION, MSG_SCANOUT, scanout_id, state.width, state.height};
-    if (!send_all(g_socket, &message, sizeof(message))) {
-        loge("failed sending MSG_SCANOUT header errno=" + std::to_string(errno));
-        close_socket();
-        return RC_SOCKET;
+    auto& slot = state.slots[slot_index];
+    const uint32_t serial = state.next_serial++;
+    const bool needs_handle = !slot.registered;
+    AhbMessage msg{MAGIC, VERSION, needs_handle ? MSG_REGISTER_FRAME : MSG_FRAME, scanout_id, slot_index, serial, state.width, state.height};
+    if (!send_all(g_socket, &msg, sizeof(msg))) { close_socket(); return RC_SOCKET; }
+    if (needs_handle) {
+        const int rc = AHardwareBuffer_sendHandleToUnixSocket(slot.buffer, g_socket);
+        if (rc != 0) { loge("AHardwareBuffer_sendHandleToUnixSocket failed rc=" + std::to_string(rc)); close_socket(); return RC_SOCKET; }
+        slot.registered = true;
+        logi("registered AHB pipeline slot=" + std::to_string(slot_index) + " size=" + std::to_string(state.width) + "x" + std::to_string(state.height));
     }
-    const int handle_rc = AHardwareBuffer_sendHandleToUnixSocket(state.buffer, g_socket);
-    if (handle_rc != 0) {
-        loge("AHardwareBuffer_sendHandleToUnixSocket failed rc=" + std::to_string(handle_rc));
-        close_socket();
-        return RC_SOCKET;
+    slot.busy = true;
+    slot.serial = serial;
+
+    ++g_frame_count;
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(now-g_rate_started).count();
+    if (elapsed >= 2.0) {
+        logi("pipelined frame rate producer=" + std::to_string(static_cast<int>(g_frame_count/elapsed)) + " fps in_flight<=3");
+        g_frame_count = 0;
+        g_rate_started = now;
     }
-    if (!recv_ack(g_socket)) {
-        loge("presenter rejected or disconnected during MSG_SCANOUT ack errno=" + std::to_string(errno));
-        close_socket();
-        return RC_SOCKET;
-    }
-    state.handle_sent = true;
-    logi(
-        "AHB handle delivered to presenter scanout=" + std::to_string(scanout_id) +
-        " size=" + std::to_string(state.width) + "x" + std::to_string(state.height));
     return 0;
 }
 
-int send_update(uint32_t scanout_id, ScanoutState& state) {
-    if (!connect_socket()) return RC_SOCKET;
-    if (!state.handle_sent) return send_scanout(scanout_id, state);
-    const AhbMessage message{MAGIC, VERSION, MSG_UPDATE, scanout_id, state.width, state.height};
-    if (!send_all(g_socket, &message, sizeof(message)) || !recv_ack(g_socket)) {
-        logw("MSG_UPDATE failed; reconnecting presenter side channel");
-        close_socket();
-        if (!connect_socket()) return RC_SOCKET;
-        return send_scanout(scanout_id, state);
+int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+    auto& state = g_scanouts[scanout_id];
+    if (state.width != width || state.height != height) {
+        if (!wait_scanout_idle(state)) return RC_SOCKET;
+        destroy_scanout(state);
+        state.width = width; state.height = height; state.x = x; state.y = y;
+        logi("scanout resized to stable frame " + std::to_string(width) + "x" + std::to_string(height));
+    } else {
+        state.x=x; state.y=y;
     }
-    return 0;
+    const int idx = wait_for_free_slot(scanout_id, state);
+    if (idx < 0) return RC_SOCKET;
+    auto& slot = state.slots[static_cast<size_t>(idx)];
+    const int alloc_rc = allocate_slot(slot, width, height, static_cast<uint32_t>(idx));
+    if (alloc_rc) return alloc_rc;
+    const int copy_rc = copy_resource(resource_id, slot, x, y, width, height);
+    if (copy_rc) return copy_rc;
+    return send_frame(scanout_id, static_cast<uint32_t>(idx), state);
 }
 
 } // namespace
 
-extern "C" int vessel_ahb_set_scanout(
-    uint32_t resource_id,
-    uint32_t scanout_id,
-    uint32_t x,
-    uint32_t y,
-    uint32_t width,
-    uint32_t height) {
+extern "C" int vessel_ahb_set_scanout(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> guard(g_lock);
-    if (scanout_id >= MAX_SCANOUTS || width == 0 || height == 0) {
-        loge(
-            "invalid SET_SCANOUT resource=" + std::to_string(resource_id) +
-            " scanout=" + std::to_string(scanout_id) +
-            " rect=" + std::to_string(x) + "," + std::to_string(y) +
-            " " + std::to_string(width) + "x" + std::to_string(height));
-        return EINVAL;
-    }
-
-    logi(
-        "SET_SCANOUT resource=" + std::to_string(resource_id) +
-        " scanout=" + std::to_string(scanout_id) +
-        " rect=" + std::to_string(x) + "," + std::to_string(y) +
-        " " + std::to_string(width) + "x" + std::to_string(height));
-
-    auto& state = g_scanouts[scanout_id];
-    const int alloc_rc = allocate_scanout(state, width, height);
-    if (alloc_rc != 0) {
-        loge("SET_SCANOUT failed in allocate_scanout rc=" + std::to_string(alloc_rc));
-        return alloc_rc;
-    }
-
-    state.x = x;
-    state.y = y;
-    const int copy_rc = copy_resource(resource_id, state, true);
-    if (copy_rc != 0) {
-        loge("SET_SCANOUT failed in copy_resource rc=" + std::to_string(copy_rc));
-        return copy_rc;
-    }
-
-    const int send_rc = send_scanout(scanout_id, state);
-    if (send_rc != 0) {
-        loge("SET_SCANOUT failed delivering AHB rc=" + std::to_string(send_rc));
-        return send_rc;
-    }
-
-    logi("SET_SCANOUT complete resource=" + std::to_string(resource_id));
-    return 0;
+    if (scanout_id >= MAX_SCANOUTS || !width || !height) return EINVAL;
+    const int rc = submit_resource(resource_id, scanout_id, x, y, width, height);
+    if (rc) loge("SET_SCANOUT failed resource=" + std::to_string(resource_id) + " rc=" + std::to_string(rc));
+    return rc;
 }
 
 extern "C" int vessel_ahb_update(uint32_t resource_id, uint32_t scanout_id) {
     std::lock_guard<std::mutex> guard(g_lock);
     if (scanout_id >= MAX_SCANOUTS) return EINVAL;
     auto& state = g_scanouts[scanout_id];
-    if (!state.buffer || state.width == 0 || state.height == 0) return ENOENT;
-
-    const int copy_rc = copy_resource(resource_id, state, false);
-    if (copy_rc != 0) {
-        loge(
-            "UPDATE copy failed resource=" + std::to_string(resource_id) +
-            " scanout=" + std::to_string(scanout_id) +
-            " rc=" + std::to_string(copy_rc));
-        return copy_rc;
-    }
-    const int send_rc = send_update(scanout_id, state);
-    if (send_rc != 0) {
-        loge(
-            "UPDATE send failed resource=" + std::to_string(resource_id) +
-            " scanout=" + std::to_string(scanout_id) +
-            " rc=" + std::to_string(send_rc));
-    }
-    return send_rc;
+    if (!state.width || !state.height) return ENOENT;
+    const int rc = submit_resource(resource_id, scanout_id, state.x, state.y, state.width, state.height);
+    if (rc) loge("UPDATE failed resource=" + std::to_string(resource_id) + " rc=" + std::to_string(rc));
+    return rc;
 }
 
 extern "C" int vessel_ahb_disable(uint32_t scanout_id) {
     std::lock_guard<std::mutex> guard(g_lock);
     if (scanout_id >= MAX_SCANOUTS) return EINVAL;
-    logi("DISABLE scanout=" + std::to_string(scanout_id));
+    auto& state = g_scanouts[scanout_id];
+    wait_scanout_idle(state);
     if (connect_socket()) {
-        const AhbMessage message{MAGIC, VERSION, MSG_DISABLE, scanout_id, 0, 0};
-        if (!send_all(g_socket, &message, sizeof(message)) || !recv_ack(g_socket)) {
-            logw("DISABLE presenter ack failed");
-            close_socket();
-        }
+        const uint32_t serial = state.next_serial++;
+        const AhbMessage msg{MAGIC, VERSION, MSG_DISABLE, scanout_id, UINT32_MAX, serial, 0, 0};
+        if (send_all(g_socket, &msg, sizeof(msg))) {
+            for (;;) {
+                AckMessage ack{};
+                if (!recv_all(g_socket, &ack, sizeof(ack))) { close_socket(); break; }
+                if (ack.magic==MAGIC && ack.version==VERSION && ack.serial==serial && ack.slot==UINT32_MAX) break;
+                handle_ack(ack);
+            }
+        } else close_socket();
     }
-    destroy_scanout(g_scanouts[scanout_id]);
+    destroy_scanout(state);
     return 0;
 }
