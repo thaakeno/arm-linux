@@ -274,7 +274,7 @@ class VesselActivity : ComponentActivity() {
             Text("Machine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Metric(Icons.Default.Memory, "Memory", "${if (state.guestMemoryMb > 0) state.guestMemoryMb else 4096} MiB UML guest · 6 vCPUs")
+                    Metric(Icons.Default.Memory, "Memory", "${if (state.guestMemoryMb > 0) state.guestMemoryMb else 4096} MiB UML guest · ${VesselRuntimeController.UML_VCPUS} vCPU")
                     Metric(Icons.Default.DesktopWindows, "Desktop", "${state.guestDisplayWidth} × ${state.guestDisplayHeight} · stable landscape")
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                     Metric(Icons.Default.DesktopWindows, "Android Surface", state.presenterStatus)
@@ -573,7 +573,7 @@ class VesselActivity : ComponentActivity() {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Performance", fontWeight = FontWeight.SemiBold)
                     Metric(Icons.Default.Memory, "Guest RAM", if (stats.guestRamTotalMb > 0) "${stats.guestRamUsedMb} / ${stats.guestRamTotalMb} MiB used" else "${state.guestMemoryMb} MiB allocated")
-                    Metric(Icons.Default.Bolt, "CPU", "${stats.vcpus} UML vCPUs")
+                    Metric(Icons.Default.Bolt, "CPU", "${stats.vcpus} UML vCPU")
                     Metric(Icons.Default.DesktopWindows, "Display", "${state.guestDisplayWidth} × ${state.guestDisplayHeight} stable landscape · up to 120 Hz")
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                 }
@@ -591,7 +591,7 @@ class VesselActivity : ComponentActivity() {
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Runtime", fontWeight = FontWeight.SemiBold)
-                    Metric(Icons.Default.Bolt, "Protocol", "39 · ${state.runtimeRevision}")
+                    Metric(Icons.Default.Bolt, "Vessel", "${BuildConfig.VERSION_NAME} · ${state.runtimeRevision}")
                     Metric(Icons.Default.DesktopWindows, "Transport", state.displayTransport)
                     Metric(Icons.Default.DesktopWindows, "Presenter", state.presenterStatus)
                     Metric(Icons.Default.Storage, "Machine", state.machinePath)
