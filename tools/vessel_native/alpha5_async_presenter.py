@@ -200,8 +200,8 @@ replace_once(
 service = "app/src/main/java/com/example/dreamlinux/VmSessionService.kt"
 replace_once(
     service,
-    "printf '%s\\\\n' 'export MOZ_X11_EGL=1' >/etc/profile.d/vessel-gpu.sh",
-    "printf '%s\\\\n' 'unset MOZ_X11_EGL' 'export MOZ_WEBRENDER=1' >/etc/profile.d/vessel-gpu.sh",
+    "printf '%s\\n' 'export MOZ_X11_EGL=1' >/etc/profile.d/vessel-gpu.sh",
+    "printf '%s\\n' 'unset MOZ_X11_EGL' 'export MOZ_WEBRENDER=1' >/etc/profile.d/vessel-gpu.sh",
 )
 
 print("[alpha5] penta-buffered nonblocking AHB presentation + Firefox X11 EGL escape hatch applied")
