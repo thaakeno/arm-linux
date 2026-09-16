@@ -109,3 +109,12 @@ runpy.run_path(str(next_patch), run_name="__main__")
 compile_fix = Path(__file__).with_name("alpha11_ci_compile_fix.py")
 sys.argv = [str(compile_fix), str(ROOT)]
 runpy.run_path(str(compile_fix), run_name="__main__")
+
+# Alpha12 fixes the physical-device post-audio boot hang. It must run after
+# Alpha10 has introduced the guest control-agent bootstrap and after Alpha11 has
+# repaired the generated source. The previous commit added Alpha12 but never
+# chained it into the build, so shipped APKs still used the old 20-second
+# `nohup ... &` tty transaction.
+control_fix = Path(__file__).with_name("alpha12_control_agent_bootstrap_fix.py")
+sys.argv = [str(control_fix), str(ROOT)]
+runpy.run_path(str(control_fix), run_name="__main__")
