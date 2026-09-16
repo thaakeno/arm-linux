@@ -10,11 +10,12 @@ target_compile_features(dev1_payload PRIVATE cxx_std_17)
 target_compile_options(dev1_payload PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(dev1_payload PRIVATE dl)
 
-# The presenter owns two same-UID host channels. The standard vhost-user-gpu
-# frontend remains responsible for display metadata/cursor control. VirGL
-# scanout content is shared through Android HardwareBuffer handles and imported
-# directly into Vulkan. There is intentionally no CPU RGB/VNC transport or
-# guest-networking input fallback.
+# The presenter owns two same-UID host channels. Standard vhost-user-gpu keeps
+# display metadata/cursor control, while the scanout path imports AHardwareBuffer
+# into EGL/GLES and presents it straight to Android's native Surface BufferQueue.
+# vessel_native_presenter.cpp still uses Android Vulkan symbols for the legacy
+# control/cursor frontend, so keep the platform define/library without using a
+# Vulkan swapchain in the new scanout presenter.
 add_library(vessel_wayland_presenter SHARED
     vessel_native_presenter.cpp
     vessel_surface_presenter.cpp
@@ -22,7 +23,8 @@ add_library(vessel_wayland_presenter SHARED
 )
 target_compile_features(vessel_wayland_presenter PRIVATE cxx_std_17)
 target_compile_options(vessel_wayland_presenter PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers -Wno-misleading-indentation -Wno-unused-function)
-target_link_libraries(vessel_wayland_presenter PRIVATE android log EGL GLESv3)
+target_compile_definitions(vessel_wayland_presenter PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
+target_link_libraries(vessel_wayland_presenter PRIVATE android log EGL GLESv3 vulkan)
 
 # Loaded into vhost-device-gpu before virglrenderer. Termux's Android libepoxy
 # exposes epoxy_set_library_path(); this selects the ANGLE DSOs packaged next
