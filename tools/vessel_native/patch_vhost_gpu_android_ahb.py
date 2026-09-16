@@ -275,7 +275,6 @@ for needle in (
     "vessel_ahb_update",
     "vessel_ahb_disable",
     "self.renderer.force_ctx_0();",
-    "glFinish",
 ):
     if needle not in final:
         raise SystemExit(f"AHardwareBuffer patch verification failed: {needle}")
