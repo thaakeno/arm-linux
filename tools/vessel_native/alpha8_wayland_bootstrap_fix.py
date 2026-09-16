@@ -103,3 +103,9 @@ print("[alpha8] live Wayland overrides folded into prep; Python detached dispatc
 next_patch = Path(__file__).with_name("alpha9_wayland_single_rpc.py")
 sys.argv = [str(next_patch), str(ROOT)]
 runpy.run_path(str(next_patch), run_name="__main__")
+
+# Alpha9 chains Alpha10. Run the small compile-integrity repair only after that
+# finalizer, because Alpha10 intentionally rewrites the experiment config.
+compile_fix = Path(__file__).with_name("alpha11_ci_compile_fix.py")
+sys.argv = [str(compile_fix), str(ROOT)]
+runpy.run_path(str(compile_fix), run_name="__main__")
