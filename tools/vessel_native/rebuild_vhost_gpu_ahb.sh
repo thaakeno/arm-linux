@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 python3 "$ROOT/tools/vessel_native/alpha4_experiment_lab.py" "$ROOT"
+python3 "$ROOT/tools/vessel_native/alpha5_async_presenter.py" "$ROOT"
 NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
 [ -n "$NDK" ] || { echo "ANDROID_NDK_HOME is required" >&2; exit 2; }
 TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
@@ -153,6 +154,8 @@ VIRGL_PACKAGE="$(tail -1 "$WORK/pkg-meta/virglrenderer-android.txt" 2>/dev/null 
   echo experiment_lab=v1
   echo experiment_vcpus=1,2,4,6
   echo display_y_flip=runtime-selectable-default-on
+  echo presenter_slots=5
+  echo presenter_backpressure=drop-nonblocking
 } > "$MANIFEST"
 
 echo "[vessel-ahb] resource-scoped synchronized Android HardwareBuffer runtime ready"
