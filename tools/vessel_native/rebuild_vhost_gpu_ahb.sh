@@ -19,7 +19,7 @@ CARGO_TARGET_DIR="$WORK/vhost-device-target"
 [ -d "$INCLUDE_ROOT/virgl" ] || exit 2
 mkdir -p "$CARGO_TARGET_DIR"
 
-echo "[vessel-ahb] building GPU-only Android HardwareBuffer bridge"
+echo "[vessel-ahb] building synchronized GPU-only Android HardwareBuffer bridge"
 CXX="$TOOLCHAIN/bin/aarch64-linux-android29-clang++"
 NM="$TOOLCHAIN/bin/llvm-nm"
 "$CXX" --sysroot="$TOOLCHAIN/sysroot" -std=c++17 -fPIC -shared \
@@ -31,12 +31,8 @@ NM="$TOOLCHAIN/bin/llvm-nm"
   -o "$OUT/libvessel_ahb_bridge.so"
 patchelf --set-rpath '$ORIGIN' "$OUT/libvessel_ahb_bridge.so"
 
-# VirGL itself dispatches through the bundled libepoxy -> ANGLE path. The AHB
-# bridge used to call raw EGL/GLES symbols without linking the ANGLE DSOs, so
-# Android resolved those calls through a different EGL implementation and
-# eglGetCurrentDisplay()/eglGetCurrentContext() returned EGL_NO_DISPLAY /
-# EGL_NO_CONTEXT even though VirGL's ANGLE context was current. Require the
-# bridge to bind to the exact same bundled ANGLE libraries as VirGL.
+# VirGL and the bridge must dispatch through the exact same bundled ANGLE
+# implementation so shared GL contexts, textures and GLsync objects are valid.
 BRIDGE_NEEDED="$(patchelf --print-needed "$OUT/libvessel_ahb_bridge.so")"
 grep -Fx 'libEGL_angle.so' <<<"$BRIDGE_NEEDED" >/dev/null
 grep -Fx 'libGLESv2_angle.so' <<<"$BRIDGE_NEEDED" >/dev/null
@@ -51,16 +47,22 @@ for sym in eglGetCurrentDisplay eglGetCurrentContext eglGetError eglGetProcAddre
     exit 5
   }
 done
-for sym in glBindFramebuffer glBlitFramebuffer glCheckFramebufferStatus glFinish glGenFramebuffers glGetError; do
+for sym in glBindFramebuffer glBlitFramebuffer glCheckFramebufferStatus glFenceSync glWaitSync glDeleteSync glFlush glGenFramebuffers glGetError; do
   "$NM" -D "$OUT/libGLESv2_angle.so" | grep -E " [TW] ${sym}$" >/dev/null || {
     echo "bundled ANGLE GLES is missing $sym" >&2
     exit 5
   }
 done
-echo "[vessel-ahb] bridge EGL/GLES dispatch pinned to bundled ANGLE"
+if grep -Eq '\bglFinish[[:space:]]*\(' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"; then
+  echo "synchronous glFinish survived in the frame hot path" >&2
+  exit 5
+fi
+grep -Fq 'eglDupNativeFenceFDANDROID' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
+grep -Fq 'glFenceSync' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
+grep -Fq 'glWaitSync' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
+echo "[vessel-ahb] bridge pinned to ANGLE with GL context sync + Android native fence FDs"
 
-# Catch the exact Android runtime failure r4 exposed: the C virglrenderer API
-# must remain an unmangled C symbol when referenced from our C++ bridge.
+# Catch C/C++ ABI mismatches around virglrenderer.
 "$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge.so" | grep -F 'virgl_renderer_resource_get_info' >/dev/null
 if "$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge.so" | grep -F '_Z32virgl_renderer_resource_get_info' >/dev/null; then
   echo "AHardwareBuffer bridge references C++-mangled virgl_renderer_resource_get_info" >&2
@@ -68,9 +70,8 @@ if "$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge.so" | grep -F '_Z32virgl
 fi
 "$NM" -D "$OUT/libvessel_virglrenderer.so" | grep -F 'virgl_renderer_resource_get_info' >/dev/null
 
-# Rebuild vhost-device-gpu from its pinned source with the Android-native
-# scanout path. The normal vhost-user-gpu side channel stays active for EDID
-# and cursor messages; only the scanout payload transport changes.
+# Rebuild pinned rust-vmm vhost-device-gpu. Standard vhost-user display remains
+# for EDID/cursor metadata; scanout pixels use the synchronized AHB transport.
 git -C "$VHOST" reset --hard 20fa14c4c56e40a12104794a934dd70dc7642ff2
 git -C "$VHOST" clean -ffd
 python3 - "$VHOST/vhost-device-gpu/src/device.rs" "$VHOST/vhost-device-gpu/src/backend/virgl.rs" <<'PY'
@@ -88,7 +89,8 @@ if s.count(old)!=1: raise SystemExit('unexpected VirGL flags layout')
 vir.write_text(s.replace(old,new,1))
 PY
 python3 "$ROOT/tools/vessel_native/patch_vhost_gpu_android_ahb.py" "$VHOST"
-grep -Fq 'VESSEL_ANDROID_AHB_SCANOUT_V1' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
+grep -Fq 'VESSEL_ANDROID_AHB_SCANOUT_V2' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
+grep -Fq 'vessel_ahb_note_submit' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
 grep -Fq 'vessel_ahb_set_scanout' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
 ! grep -A100 'fn set_scanout' "$VHOST/vhost-device-gpu/src/backend/virgl.rs" | head -100 | grep -q 'export_resource_dmabuf'
 
@@ -121,26 +123,23 @@ VHOST_NEEDED="$(patchelf --print-needed "$OUT/libvessel_vhost_gpu.so")"
 grep -F 'libvessel_ahb_bridge.so' <<<"$VHOST_NEEDED" >/dev/null
 strings "$OUT/libvessel_vhost_gpu.so" | grep -F 'Vessel Android HardwareBuffer scanout' >/dev/null
 
-# Recreate the runtime manifest from the actual files every build. The fast
-# native cache intentionally does not cache app assets, so relying on an old
-# runtime-build.txt made cached builds fail before Gradle even started.
 MANIFEST="$ROOT/app/src/main/assets/vessel/runtime-build.txt"
 mkdir -p "$(dirname "$MANIFEST")"
 ANGLE_PACKAGE="$(tail -1 "$WORK/pkg-meta/angle-android.txt" 2>/dev/null || echo cached)"
 VIRGL_PACKAGE="$(tail -1 "$WORK/pkg-meta/virglrenderer-android.txt" 2>/dev/null || echo cached)"
 {
   echo protocol=39
-  echo runtime=v39-self-contained-ahb-virtio-input-r4
+  echo runtime=v39-self-contained-ahb-syncfd-virtio-input-r5
   echo "kernel_sha256=$(sha256sum "$OUT/libvessel_uml.so" | awk '{print $1}')"
   echo "vhost_gpu_sha256=$(sha256sum "$OUT/libvessel_vhost_gpu.so" | awk '{print $1}')"
   echo "vhost_input_sha256=$(sha256sum "$OUT/libvessel_vhost_input.so" | awk '{print $1}')"
   echo "angle_package=$ANGLE_PACKAGE"
   echo "virgl_package=$VIRGL_PACKAGE"
   echo rootfs=external:Download/LinuxPC/Vessel-Debian/debian-docker.ext4
-  echo display_bridge=android-hardware-buffer-zero-copy-v1
+  echo display_bridge=android-hardware-buffer-syncfd-v1
 } > "$MANIFEST"
 
-echo "[vessel-ahb] Android HardwareBuffer runtime ready"
+echo "[vessel-ahb] synchronized Android HardwareBuffer runtime ready"
 file "$OUT/libvessel_ahb_bridge.so" "$OUT/libvessel_vhost_gpu.so"
 patchelf --print-needed "$OUT/libvessel_ahb_bridge.so"
 patchelf --print-needed "$OUT/libvessel_vhost_gpu.so"
