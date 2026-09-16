@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "app/src/main/java/com/example/dreamlinux/VesselExperimentConfig.kt"
 AGENT = ROOT / "app/src/main/java/com/example/dreamlinux/VesselGuestAgent.kt"
+ACTIVITY = ROOT / "app/src/main/java/com/example/dreamlinux/VesselActivity.kt"
 
 config = CONFIG.read_text()
 if "fun desktopBackend(context: Context)" not in config:
@@ -25,4 +26,21 @@ if new not in agent:
     agent = agent.replace(old, new, 1)
     AGENT.write_text(agent)
 
-print("[alpha11] restored Wayland experiment API after stable-profile rewrite + fixed guest-agent return typing")
+# Alpha10 used BoxWithConstraints for the normal display viewport but does not
+# consume min/maxWidth or min/maxHeight from that scope. Compose lint treats
+# that wasted subcomposition as an error. A normal Box has identical behavior
+# here and is cheaper.
+activity = ACTIVITY.read_text()
+activity = activity.replace(
+    "import androidx.compose.foundation.layout.BoxWithConstraints\n",
+    "",
+)
+box_old = "                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {\n"
+box_new = "                Box(Modifier.weight(1f).fillMaxWidth()) {\n"
+if box_old in activity:
+    activity = activity.replace(box_old, box_new, 1)
+elif box_new not in activity:
+    raise SystemExit("alpha11: fullscreen viewport BoxWithConstraints anchor missing")
+ACTIVITY.write_text(activity)
+
+print("[alpha11] restored experiment API, fixed guest-agent return typing, and cleared fullscreen Compose lint")
