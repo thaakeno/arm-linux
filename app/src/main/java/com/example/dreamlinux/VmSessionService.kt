@@ -59,7 +59,7 @@ data class MachineStats(
     val diskVirtualMb: Long = 0,
     val diskPhysicalMb: Long = 0,
     val hostFreeMb: Long = 0,
-    val vcpus: Int = 6,
+    val vcpus: Int = 1,
     val loading: Boolean = false,
     val error: String = "",
 )
@@ -84,8 +84,8 @@ data class SessionState(
     val presenterStatus: String = "not-started",
     val rendererMode: String = "virgl-opengl",
     val translationLayer: String = "VirGL",
-    val displayTransport: String = "vhost-user-gpu-ahardwarebuffer-syncfd-v1",
-    val runtimeRevision: String = "v39-self-contained-ahb-syncfd-virtio-input-r5",
+    val displayTransport: String = "vhost-user-gpu-ahardwarebuffer-syncfd-v2",
+    val runtimeRevision: String = "v39-self-contained-ahb-syncfd-virtio-input-r6",
     val machinePath: String = "Download/LinuxPC/Vessel-Debian",
     val internetStage: String = "UML vector net · passt",
     val uptimeMs: Long = 0L,
@@ -113,14 +113,17 @@ class VmSessionService : Service() {
             "gwenview" to "Gwenview",
             "kcalc" to "KCalc",
             "systemsettings" to "System Settings",
+            "kate" to "Kate",
+            "libreoffice-writer" to "LibreOffice Writer",
+            "vlc" to "VLC",
         )
         private val DESKTOP_RUNTIME_PACKAGES = listOf(
-            "plasma-workspace", "plasma-desktop", "kwin-x11", "systemsettings",
-            "qml-module-org-kde-qqc2desktopstyle", "qml-module-org-kde-kirigami2",
-            "qml-module-qtquick-controls2", "qml-module-qtquick-layouts", "qml-module-qtquick2",
-            "breeze", "breeze-icon-theme", "hicolor-icon-theme", "desktop-file-utils",
-            "xdg-user-dirs", "shared-mime-info", "appstream", "fonts-noto-core", "fonts-dejavu-core",
-            "plasma-workspace-wallpapers",
+            "kde-plasma-desktop", "plasma-workspace", "plasma-desktop", "plasma-framework", "kwin-x11", "systemsettings",
+            "qml-module-org-kde-qqc2desktopstyle", "qml-module-org-kde-kirigami2", "qml-module-org-kde-kitemmodels",
+            "qml-module-org-kde-kquickcontrolsaddons", "qml-module-qtquick-controls2", "qml-module-qtquick-layouts",
+            "qml-module-qtquick-window2", "qml-module-qtquick2", "breeze", "breeze-icon-theme", "hicolor-icon-theme",
+            "desktop-file-utils", "xdg-user-dirs", "shared-mime-info", "menu", "appstream", "python3-yaml",
+            "fonts-noto-core", "fonts-noto-color-emoji", "fonts-dejavu-core", "fonts-liberation", "plasma-workspace-wallpapers",
         )
         val APP_SORTS = listOf("POPULAR", "NEW", "INSTALLED", "SIZE", "AZ")
         val APP_CATEGORIES = listOf("All", "Internet", "Office", "Media", "Graphics", "Utilities", "Games", "Development", "Other")
@@ -223,8 +226,8 @@ class VmSessionService : Service() {
             hostAssetsReady = assets,
             machinePath = runtime.machineDir.absolutePath,
             guestMemoryMb = runtime.guestMemoryMb,
-            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r5",
-            displayTransport = "vhost-user-gpu-ahardwarebuffer-syncfd-v1",
+            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r6",
+            displayTransport = "vhost-user-gpu-ahardwarebuffer-syncfd-v2",
             guestDisplayWidth = guestWidth,
             guestDisplayHeight = guestHeight,
             message = when {
@@ -255,8 +258,8 @@ class VmSessionService : Service() {
             graphics = "KDE Plasma/Xorg → Mesa VirGL → vhost-device-gpu → virglrenderer → ANGLE/Vulkan → Adreno",
             rendererMode = o.optString("rendererMode", state.value.rendererMode),
             translationLayer = o.optString("translationLayer", state.value.translationLayer),
-            displayTransport = "vhost-user-gpu-ahardwarebuffer-syncfd-v1",
-            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r5",
+            displayTransport = "vhost-user-gpu-ahardwarebuffer-syncfd-v2",
+            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r6",
             guestMemoryMb = o.optInt("guestMemoryMb", state.value.guestMemoryMb),
             guestDisplayWidth = o.optInt("displayWidth", guestWidth),
             guestDisplayHeight = o.optInt("displayHeight", guestHeight),
@@ -277,7 +280,7 @@ class VmSessionService : Service() {
         runCatching { runtime.status() }.onSuccess(::applyState)
     }
 
-    /** Surface dimensions are presentation-only; never push transient Compose sizes into XRandR. */
+    /** Surface dimensions are presentation-only; the native presenter owns swapchain resizing. */
     fun configureDisplay(width: Int, height: Int, densityDpi: Int, rate: Float) {
         if (width <= 0 || height <= 0 || densityDpi <= 0 || rate <= 0f) return
     }
@@ -364,38 +367,41 @@ class VmSessionService : Service() {
                 "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
                     "mkdir -p /usr/sbin; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; " +
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --no-install-recommends $missing && " +
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y $missing && " +
                     "dpkg --configure -a && apt-get clean",
                 2400,
             )
             check(install.optBoolean("ok")) { "Workstation package installation failed; see Runtime log" }
         }
         if (op != operationGeneration) return
-        state.value = state.value.copy(progressPercent = 97, progressDetail = "Rebuilding Plasma, icon and AppStream caches")
+        state.value = state.value.copy(progressPercent = 97, progressDetail = "Rebuilding Plasma and icon caches")
         val cache = runtime.guest(
             """
             set -e
             install -d -o vessel -g vessel /home/vessel/Desktop /home/vessel/.config
+            install -d -m 755 /var/cache/vessel
+            rm -f /var/cache/vessel/app-catalog-v2.json
             printf '%s\n' 'export MOZ_X11_EGL=1' >/etc/profile.d/vessel-gpu.sh
             chmod 0644 /etc/profile.d/vessel-gpu.sh
             update-desktop-database /usr/share/applications 2>/dev/null || true
             update-mime-database /usr/share/mime 2>/dev/null || true
             gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
             gtk-update-icon-cache -f -t /usr/share/icons/breeze 2>/dev/null || true
-            appstreamcli refresh-cache --force 2>/dev/null || true
             uid=${'$'}(id -u vessel)
             su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid xdg-user-dirs-update" 2>/dev/null || true
             su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" 2>/dev/null || true
-            for f in firefox-esr org.kde.konsole systemsettings; do
+            for f in firefox-esr org.kde.konsole org.kde.dolphin systemsettings; do
               src=/usr/share/applications/${'$'}f.desktop
               [ -f "${'$'}src" ] && install -m 755 -o vessel -g vessel "${'$'}src" /home/vessel/Desktop/ || true
             done
+            test -x /usr/bin/systemsettings || test -x /usr/bin/systemsettings5
+            test -d /usr/share/icons/breeze
+            test -f /etc/xdg/menus/plasma-applications.menu
             echo VESSEL_WORKSTATION_READY
             """.trimIndent(),
             180,
         )
-        check(cache.optBoolean("ok")) { "Desktop cache repair failed; see Runtime log" }
+        check(cache.optBoolean("ok")) { "Desktop cache validation failed; see Runtime log" }
     }
 
     private suspend fun ensureDesktopProfile(op: Long) {
@@ -403,34 +409,43 @@ class VmSessionService : Service() {
         state.value = state.value.copy(
             stage = "desktop_profile",
             progressPercent = 98,
-            progressDetail = "Finishing Plasma desktop profile",
+            progressDetail = "Validating Plasma desktop profile",
             message = "Finishing desktop setup",
         )
         val profile = runtime.guest(
             """
-            marker=/home/vessel/.config/.vessel-p39-workstation-v2
+            set -e
+            marker=/home/vessel/.config/.vessel-p39-workstation-v3
+            uid=${'$'}(id -u vessel)
+            test -d /usr/share/icons/breeze
+            test -f /etc/xdg/menus/plasma-applications.menu
+            test -x /usr/bin/systemsettings || test -x /usr/bin/systemsettings5
             if [ ! -e "${'$'}marker" ]; then
               install -d -m 700 -o vessel -g vessel /home/vessel/.config
-              pkill -u vessel -x plasmashell 2>/dev/null || true
               rm -f /home/vessel/.config/plasma-org.kde.plasma.desktop-appletsrc
-              su -l vessel -c 'lookandfeeltool -a org.kde.breeze.desktop >/tmp/vessel-lookandfeel.log 2>&1 || true'
-              uid=${'$'}(id -u vessel)
-              su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" >/tmp/vessel-sycoca.log 2>&1 || true
-              touch "${'$'}marker"
-              chown vessel:vessel "${'$'}marker"
+              su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" >/tmp/vessel-sycoca.log 2>&1
               pkill -u vessel -f '[s]tartplasma-x11' 2>/dev/null || true
               pkill -u vessel -x plasma_session 2>/dev/null || true
               pkill -u vessel -x ksmserver 2>/dev/null || true
               pkill -u vessel -x kded5 2>/dev/null || true
+              pkill -u vessel -x plasmashell 2>/dev/null || true
               pkill -u vessel -x kwin_x11 2>/dev/null || true
               sleep .5
-              nohup su -l vessel -c "DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/${'$'}(id -u vessel) MOZ_X11_EGL=1 dbus-run-session -- /usr/local/bin/vessel-plasma-session" >/tmp/vessel-plasma-profile.log 2>&1 </dev/null &
+              nohup su -l vessel -c "DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/${'$'}uid MOZ_X11_EGL=1 dbus-run-session -- /usr/local/bin/vessel-plasma-session" >/tmp/vessel-plasma-profile.log 2>&1 </dev/null &
+              ready=0
+              for i in ${'$'}(seq 1 100); do
+                if pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_x11 >/dev/null; then ready=1; break; fi
+                sleep .1
+              done
+              test "${'$'}ready" = 1
+              touch "${'$'}marker"
+              chown vessel:vessel "${'$'}marker"
             fi
             echo VESSEL_PROFILE_READY
             """.trimIndent(),
             60,
         )
-        if (!profile.optBoolean("ok")) throw IllegalStateException("Plasma profile setup failed; see Runtime log")
+        if (!profile.optBoolean("ok")) throw IllegalStateException("Plasma profile validation failed; see Runtime log")
     }
 
     fun stopVm() {
@@ -500,7 +515,8 @@ class VmSessionService : Service() {
                 "printf '\\n=== INPUT ===\\n'; grep -E 'Name=\"Vessel (Trackpad|Touchscreen|Keyboard)\"' /proc/bus/input/devices 2>&1; " +
                 "printf '\\n=== XINPUT ===\\n'; xinput list 2>&1; " +
                 "printf '\\n=== PLASMA ===\\n'; ps -ef | grep -E 'kwin|plasmashell|Xorg' | grep -v grep 2>&1; " +
-                "printf '\\n=== MEMORY ===\\n'; free -m 2>&1",
+                "printf '\\n=== MEMORY ===\\n'; free -m 2>&1; " +
+                "printf '\\n=== TIMER/RCU ===\\n'; dmesg 2>&1 | grep -Ei 'rcu.*stall|timer handling|starved' | tail -40",
         )
     }
 
@@ -508,7 +524,7 @@ class VmSessionService : Service() {
         val bytes = assets.open("vessel/app_discovery.py").use { it.readBytes() }
         val b64 = Base64.getEncoder().encodeToString(bytes)
         val result = runtime.guest(
-            "install -d -m 755 /usr/local/lib/vessel; printf '%s' ${shellQuote(b64)} | base64 -d >/usr/local/lib/vessel/app_discovery.py; chmod 755 /usr/local/lib/vessel/app_discovery.py",
+            "install -d -m 755 /usr/local/lib/vessel /var/cache/vessel; printf '%s' ${shellQuote(b64)} | base64 -d >/usr/local/lib/vessel/app_discovery.py; chmod 755 /usr/local/lib/vessel/app_discovery.py",
             30,
         )
         check(result.optBoolean("ok")) { "Could not install Vessel AppStream helper" }
@@ -527,7 +543,7 @@ class VmSessionService : Service() {
                 installDiscoveryHelper()
                 val result = runtime.guest(
                     "/usr/local/lib/vessel/app_discovery.py ${shellQuote(query)} ${shellQuote(normalizedSort)} ${shellQuote(normalizedCategory)}",
-                    180,
+                    90,
                 )
                 check(result.optBoolean("ok")) { "AppStream discovery returned rc=${result.optInt("rc", -1)}" }
                 val apps = parseApps(result.optString("output"))
@@ -556,8 +572,8 @@ class VmSessionService : Service() {
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 remove -y ${shellQuote(packageName)}"
                 }
                 val result = runtime.guest(
-                    "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; mkdir -p /usr/sbin; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; $action; " +
-                        "update-desktop-database /usr/share/applications 2>/dev/null || true; appstreamcli refresh-cache --force 2>/dev/null || true; " +
+                    "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; mkdir -p /usr/sbin /var/cache/vessel; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; $action; " +
+                        "update-desktop-database /usr/share/applications 2>/dev/null || true; rm -f /var/cache/vessel/app-catalog-v2.json; " +
                         "su -l vessel -c 'kbuildsycoca5 --noincremental' 2>/dev/null || true",
                     1800,
                 )
@@ -640,7 +656,7 @@ class VmSessionService : Service() {
                     diskVirtualMb = host.first,
                     diskPhysicalMb = host.second,
                     hostFreeMb = host.third,
-                    vcpus = 6,
+                    vcpus = 1,
                 )
             } catch (t: Throwable) {
                 val host = hostDiskStats()
