@@ -17,21 +17,13 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 text = CONTROLLER.read_text()
 
-# Debian bookworm ships KWin 5.27.  kwin-wayland itself does not guarantee that
-# the DRM backend is the selected/installed backend in every package state, so
-# make the native DRM backend an explicit Vessel workstation requirement.
-text = replace_once(
-    text,
-    'for p in kwin-wayland plasma-workspace-wayland ',
-    'for p in kwin-wayland kwin-wayland-backend-drm plasma-workspace-wayland ',
-    'Wayland validation package list',
-)
-text = replace_once(
-    text,
-    'kde-plasma-desktop plasma-workspace plasma-desktop kwin-x11 kwin-wayland plasma-workspace-wayland ',
-    'kde-plasma-desktop plasma-workspace plasma-desktop kwin-x11 kwin-wayland kwin-wayland-backend-drm plasma-workspace-wayland ',
-    'Wayland apt package list',
-)
+# Debian Bookworm's KWin 5.27 no longer ships the old split
+# kwin-wayland-backend-drm package; that package only exists in older Debian
+# releases such as Bullseye.  Bookworm's kwin-wayland + kwin-common provide the
+# current DRM-capable compositor stack, so do not inject the obsolete package
+# into either validation or apt installation.
+if "kwin-wayland-backend-drm" in text:
+    raise SystemExit("obsolete kwin-wayland-backend-drm unexpectedly present before transport fix")
 
 # The command RPC is line-oriented on the UML console.  Readline/PTY control
 # sequences can prefix the completion token, and command output does not always
@@ -165,7 +157,7 @@ text = text[:start] + new_launch + text[end:]
 # timeout.
 old_check = '''            val check = guestBlocking("for i in \\$(seq 1 240); do pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_wayland >/dev/null && break; sleep .1; done; pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_wayland >/dev/null || { echo VESSEL_WAYLAND_DIAG; id vessel; ls -l /dev/dri 2>/dev/null; ls -ld /tmp/.X11-unix 2>/dev/null; dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ConsoleKit 2>/dev/null; cat /tmp/vessel-consolekit.log 2>/dev/null; tail -240 /tmp/vessel-plasma.log 2>/dev/null; exit 44; }; test -S /run/user/\\$(id -u vessel)/wayland-0 || { ls -la /run/user/\\$(id -u vessel); cat /tmp/vessel-consolekit.log 2>/dev/null; tail -240 /tmp/vessel-plasma.log; exit 46; }; echo VESSEL_WAYLAND_READY", 45)
 '''
-new_check = '''            val check = guestBlocking("ready=0; for i in \\$(seq 1 600); do if pgrep -u vessel -x kwin_wayland >/dev/null && pgrep -u vessel -x plasmashell >/dev/null && find /run/user/\\$(id -u vessel) -maxdepth 1 -type s -name 'wayland-*' -print -quit 2>/dev/null | grep -q .; then ready=1; break; fi; sleep .1; done; test \\$ready -eq 1 || { echo VESSEL_WAYLAND_DIAG; id vessel; dpkg-query -W kwin-wayland kwin-wayland-backend-drm plasma-workspace-wayland 2>/dev/null; ls -l /dev/dri 2>/dev/null; ls -la /run/user/\\$(id -u vessel) 2>/dev/null; ls -ld /tmp/.X11-unix 2>/dev/null; dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ConsoleKit 2>/dev/null; cat /tmp/vessel-consolekit.log 2>/dev/null; tail -400 /tmp/vessel-plasma.log 2>/dev/null; exit 44; }; echo VESSEL_WAYLAND_READY", 75)
+new_check = '''            val check = guestBlocking("ready=0; for i in \\$(seq 1 600); do if pgrep -u vessel -x kwin_wayland >/dev/null && pgrep -u vessel -x plasmashell >/dev/null && find /run/user/\\$(id -u vessel) -maxdepth 1 -type s -name 'wayland-*' -print -quit 2>/dev/null | grep -q .; then ready=1; break; fi; sleep .1; done; test \\$ready -eq 1 || { echo VESSEL_WAYLAND_DIAG; id vessel; dpkg-query -W kwin-wayland kwin-common plasma-workspace-wayland 2>/dev/null; ls -l /dev/dri 2>/dev/null; ls -la /run/user/\\$(id -u vessel) 2>/dev/null; ls -ld /tmp/.X11-unix 2>/dev/null; dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ConsoleKit 2>/dev/null; cat /tmp/vessel-consolekit.log 2>/dev/null; tail -400 /tmp/vessel-plasma.log 2>/dev/null; exit 44; }; echo VESSEL_WAYLAND_READY", 75)
 '''
 text = replace_once(text, old_check, new_check, 'Wayland readiness probe')
 text = replace_once(
@@ -175,9 +167,9 @@ text = replace_once(
     'Wayland ready log',
 )
 
-text = text.replace('v44-wayland-detached-launch-r1', 'v45-wayland-rpc-daemonized-r1')
+text = text.replace('v44-wayland-detached-launch-r1', 'v46-bookworm-kwin-r1')
 CONTROLLER.write_text(text)
 if SERVICE.exists():
-    SERVICE.write_text(SERVICE.read_text().replace('v44-wayland-detached-launch-r1', 'v45-wayland-rpc-daemonized-r1'))
+    SERVICE.write_text(SERVICE.read_text().replace('v44-wayland-detached-launch-r1', 'v46-bookworm-kwin-r1'))
 
-print('[alpha6.4] robust UML command markers + explicit KWin DRM backend + Python-detached Wayland bootstrap applied')
+print('[alpha6.5] robust UML command markers + Bookworm-native KWin Wayland packaging + Python-detached bootstrap applied')
