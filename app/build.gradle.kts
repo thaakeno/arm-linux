@@ -21,7 +21,7 @@ android {
         minSdk = 30
         targetSdk = 36
         versionCode = 3000 + buildRevision
-        versionName = "2.1.0-alpha7"
+        versionName = "2.1.0-alpha8"
         // Legacy CI provenance marker only: versionName = "2.1.0-alpha2"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
@@ -118,6 +118,6 @@ val stagedApkName = "Vessel-${testLabel}${android.defaultConfig.versionName}-${d
 tasks.register<Copy>("stageDebugApk") {
     dependsOn("assembleDebug")
     from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
-    into(rootProject.layout.buildDirectory.dir("deliverables"))
-    rename("app-debug.apk", stagedApkName)
+    into(layout.buildDirectory.dir("staged"))
+    rename { stagedApkName }
 }
