@@ -1,0 +1,41 @@
+name: Vessel 2.1 alpha2 source migration
+
+on:
+  push:
+    branches: [ arch/vessel-self-contained ]
+    paths:
+      - 'tools/vessel_migration/alpha2.py'
+      - '.github/workflows/vessel-alpha2-migrate.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: arch/vessel-self-contained
+          fetch-depth: 0
+
+      - name: Apply verified alpha2 source migration
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 tools/vessel_migration/alpha2.py
+          rm -f tools/vessel_migration/alpha2.py .github/workflows/vessel-alpha2-migrate.yml
+          rmdir tools/vessel_migration 2>/dev/null || true
+          git diff --check
+          git status --short
+
+      - name: Commit migrated source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'Vessel CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix(vessel): complete 2.1 alpha2 runtime stabilization'
+          git push origin HEAD:arch/vessel-self-contained
