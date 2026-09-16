@@ -588,7 +588,7 @@ class VesselRuntimeController(
     private fun plasmaReadyCommand(): String =
         "missing=''; " +
             "for c in startplasma-x11 Xorg xrandr xinput systemsettings konsole firefox-esr; do command -v \"\$c\" >/dev/null 2>&1 || missing=\"\$missing cmd:\$c\"; done; " +
-            "for p in qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects plasma-integration libkf5service-data fonts-noto-color-emoji; do " +
+            "for p in qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects qml-module-qt-labs-platform plasma-integration plasma-pa kactivitymanagerd libkf5service-data fonts-noto-color-emoji; do " +
             "dpkg-query -W -f='\${Status}' \"\$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"\$missing pkg:\$p\"; done; " +
             "qml=/usr/lib/aarch64-linux-gnu/qt5/qml; " +
             "test -d /usr/share/icons/breeze || missing=\"\$missing path:/usr/share/icons/breeze\"; " +
@@ -597,6 +597,8 @@ class VesselRuntimeController(
             "test -f \"\$qml/QtQuick/Templates.2/qmldir\" || missing=\"\$missing qml:QtQuick/Templates.2\"; " +
             "test -f \"\$qml/QtGraphicalEffects/qmldir\" || missing=\"\$missing qml:QtGraphicalEffects\"; " +
             "test -f \"\$qml/org/kde/kirigami.2/qmldir\" || missing=\"\$missing qml:org/kde/kirigami.2\"; " +
+            "test -f \"\$qml/Qt/labs/platform/qmldir\" || missing=\"\$missing qml:Qt/labs/platform\"; " +
+            "test -f \"\$qml/org/kde/plasma/private/volume/qmldir\" || missing=\"\$missing qml:org/kde/plasma/private/volume\"; " +
             "test -z \"\$missing\" || { echo VESSEL_MISSING_COMPONENTS=\"\$missing\"; exit 1; }"
 
     private fun packagePolicyCommand(): String = """

@@ -407,7 +407,7 @@ class VmSessionService : Service() {
         val profile = runtime.guest(
             """
             set -e
-            marker=/home/vessel/.config/.vessel-workstation-2.1-alpha2
+            marker=/home/vessel/.config/.vessel-workstation-2.1-alpha3
             uid=${'$'}(id -u vessel)
             test -f /etc/xdg/menus/kf5-applications.menu
             test -f /usr/share/plasma/plasmoids/org.kde.plasma.kickoff/contents/ui/FullRepresentation.qml
