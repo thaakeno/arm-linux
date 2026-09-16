@@ -19,7 +19,7 @@ CARGO_TARGET_DIR="$WORK/vhost-device-target"
 [ -d "$INCLUDE_ROOT/virgl" ] || exit 2
 mkdir -p "$CARGO_TARGET_DIR"
 
-echo "[vessel-ahb] building synchronized GPU-only Android HardwareBuffer bridge"
+echo "[vessel-ahb] building resource-scoped + damage-aware GPU-only Android HardwareBuffer bridge"
 CXX="$TOOLCHAIN/bin/aarch64-linux-android29-clang++"
 NM="$TOOLCHAIN/bin/llvm-nm"
 "$CXX" --sysroot="$TOOLCHAIN/sysroot" -std=c++17 -fPIC -shared \
@@ -57,10 +57,13 @@ if grep -Eq '\bglFinish[[:space:]]*\(' "$ROOT/tools/vessel_native/vessel_ahb_bri
   echo "synchronous glFinish survived in the frame hot path" >&2
   exit 5
 fi
+! grep -Fq 'wait_for_render_contexts' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
 grep -Fq 'eglDupNativeFenceFDANDROID' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
 grep -Fq 'glFenceSync' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
 grep -Fq 'glWaitSync' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
-echo "[vessel-ahb] bridge pinned to ANGLE with GL context sync + Android native fence FDs"
+grep -Fq 'vessel_ahb_wait_context' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
+grep -Fq 'pending_damage' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
+echo "[vessel-ahb] bridge pinned to ANGLE with resource-scoped GL sync, damage copies + Android native fence FDs"
 
 # Catch C/C++ ABI mismatches around virglrenderer.
 "$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge.so" | grep -F 'virgl_renderer_resource_get_info' >/dev/null
@@ -89,10 +92,13 @@ if s.count(old)!=1: raise SystemExit('unexpected VirGL flags layout')
 vir.write_text(s.replace(old,new,1))
 PY
 python3 "$ROOT/tools/vessel_native/patch_vhost_gpu_android_ahb.py" "$VHOST"
-grep -Fq 'VESSEL_ANDROID_AHB_SCANOUT_V2' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
+grep -Fq 'VESSEL_ANDROID_AHB_SCANOUT_V3' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
 grep -Fq 'vessel_ahb_note_submit' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
+grep -Fq 'vessel_ahb_wait_context' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
+grep -Fq 'vessel_contexts' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
 grep -Fq 'vessel_ahb_set_scanout' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
-! grep -A100 'fn set_scanout' "$VHOST/vhost-device-gpu/src/backend/virgl.rs" | head -100 | grep -q 'export_resource_dmabuf'
+grep -Fq 'vessel_ahb_update' "$VHOST/vhost-device-gpu/src/backend/virgl.rs"
+! grep -A130 'fn set_scanout' "$VHOST/vhost-device-gpu/src/backend/virgl.rs" | head -130 | grep -q 'export_resource_dmabuf'
 
 rustup target add aarch64-linux-android
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/bin/aarch64-linux-android29-clang"
@@ -129,17 +135,20 @@ ANGLE_PACKAGE="$(tail -1 "$WORK/pkg-meta/angle-android.txt" 2>/dev/null || echo 
 VIRGL_PACKAGE="$(tail -1 "$WORK/pkg-meta/virglrenderer-android.txt" 2>/dev/null || echo cached)"
 {
   echo protocol=39
-  echo runtime=v39-self-contained-ahb-syncfd-virtio-input-r5
+  echo runtime=v39-self-contained-ahb-syncfd-virtio-input-r6
   echo "kernel_sha256=$(sha256sum "$OUT/libvessel_uml.so" | awk '{print $1}')"
   echo "vhost_gpu_sha256=$(sha256sum "$OUT/libvessel_vhost_gpu.so" | awk '{print $1}')"
   echo "vhost_input_sha256=$(sha256sum "$OUT/libvessel_vhost_input.so" | awk '{print $1}')"
   echo "angle_package=$ANGLE_PACKAGE"
   echo "virgl_package=$VIRGL_PACKAGE"
   echo rootfs=external:Download/LinuxPC/Vessel-Debian/debian-docker.ext4
-  echo display_bridge=android-hardware-buffer-syncfd-v1
+  echo display_bridge=android-hardware-buffer-syncfd-v2
+  echo virgl_sync=resource-scoped
+  echo damage_updates=enabled
+  echo uml_vcpus=1
 } > "$MANIFEST"
 
-echo "[vessel-ahb] synchronized Android HardwareBuffer runtime ready"
+echo "[vessel-ahb] resource-scoped synchronized Android HardwareBuffer runtime ready"
 file "$OUT/libvessel_ahb_bridge.so" "$OUT/libvessel_vhost_gpu.so"
 patchelf --print-needed "$OUT/libvessel_ahb_bridge.so"
 patchelf --print-needed "$OUT/libvessel_vhost_gpu.so"
