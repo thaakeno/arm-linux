@@ -120,3 +120,10 @@ runpy.run_path(str(control_fix), run_name="__main__")
 control_nonblocking = Path(__file__).with_name("alpha13_nonblocking_control_plane.py")
 sys.argv = [str(control_nonblocking), str(ROOT)]
 runpy.run_path(str(control_nonblocking), run_name="__main__")
+
+# Alpha14 is the physical-device boot regression fix: keep non-graphical prep
+# bounded and separate from the final Wayland transaction, and never recursively
+# chown a persistent Firefox profile on every start.
+staged_prep = Path(__file__).with_name("alpha14_staged_wayland_prep.py")
+sys.argv = [str(staged_prep), str(ROOT)]
+runpy.run_path(str(staged_prep), run_name="__main__")
