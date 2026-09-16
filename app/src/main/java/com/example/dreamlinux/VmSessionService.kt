@@ -59,7 +59,7 @@ data class MachineStats(
     val diskVirtualMb: Long = 0,
     val diskPhysicalMb: Long = 0,
     val hostFreeMb: Long = 0,
-    val vcpus: Int = 1,
+    val vcpus: Int = 6,
     val loading: Boolean = false,
     val error: String = "",
 )
@@ -85,7 +85,7 @@ data class SessionState(
     val rendererMode: String = "virgl-opengl",
     val translationLayer: String = "VirGL",
     val displayTransport: String = "vhost-user-gpu-ahardwarebuffer-syncfd-v2",
-    val runtimeRevision: String = "v39-self-contained-ahb-syncfd-virtio-input-r6",
+    val runtimeRevision: String = "v39-self-contained-ahb-syncfd-virtio-input-r7",
     val machinePath: String = "Download/LinuxPC/Vessel-Debian",
     val internetStage: String = "UML vector net · passt",
     val uptimeMs: Long = 0L,
@@ -114,14 +114,13 @@ class VmSessionService : Service() {
             "kcalc" to "KCalc",
             "systemsettings" to "System Settings",
             "kate" to "Kate",
-            "libreoffice-writer" to "LibreOffice Writer",
-            "vlc" to "VLC",
         )
         private val DESKTOP_RUNTIME_PACKAGES = listOf(
             "kde-plasma-desktop", "plasma-workspace", "plasma-desktop", "plasma-framework", "kwin-x11", "systemsettings",
             "qml-module-org-kde-qqc2desktopstyle", "qml-module-org-kde-kirigami2", "qml-module-org-kde-kitemmodels",
-            "qml-module-org-kde-kquickcontrolsaddons", "qml-module-qtquick-controls2", "qml-module-qtquick-layouts",
-            "qml-module-qtquick-window2", "qml-module-qtquick2", "breeze", "breeze-icon-theme", "hicolor-icon-theme",
+            "qml-module-org-kde-kquickcontrolsaddons", "qml-module-qtquick-controls", "qml-module-qtquick-controls2", "qml-module-qtquick-layouts",
+            "qml-module-qtquick-window2", "qml-module-qtquick2", "qml-module-qtquick-templates2", "qml-module-qtgraphicaleffects",
+            "plasma-integration", "libkf5service-data", "breeze", "breeze-icon-theme", "hicolor-icon-theme",
             "desktop-file-utils", "xdg-user-dirs", "shared-mime-info", "menu", "appstream", "python3-yaml",
             "fonts-noto-core", "fonts-noto-color-emoji", "fonts-dejavu-core", "fonts-liberation", "plasma-workspace-wallpapers",
         )
@@ -226,7 +225,7 @@ class VmSessionService : Service() {
             hostAssetsReady = assets,
             machinePath = runtime.machineDir.absolutePath,
             guestMemoryMb = runtime.guestMemoryMb,
-            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r6",
+            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r7",
             displayTransport = "vhost-user-gpu-ahardwarebuffer-syncfd-v2",
             guestDisplayWidth = guestWidth,
             guestDisplayHeight = guestHeight,
@@ -259,7 +258,7 @@ class VmSessionService : Service() {
             rendererMode = o.optString("rendererMode", state.value.rendererMode),
             translationLayer = o.optString("translationLayer", state.value.translationLayer),
             displayTransport = "vhost-user-gpu-ahardwarebuffer-syncfd-v2",
-            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r6",
+            runtimeRevision = "v39-self-contained-ahb-syncfd-virtio-input-r7",
             guestMemoryMb = o.optInt("guestMemoryMb", state.value.guestMemoryMb),
             guestDisplayWidth = o.optInt("displayWidth", guestWidth),
             guestDisplayHeight = o.optInt("displayHeight", guestHeight),
@@ -292,6 +291,7 @@ class VmSessionService : Service() {
         refreshAvailability()
         if (!state.value.connected) return
         val op = nextOperation()
+        appStore.value = AppStoreState()
         state.value = state.value.copy(
             busy = true,
             lastError = "",
@@ -317,7 +317,6 @@ class VmSessionService : Service() {
                     message = "Vessel workstation ready",
                     lastError = "",
                 )
-                refreshApps("", "POPULAR", "All")
                 refreshSystemStats(silent = true)
             } catch (t: Throwable) {
                 if (op != operationGeneration || state.value.stage == "stopping") return@launch
@@ -341,46 +340,30 @@ class VmSessionService : Service() {
     private suspend fun ensureWorkstation(op: Long) {
         if (op != operationGeneration) return
         state.value = state.value.copy(
-            stage = "workstation_apps",
-            progressPercent = 94,
-            progressDetail = "Checking complete Plasma workstation",
-            message = "Checking desktop components",
+            stage = "workstation_validation",
+            progressPercent = 97,
+            progressDetail = "Validating complete Plasma workstation",
+            message = "Validating desktop components",
         )
         val packages = (DESKTOP_RUNTIME_PACKAGES + DEFAULT_APPS.keys).distinct()
         val packageWords = packages.joinToString(" ") { shellQuote(it) }
-        val check = runtime.guest(
-            "missing=''; for p in $packageWords; do " +
-                "dpkg-query -W -f='\${Status}' \"\$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"\$missing \$p\"; " +
-                "done; echo VESSEL_MISSING=\$missing",
-            60,
-        )
-        val missing = check.optString("output").lineSequence()
-            .firstOrNull { "VESSEL_MISSING=" in it }
-            ?.substringAfter("VESSEL_MISSING=")?.trim().orEmpty()
-        if (missing.isNotBlank()) {
-            state.value = state.value.copy(
-                progressPercent = 95,
-                progressDetail = "Installing complete Plasma runtime and desktop apps",
-                message = "Installing workstation components",
-            )
-            val install = runtime.guest(
-                "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
-                    "mkdir -p /usr/sbin; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; " +
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y $missing && " +
-                    "dpkg --configure -a && apt-get clean",
-                2400,
-            )
-            check(install.optBoolean("ok")) { "Workstation package installation failed; see Runtime log" }
-        }
-        if (op != operationGeneration) return
-        state.value = state.value.copy(progressPercent = 97, progressDetail = "Rebuilding Plasma and icon caches")
-        val cache = runtime.guest(
+        val validation = runtime.guest(
             """
             set -e
+            missing=''
+            for p in $packageWords; do
+              dpkg-query -W -f='${'$'}{Status}' "${'$'}p" 2>/dev/null | grep -q 'install ok installed' || missing="${'$'}missing ${'$'}p"
+            done
+            if [ -n "${'$'}missing" ]; then echo "VESSEL_MISSING_PACKAGES=${'$'}missing"; exit 31; fi
+            test -f /etc/xdg/menus/kf5-applications.menu
+            qml=/usr/lib/aarch64-linux-gnu/qt5/qml
+            test -f "${'$'}qml/QtQuick/Templates.2/qmldir"
+            test -f "${'$'}qml/QtGraphicalEffects/qmldir"
+            test -f "${'$'}qml/org/kde/kirigami.2/qmldir"
+            test -d /usr/share/icons/breeze
+            test -x /usr/bin/systemsettings || test -x /usr/bin/systemsettings5
             install -d -o vessel -g vessel /home/vessel/Desktop /home/vessel/.config
             install -d -m 755 /var/cache/vessel
-            rm -f /var/cache/vessel/app-catalog-v2.json
             printf '%s\n' 'export MOZ_X11_EGL=1' >/etc/profile.d/vessel-gpu.sh
             chmod 0644 /etc/profile.d/vessel-gpu.sh
             update-desktop-database /usr/share/applications 2>/dev/null || true
@@ -389,63 +372,57 @@ class VmSessionService : Service() {
             gtk-update-icon-cache -f -t /usr/share/icons/breeze 2>/dev/null || true
             uid=${'$'}(id -u vessel)
             su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid xdg-user-dirs-update" 2>/dev/null || true
-            su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" 2>/dev/null || true
+            su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" >/tmp/vessel-sycoca.log 2>&1
             for f in firefox-esr org.kde.konsole org.kde.dolphin systemsettings; do
               src=/usr/share/applications/${'$'}f.desktop
               [ -f "${'$'}src" ] && install -m 755 -o vessel -g vessel "${'$'}src" /home/vessel/Desktop/ || true
             done
-            test -x /usr/bin/systemsettings || test -x /usr/bin/systemsettings5
-            test -d /usr/share/icons/breeze
-            test -f /etc/xdg/menus/plasma-applications.menu
             echo VESSEL_WORKSTATION_READY
             """.trimIndent(),
             180,
         )
-        check(cache.optBoolean("ok")) { "Desktop cache validation failed; see Runtime log" }
+        if (!validation.optBoolean("ok")) {
+            throw IllegalStateException("Workstation validation failed: ${validation.optString("output").takeLast(5000)}")
+        }
     }
 
     private suspend fun ensureDesktopProfile(op: Long) {
         if (op != operationGeneration) return
         state.value = state.value.copy(
             stage = "desktop_profile",
-            progressPercent = 98,
-            progressDetail = "Validating Plasma desktop profile",
-            message = "Finishing desktop setup",
+            progressPercent = 99,
+            progressDetail = "Validating live Plasma shell and Kickoff QML",
+            message = "Finishing desktop validation",
         )
         val profile = runtime.guest(
             """
             set -e
-            marker=/home/vessel/.config/.vessel-p39-workstation-v3
+            marker=/home/vessel/.config/.vessel-workstation-2.1-alpha2
             uid=${'$'}(id -u vessel)
-            test -d /usr/share/icons/breeze
-            test -f /etc/xdg/menus/plasma-applications.menu
-            test -x /usr/bin/systemsettings || test -x /usr/bin/systemsettings5
-            if [ ! -e "${'$'}marker" ]; then
-              install -d -m 700 -o vessel -g vessel /home/vessel/.config
-              rm -f /home/vessel/.config/plasma-org.kde.plasma.desktop-appletsrc
-              su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" >/tmp/vessel-sycoca.log 2>&1
-              pkill -u vessel -f '[s]tartplasma-x11' 2>/dev/null || true
-              pkill -u vessel -x plasma_session 2>/dev/null || true
-              pkill -u vessel -x ksmserver 2>/dev/null || true
-              pkill -u vessel -x kded5 2>/dev/null || true
-              pkill -u vessel -x plasmashell 2>/dev/null || true
-              pkill -u vessel -x kwin_x11 2>/dev/null || true
-              sleep .5
-              nohup su -l vessel -c "DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/${'$'}uid MOZ_X11_EGL=1 dbus-run-session -- /usr/local/bin/vessel-plasma-session" >/tmp/vessel-plasma-profile.log 2>&1 </dev/null &
-              ready=0
-              for i in ${'$'}(seq 1 100); do
-                if pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_x11 >/dev/null; then ready=1; break; fi
-                sleep .1
-              done
-              test "${'$'}ready" = 1
-              touch "${'$'}marker"
-              chown vessel:vessel "${'$'}marker"
+            test -f /etc/xdg/menus/kf5-applications.menu
+            test -f /usr/share/plasma/plasmoids/org.kde.plasma.kickoff/contents/ui/FullRepresentation.qml
+            test -f /usr/share/plasma/plasmoids/org.kde.plasma.kickoff/contents/ui/NormalPage.qml
+            su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" >/tmp/vessel-sycoca.log 2>&1
+            ready=0
+            for i in ${'$'}(seq 1 120); do
+              if pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_x11 >/dev/null; then ready=1; break; fi
+              sleep .1
+            done
+            test "${'$'}ready" = 1
+            sleep .5
+            if grep -Eqi 'FullRepresentation unavailable|NormalPage unavailable|module .* is not installed' /tmp/vessel-plasma.log 2>/dev/null; then
+              tail -160 /tmp/vessel-plasma.log
+              exit 45
             fi
+            touch "${'$'}marker"
+            chown vessel:vessel "${'$'}marker"
             echo VESSEL_PROFILE_READY
             """.trimIndent(),
             60,
         )
-        if (!profile.optBoolean("ok")) throw IllegalStateException("Plasma profile validation failed; see Runtime log")
+        if (!profile.optBoolean("ok")) {
+            throw IllegalStateException("Plasma profile/QML validation failed: ${profile.optString("output").takeLast(6000)}")
+        }
     }
 
     fun stopVm() {
@@ -532,7 +509,11 @@ class VmSessionService : Service() {
 
     fun refreshApps(query: String = appStore.value.query, sort: String = appStore.value.sort, category: String = appStore.value.category) {
         if (!state.value.running || !state.value.guestReady) {
-            appStore.value = appStore.value.copy(error = "Start Linux to browse Debian apps")
+            appStore.value = appStore.value.copy(loading = false, error = "Start Linux to browse Debian apps")
+            return
+        }
+        if (state.value.busy || state.value.stage != "ready") {
+            appStore.value = appStore.value.copy(loading = false, error = "Finish workstation setup before browsing apps")
             return
         }
         val normalizedSort = sort.uppercase().takeIf { it in APP_SORTS } ?: "POPULAR"

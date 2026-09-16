@@ -410,8 +410,10 @@ class VesselActivity : ComponentActivity() {
     private fun AppsPage(state: SessionState) {
         val store by VmSessionService.appStore.collectAsStateWithLifecycle()
         var query by remember { mutableStateOf(store.query) }
-        LaunchedEffect(state.guestReady) {
-            if (state.guestReady && store.apps.isEmpty() && !store.loading) VmSessionService.active?.refreshApps("", "POPULAR", "All")
+        LaunchedEffect(state.guestReady, state.busy, state.stage) {
+            if (state.guestReady && !state.busy && state.stage == "ready" && store.apps.isEmpty() && !store.loading) {
+                VmSessionService.active?.refreshApps("", "POPULAR", "All")
+            }
         }
         Column(Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {

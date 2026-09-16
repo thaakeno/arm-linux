@@ -35,10 +35,10 @@ class VesselRuntimeController(
 ) {
     companion object {
         const val PROTOCOL = 39
-        const val REVISION = "v39-self-contained-ahb-syncfd-virtio-input-r6"
+        const val REVISION = "v39-self-contained-ahb-syncfd-virtio-input-r7"
         const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahardwarebuffer-syncfd-v2"
         const val INPUT_TRANSPORT = "virtio-input-vhost-user-same-uid-v1"
-        const val UML_VCPUS = 1
+        const val UML_VCPUS = 6
         private const val ROOTFS_URL = "https://github.com/zalexdev/linux-um-arm64/releases/download/prebuilt-20260816/debian-docker.ext4.gz"
         private const val ROOTFS_SHA256 = "2807979f76021fadf1f76f0c827fbe1eab4df51e33bfeca0c840c5181c610be3"
         private const val GUEST_READY_BANNER = "Type 'exit' to shut the kernel down and return to Android."
@@ -417,7 +417,7 @@ class VesselRuntimeController(
     private fun startUml() {
         runCatching { umlProcess?.destroyForcibly() }
         guestShellReady = CompletableFuture()
-        append("[host] starting UML with ${guestMemoryMb} MiB RAM, $UML_VCPUS vCPU (ARM64 SMP containment)\n")
+        append("[host] starting UML with ${guestMemoryMb} MiB RAM, $UML_VCPUS vCPUs\n")
         val cmd = listOf(
             umnetBin.absolutePath, "--passt", passtBin.absolutePath, "--dns", "1.1.1.1", "--",
             umlBin.absolutePath,
@@ -515,8 +515,12 @@ class VesselRuntimeController(
             pendingFuture = future
             pendingLineObserver = onLine
             pendingOutput.setLength(0)
+            val encoded = Base64.getEncoder().encodeToString(command.toByteArray(Charsets.UTF_8))
             consoleWriter!!.apply {
-                write("$command\nprintf '$marker:%s\\n' \$?\n")
+                // Feed arbitrary user commands to a fresh bash process instead of
+                // pasting them directly into the interactive root shell. This
+                // preserves quotes, pipes, semicolons and multiline commands.
+                write("printf '%s' '$encoded' | base64 -d | /bin/bash; __vessel_rc=\$?; printf '$marker:%s\\n' \"\$__vessel_rc\"\n")
                 flush()
             }
         }
@@ -582,10 +586,18 @@ class VesselRuntimeController(
     }
 
     private fun plasmaReadyCommand(): String =
-        "command -v startplasma-x11 >/dev/null && command -v Xorg >/dev/null && command -v xrandr >/dev/null && " +
-            "command -v xinput >/dev/null && command -v systemsettings >/dev/null && command -v konsole >/dev/null && command -v firefox-esr >/dev/null && " +
-            "(command -v cvt >/dev/null || command -v xcvt >/dev/null) && test -d /usr/share/icons/breeze && " +
-            "test -f /etc/xdg/menus/plasma-applications.menu && test -e /usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so"
+        "missing=''; " +
+            "for c in startplasma-x11 Xorg xrandr xinput systemsettings konsole firefox-esr; do command -v \"\$c\" >/dev/null 2>&1 || missing=\"\$missing cmd:\$c\"; done; " +
+            "for p in qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects plasma-integration libkf5service-data; do " +
+            "dpkg-query -W -f='\${Status}' \"\$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"\$missing pkg:\$p\"; done; " +
+            "qml=/usr/lib/aarch64-linux-gnu/qt5/qml; " +
+            "test -d /usr/share/icons/breeze || missing=\"\$missing path:/usr/share/icons/breeze\"; " +
+            "test -f /etc/xdg/menus/kf5-applications.menu || missing=\"\$missing path:/etc/xdg/menus/kf5-applications.menu\"; " +
+            "test -e /usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so || missing=\"\$missing path:virtio_gpu_dri.so\"; " +
+            "test -f \"\$qml/QtQuick/Templates.2/qmldir\" || missing=\"\$missing qml:QtQuick/Templates.2\"; " +
+            "test -f \"\$qml/QtGraphicalEffects/qmldir\" || missing=\"\$missing qml:QtGraphicalEffects\"; " +
+            "test -f \"\$qml/org/kde/kirigami.2/qmldir\" || missing=\"\$missing qml:org/kde/kirigami.2\"; " +
+            "test -z \"\$missing\" || { echo VESSEL_MISSING_COMPONENTS=\"\$missing\"; exit 1; }"
 
     private fun packagePolicyCommand(): String = """
         install -d -m 755 /usr/sbin
@@ -596,6 +608,13 @@ class VesselRuntimeController(
         exit 101
         VESSEL_POLICY
         chmod 0755 /usr/sbin/policy-rc.d
+        install -d -m 755 /etc/initramfs-tools
+        cat >/etc/initramfs-tools/update-initramfs.conf <<'VESSEL_INITRAMFS'
+        # Vessel boots the host-provided UML kernel directly; generating a guest
+        # initramfs is both useless and can stall package triggers for minutes.
+        update_initramfs=no
+        backup_initramfs=no
+        VESSEL_INITRAMFS
     """.trimIndent()
 
     private inner class PackageProgressReporter(
@@ -694,7 +713,8 @@ class VesselRuntimeController(
             "kde-plasma-desktop plasma-workspace plasma-desktop kwin-x11 systemsettings " +
             "xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt " +
             "breeze breeze-icon-theme hicolor-icon-theme desktop-file-utils xdg-user-dirs shared-mime-info menu appstream python3-yaml " +
-            "qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 " +
+            "qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons " +
+            "qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects plasma-integration libkf5service-data " +
             "fonts-noto-core fonts-dejavu-core fonts-liberation firefox-esr konsole dolphin ark kcalc okular gwenview kate && " +
             "dpkg --configure -a && apt-get clean"
         val (rc, out) = guestBlocking(cmd, 2400, reporter::onLine)
@@ -710,9 +730,16 @@ class VesselRuntimeController(
             append("[plasma] apt failed rc=$rc ${out.takeLast(6000)}\n")
             error(reason)
         }
+        progress("plasma_verify", 71, "Validating Plasma QML, menus and GPU runtime")
         val verify = guestBlocking(plasmaReadyCommand(), 30)
-        check(verify.first == 0) { "Plasma packages installed, but required desktop/QML/icon components are still missing" }
-        progress("plasma_ready", 71, "KDE Plasma workstation ready")
+        val missing = verify.second.lineSequence()
+            .firstOrNull { it.contains("VESSEL_MISSING_COMPONENTS=") }
+            ?.substringAfter("VESSEL_MISSING_COMPONENTS=")?.trim().orEmpty()
+        if (verify.first != 0) {
+            append("[plasma] runtime validation failed ${verify.second.takeLast(6000)}\n")
+            error("Plasma runtime validation failed: ${missing.ifBlank { "see Runtime log" }}")
+        }
+        progress("plasma_ready", 72, "KDE Plasma workstation ready")
         append("[plasma] complete KDE Plasma/Xorg workstation ready\n")
     }
 
@@ -778,6 +805,13 @@ class VesselRuntimeController(
         check(rc == 0) { "Plasma launch failed: ${out.takeLast(12000)}" }
         append("[input] Xorg/libinput attached all Vessel devices\n")
         applyDisplayModeBlocking()
+        val shellCheck = guestBlocking(
+            "for i in \$(seq 1 120); do pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_x11 >/dev/null && break; sleep .1; done; " +
+                "pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_x11 >/dev/null || { tail -120 /tmp/vessel-plasma.log 2>/dev/null; exit 44; }; " +
+                "sleep .5; if grep -Eqi 'FullRepresentation unavailable|NormalPage unavailable|module .* is not installed' /tmp/vessel-plasma.log 2>/dev/null; then tail -160 /tmp/vessel-plasma.log; exit 45; fi",
+            30,
+        )
+        check(shellCheck.first == 0) { "Plasma shell/QML validation failed: ${shellCheck.second.takeLast(8000)}" }
     }
 
     private fun displayFailureStatus(status: String): Boolean =

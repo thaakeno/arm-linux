@@ -135,7 +135,7 @@ ANGLE_PACKAGE="$(tail -1 "$WORK/pkg-meta/angle-android.txt" 2>/dev/null || echo 
 VIRGL_PACKAGE="$(tail -1 "$WORK/pkg-meta/virglrenderer-android.txt" 2>/dev/null || echo cached)"
 {
   echo protocol=39
-  echo runtime=v39-self-contained-ahb-syncfd-virtio-input-r6
+  echo runtime=v39-self-contained-ahb-syncfd-virtio-input-r7
   echo "kernel_sha256=$(sha256sum "$OUT/libvessel_uml.so" | awk '{print $1}')"
   echo "vhost_gpu_sha256=$(sha256sum "$OUT/libvessel_vhost_gpu.so" | awk '{print $1}')"
   echo "vhost_input_sha256=$(sha256sum "$OUT/libvessel_vhost_input.so" | awk '{print $1}')"
@@ -145,7 +145,7 @@ VIRGL_PACKAGE="$(tail -1 "$WORK/pkg-meta/virglrenderer-android.txt" 2>/dev/null 
   echo display_bridge=android-hardware-buffer-syncfd-v2
   echo virgl_sync=resource-scoped
   echo damage_updates=enabled
-  echo uml_vcpus=1
+  echo uml_vcpus=6
 } > "$MANIFEST"
 
 echo "[vessel-ahb] resource-scoped synchronized Android HardwareBuffer runtime ready"

@@ -223,11 +223,18 @@ public:
     void surface_changed(uint32_t width, uint32_t height) {
         if (!width || !height) return;
         std::lock_guard<std::mutex> guard(lock_);
+        const bool changed = surface_width_ != width || surface_height_ != height;
         surface_width_ = width;
         surface_height_ = height;
-        if (device_ && (extent_.width != width || extent_.height != height)) {
+        if (device_ && (changed || extent_.width != width || extent_.height != height)) {
             swapchain_dirty_ = true;
-            logi("Surface extent changed to " + std::to_string(width) + "x" + std::to_string(height) + "; swapchain recreation queued");
+            logi("Surface extent changed to " + std::to_string(width) + "x" + std::to_string(height) + "; recreating swapchain");
+            if (recreate_swapchain_locked() && latest_slot_ < FRAME_SLOTS && sources_[latest_slot_].buffer) {
+                if (present_locked(-1, 0, latest_slot_, 0, -1, false)) {
+                    status_ = "presenting-ahardwarebuffer";
+                    logi("repainted retained GPU frame after surface resize");
+                }
+            }
         }
     }
 

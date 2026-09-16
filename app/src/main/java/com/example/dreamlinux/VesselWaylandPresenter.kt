@@ -57,12 +57,12 @@ object VesselWaylandPresenter {
         val ahb = runCatching { nativeAhbStatus() }.getOrElse { "presenter-error:${it.message}" }
         val standard = runCatching { nativeStatus() }.getOrElse { "presenter-error:${it.message}" }
         val s = when {
-            ahb == "presenting-ahardwarebuffer" -> "presenting-dmabuf-ahardwarebuffer"
+            ahb == "presenting-ahardwarebuffer" -> "presenting-ahardwarebuffer"
             ahb.startsWith("presenter-error") -> ahb
             standard.startsWith("presenter-error") || standard.contains("failed") -> standard
             else -> ahb
         }
-        if (s.startsWith("presenting-dmabuf")) everPresented = true
+        if (s.startsWith("presenting-ahardwarebuffer")) everPresented = true
         return if (everPresented && (s == "surface-detached" || s.contains("waiting-for-surface"))) {
             "presenting-retained:$s"
         } else {
