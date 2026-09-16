@@ -75,3 +75,58 @@ if service.exists():
     ))
 
 print("[alpha6.2] fresh verified system D-Bus + ConsoleKit policy applied")
+
+# Alpha6.3: the first Wayland launch used one opaque shell command ending in a
+# background `nohup setsid su ... </dev/tty1 &`. On the real UML guest that
+# command could keep the command RPC open indefinitely, so Android never saw
+# the completion marker and reported a raw TimeoutException. Split the handoff
+# into bounded stages and use `setsid -f` + /dev/null for a real double-forked
+# detached session. KWin obtains DRM/input fds from the ConsoleKit broker, so it
+# does not need to keep tty1 open as stdin.
+text = controller.read_text()
+old_launch = r'''            val launch = "printf '%s' '$b64' | base64 -d >/usr/local/bin/vessel-plasma-session; chmod 755 /usr/local/bin/vessel-plasma-session; " +
+                "pkill -u vessel -x kwin_x11 2>/dev/null || true; pkill -u vessel -x kwin_wayland 2>/dev/null || true; pkill -u vessel -x plasmashell 2>/dev/null || true; pkill -x Xorg 2>/dev/null || true; " +
+                "rm -f /tmp/.X0-lock /tmp/.X11-unix/X0; " +
+                "nohup setsid su -l vessel -c \\"XDG_RUNTIME_DIR=/run/user/\\$(id -u vessel) XDG_SEAT=seat0 XDG_VTNR=1 dbus-run-session -- /usr/local/bin/vessel-plasma-session\\" >/tmp/vessel-plasma.log 2>&1 </dev/tty1 &"
+            val lr = guestBlocking(launch, 30)
+            check(lr.first == 0) { "Plasma Wayland launch failed: ${lr.second.takeLast(10000)}" }
+'''
+new_launch = r'''            val installSession = "printf '%s' '$b64' | base64 -d >/usr/local/bin/vessel-plasma-session; chmod 755 /usr/local/bin/vessel-plasma-session; echo VESSEL_SESSION_SCRIPT_READY"
+            val installResult = guestBlocking(installSession, 12)
+            check(installResult.first == 0) { "Wayland session script install failed: ${installResult.second.takeLast(6000)}" }
+            append("[desktop] Wayland stage 1/4: session script installed\n")
+
+            val cleanup = "pkill -u vessel -x kwin_x11 2>/dev/null || true; pkill -u vessel -x kwin_wayland 2>/dev/null || true; pkill -u vessel -x plasmashell 2>/dev/null || true; pkill -x Xorg 2>/dev/null || true; rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /run/user/\\$(id -u vessel)/wayland-*; : >/tmp/vessel-plasma.log; echo VESSEL_WAYLAND_CLEAN"
+            val cleanupResult = guestBlocking(cleanup, 12)
+            check(cleanupResult.first == 0) { "Wayland cleanup failed: ${cleanupResult.second.takeLast(6000)}" }
+            append("[desktop] Wayland stage 2/4: stale desktop processes cleaned\n")
+
+            // setsid -f forks before exec, closes the command-RPC lifetime immediately,
+            // and /dev/null prevents the compositor session from retaining the UML shell.
+            val dispatch = "setsid -f sh -c 'exec su -l vessel -c \\\"XDG_RUNTIME_DIR=/run/user/\\$(id -u vessel) XDG_SEAT=seat0 XDG_VTNR=1 exec dbus-run-session -- /usr/local/bin/vessel-plasma-session\\\"' </dev/null >>/tmp/vessel-plasma.log 2>&1; echo VESSEL_WAYLAND_DISPATCHED"
+            val dispatchResult = guestBlocking(dispatch, 12)
+            check(dispatchResult.first == 0 && dispatchResult.second.contains("VESSEL_WAYLAND_DISPATCHED")) { "Plasma Wayland dispatch failed: ${dispatchResult.second.takeLast(8000)}" }
+            append("[desktop] Wayland stage 3/4: detached Plasma session dispatched\n")
+'''
+if text.count(old_launch) != 1:
+    raise SystemExit(f"{controller}: expected one blocking Wayland launch anchor, got {text.count(old_launch)}")
+text = text.replace(old_launch, new_launch, 1)
+
+# Make command RPC timeouts actionable instead of surfacing bare TimeoutException.
+old_wait = '''        try {\n            future.get(timeoutSeconds.toLong(), TimeUnit.SECONDS)\n        } finally {\n'''
+new_wait = '''        try {\n            future.get(timeoutSeconds.toLong(), TimeUnit.SECONDS)\n        } catch (t: java.util.concurrent.TimeoutException) {\n            append("[guest] command timeout after ${timeoutSeconds}s: ${command.lineSequence().firstOrNull()?.take(240) ?: "<empty>"}\\n")\n            throw IllegalStateException("Guest command timed out after ${timeoutSeconds}s", t)\n        } finally {\n'''
+if text.count(old_wait) != 1:
+    raise SystemExit(f"{controller}: expected one guestBlocking wait anchor, got {text.count(old_wait)}")
+text = text.replace(old_wait, new_wait, 1)
+text = text.replace(
+    "v43-wayland-dbus-recovery-r1",
+    "v44-wayland-detached-launch-r1",
+)
+controller.write_text(text)
+if service.exists():
+    service.write_text(service.read_text().replace(
+        "v43-wayland-dbus-recovery-r1",
+        "v44-wayland-detached-launch-r1",
+    ))
+
+print("[alpha6.3] staged detached Wayland launch + command timeout diagnostics applied")
