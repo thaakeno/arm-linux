@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -322,9 +323,17 @@ object VesselUpdateManager {
             val declared = connection.contentLengthLong
             if (declared > maxBytes) error("Update metadata is too large")
             connection.inputStream.buffered().use { input ->
-                val bytes = input.readNBytes(maxBytes + 1)
-                check(bytes.size <= maxBytes) { "Update metadata exceeded size limit" }
-                bytes.toString(Charsets.UTF_8)
+                val output = ByteArrayOutputStream(minOf(maxBytes, 16 * 1024))
+                val buffer = ByteArray(8 * 1024)
+                var total = 0
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    total += n
+                    check(total <= maxBytes) { "Update metadata exceeded size limit" }
+                    output.write(buffer, 0, n)
+                }
+                output.toByteArray().toString(Charsets.UTF_8)
             }
         } finally {
             connection.disconnect()
