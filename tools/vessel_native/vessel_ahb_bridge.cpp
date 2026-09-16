@@ -8,6 +8,7 @@ extern "C" {
 #include <virgl/virglrenderer.h>
 }
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -70,6 +71,14 @@ struct AckMessage {
 };
 #pragma pack(pop)
 
+struct DamageRect {
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool valid = false;
+};
+
 struct BufferSlot {
     AHardwareBuffer* buffer = nullptr;
     EGLImageKHR image = EGL_NO_IMAGE_KHR;
@@ -79,7 +88,9 @@ struct BufferSlot {
     uint32_t height = 0;
     bool registered = false;
     bool busy = false;
+    bool content_valid = false;
     uint32_t serial = 0;
+    DamageRect pending_damage{};
 };
 
 struct ScanoutState {
@@ -97,6 +108,8 @@ std::array<ScanoutState, MAX_SCANOUTS> g_scanouts{};
 std::unordered_map<uint32_t, GLsync> g_context_fences;
 int g_socket = -1;
 uint64_t g_frame_count = 0;
+uint64_t g_full_copy_count = 0;
+uint64_t g_partial_copy_count = 0;
 auto g_rate_started = std::chrono::steady_clock::now();
 
 using GetNativeClientBuffer = PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC;
@@ -132,6 +145,51 @@ void logi(const std::string& message) { emit_log(ANDROID_LOG_INFO, "I", message)
 
 void clear_gl_errors() { for (int i = 0; i < 16; ++i) if (glGetError() == GL_NO_ERROR) return; }
 void clear_egl_errors() { for (int i = 0; i < 16; ++i) if (eglGetError() == EGL_SUCCESS) return; }
+
+DamageRect full_damage(const ScanoutState& state) {
+    return DamageRect{0, 0, state.width, state.height, state.width != 0 && state.height != 0};
+}
+
+DamageRect union_damage(const DamageRect& a, const DamageRect& b) {
+    if (!a.valid) return b;
+    if (!b.valid) return a;
+    const uint64_t x0 = std::min<uint64_t>(a.x, b.x);
+    const uint64_t y0 = std::min<uint64_t>(a.y, b.y);
+    const uint64_t x1 = std::max<uint64_t>(static_cast<uint64_t>(a.x) + a.width, static_cast<uint64_t>(b.x) + b.width);
+    const uint64_t y1 = std::max<uint64_t>(static_cast<uint64_t>(a.y) + a.height, static_cast<uint64_t>(b.y) + b.height);
+    return DamageRect{
+        static_cast<uint32_t>(x0),
+        static_cast<uint32_t>(y0),
+        static_cast<uint32_t>(x1 - x0),
+        static_cast<uint32_t>(y1 - y0),
+        true,
+    };
+}
+
+DamageRect clip_damage(const ScanoutState& state, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+    if (!state.width || !state.height) return {};
+    if (!width || !height) return full_damage(state);
+    const uint64_t sx0 = state.x;
+    const uint64_t sy0 = state.y;
+    const uint64_t sx1 = sx0 + state.width;
+    const uint64_t sy1 = sy0 + state.height;
+    const uint64_t dx0 = x;
+    const uint64_t dy0 = y;
+    const uint64_t dx1 = dx0 + width;
+    const uint64_t dy1 = dy0 + height;
+    const uint64_t ix0 = std::max(sx0, dx0);
+    const uint64_t iy0 = std::max(sy0, dy0);
+    const uint64_t ix1 = std::min(sx1, dx1);
+    const uint64_t iy1 = std::min(sy1, dy1);
+    if (ix0 >= ix1 || iy0 >= iy1) return {};
+    return DamageRect{
+        static_cast<uint32_t>(ix0 - sx0),
+        static_cast<uint32_t>(iy0 - sy0),
+        static_cast<uint32_t>(ix1 - ix0),
+        static_cast<uint32_t>(iy1 - iy0),
+        true,
+    };
+}
 
 bool send_all(int fd, const void* data, size_t size) {
     const auto* p = static_cast<const uint8_t*>(data);
@@ -211,7 +269,7 @@ bool connect_socket() {
         if (connect(fd, reinterpret_cast<sockaddr*>(&addr), len) == 0) {
             g_socket = fd;
             mark_transport_reset();
-            logi("connected presenter side channel name=" + name + " protocol=3 slots=3 syncfd=1");
+            logi("connected presenter side channel name=" + name + " protocol=3 slots=3 syncfd=1 damage=1 resourceSync=1");
             return true;
         }
         last_errno = errno;
@@ -296,26 +354,6 @@ void destroy_scanout(ScanoutState& state) {
     state = {};
 }
 
-int wait_for_render_contexts() {
-    if (eglGetCurrentContext() == EGL_NO_CONTEXT) return RC_CONTEXT;
-    clear_gl_errors();
-    size_t waited = 0;
-    for (auto& entry : g_context_fences) {
-        if (!entry.second) continue;
-        glWaitSync(entry.second, 0, GL_TIMEOUT_IGNORED);
-        glDeleteSync(entry.second);
-        entry.second = nullptr;
-        ++waited;
-    }
-    const GLenum err = glGetError();
-    if (err != GL_NO_ERROR) {
-        loge("render-context GPU wait failed glError=" + hex_value(err));
-        return RC_RENDER_SYNC;
-    }
-    if (waited) logi("ordered scanout after " + std::to_string(waited) + " VirGL render context(s)");
-    return 0;
-}
-
 int allocate_slot(BufferSlot& slot, uint32_t width, uint32_t height, uint32_t index) {
     if (slot.buffer && slot.width == width && slot.height == height) return 0;
     destroy_slot(slot);
@@ -372,14 +410,16 @@ int allocate_slot(BufferSlot& slot, uint32_t width, uint32_t height, uint32_t in
     }
     slot.width = width;
     slot.height = height;
+    slot.content_valid = false;
+    slot.pending_damage = full_damage(ScanoutState{.width = width, .height = height});
     logi("allocated pipeline slot=" + std::to_string(index) + " size=" + std::to_string(width) + "x" + std::to_string(height));
     return 0;
 }
 
-int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t x, uint32_t y, uint32_t width, uint32_t height, int* out_fence_fd) {
+int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t source_x, uint32_t source_y,
+                  const DamageRect& damage, int* out_fence_fd) {
     *out_fence_fd = -1;
-    const int sync_rc = wait_for_render_contexts();
-    if (sync_rc) return sync_rc;
+    if (!damage.valid || !damage.width || !damage.height) return 0;
 
     virgl_renderer_resource_info info{};
     const int info_rc = virgl_renderer_resource_get_info(static_cast<int>(resource_id), &info);
@@ -409,8 +449,17 @@ int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t x, uint32_t y
     const GLenum draw_buffer = GL_COLOR_ATTACHMENT0;
     glDrawBuffers(1, &draw_buffer);
     clear_gl_errors();
-    glBlitFramebuffer(static_cast<GLint>(x), static_cast<GLint>(y), static_cast<GLint>(x + width), static_cast<GLint>(y + height),
-                      0, 0, static_cast<GLint>(width), static_cast<GLint>(height), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    const GLint src_x0 = static_cast<GLint>(source_x + damage.x);
+    const GLint src_y0 = static_cast<GLint>(source_y + damage.y);
+    const GLint src_x1 = static_cast<GLint>(source_x + damage.x + damage.width);
+    const GLint src_y1 = static_cast<GLint>(source_y + damage.y + damage.height);
+    const GLint dst_x0 = static_cast<GLint>(damage.x);
+    const GLint dst_y0 = static_cast<GLint>(damage.y);
+    const GLint dst_x1 = static_cast<GLint>(damage.x + damage.width);
+    const GLint dst_y1 = static_cast<GLint>(damage.y + damage.height);
+    glBlitFramebuffer(src_x0, src_y0, src_x1, src_y1,
+                      dst_x0, dst_y0, dst_x1, dst_y1,
+                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
     const GLenum blit_error = glGetError();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw);
@@ -493,14 +542,19 @@ int send_frame(uint32_t scanout_id, uint32_t slot_index, ScanoutState& state, in
     const auto now = std::chrono::steady_clock::now();
     const double elapsed = std::chrono::duration<double>(now - g_rate_started).count();
     if (elapsed >= 2.0) {
-        logi("pipelined frame rate producer=" + std::to_string(static_cast<int>(g_frame_count / elapsed)) + " fps in_flight<=3 syncfd=1");
+        logi("producer=" + std::to_string(static_cast<int>(g_frame_count / elapsed)) +
+             " fps in_flight<=3 syncfd=1 full=" + std::to_string(g_full_copy_count) +
+             " partial=" + std::to_string(g_partial_copy_count));
         g_frame_count = 0;
+        g_full_copy_count = 0;
+        g_partial_copy_count = 0;
         g_rate_started = now;
     }
     return 0;
 }
 
-int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint32_t y,
+                    uint32_t width, uint32_t height, const DamageRect& incoming_damage) {
     auto& state = g_scanouts[scanout_id];
     if (state.width != width || state.height != height) {
         if (!wait_scanout_idle(state)) return RC_SOCKET;
@@ -514,14 +568,30 @@ int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint3
         state.x = x;
         state.y = y;
     }
+
+    if (!incoming_damage.valid) return 0;
+    for (auto& slot : state.slots) {
+        if (slot.buffer && slot.content_valid) {
+            slot.pending_damage = union_damage(slot.pending_damage, incoming_damage);
+        }
+    }
+
     const int idx = wait_for_free_slot(scanout_id, state);
     if (idx < 0) return RC_SOCKET;
     auto& slot = state.slots[static_cast<size_t>(idx)];
     const int alloc_rc = allocate_slot(slot, width, height, static_cast<uint32_t>(idx));
     if (alloc_rc) return alloc_rc;
+
+    DamageRect copy_damage = slot.content_valid ? slot.pending_damage : full_damage(state);
+    if (!copy_damage.valid) copy_damage = incoming_damage;
+    const bool full = copy_damage.x == 0 && copy_damage.y == 0 && copy_damage.width == width && copy_damage.height == height;
+    if (full) ++g_full_copy_count; else ++g_partial_copy_count;
+
     int fence_fd = -1;
-    const int copy_rc = copy_resource(resource_id, slot, x, y, width, height, &fence_fd);
+    const int copy_rc = copy_resource(resource_id, slot, state.x, state.y, copy_damage, &fence_fd);
     if (copy_rc) return copy_rc;
+    slot.content_valid = true;
+    slot.pending_damage = {};
     return send_frame(scanout_id, static_cast<uint32_t>(idx), state, fence_fd);
 }
 
@@ -546,20 +616,42 @@ extern "C" int vessel_ahb_note_submit(uint32_t ctx_id) {
     return 0;
 }
 
+extern "C" int vessel_ahb_wait_context(uint32_t ctx_id) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT) return RC_CONTEXT;
+    auto it = g_context_fences.find(ctx_id);
+    if (it == g_context_fences.end() || !it->second) return 0;
+    clear_gl_errors();
+    glWaitSync(it->second, 0, GL_TIMEOUT_IGNORED);
+    glDeleteSync(it->second);
+    g_context_fences.erase(it);
+    const GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        loge("resource producer GPU wait failed ctx=" + std::to_string(ctx_id) + " glError=" + hex_value(err));
+        return RC_RENDER_SYNC;
+    }
+    return 0;
+}
+
 extern "C" int vessel_ahb_set_scanout(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> guard(g_lock);
     if (scanout_id >= MAX_SCANOUTS || !width || !height) return EINVAL;
-    const int rc = submit_resource(resource_id, scanout_id, x, y, width, height);
+    const ScanoutState temporary{.x = x, .y = y, .width = width, .height = height};
+    const DamageRect full = full_damage(temporary);
+    const int rc = submit_resource(resource_id, scanout_id, x, y, width, height, full);
     if (rc) loge("SET_SCANOUT failed resource=" + std::to_string(resource_id) + " rc=" + std::to_string(rc));
     return rc;
 }
 
-extern "C" int vessel_ahb_update(uint32_t resource_id, uint32_t scanout_id) {
+extern "C" int vessel_ahb_update(uint32_t resource_id, uint32_t scanout_id,
+                                  uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> guard(g_lock);
     if (scanout_id >= MAX_SCANOUTS) return EINVAL;
     auto& state = g_scanouts[scanout_id];
     if (!state.width || !state.height) return ENOENT;
-    const int rc = submit_resource(resource_id, scanout_id, state.x, state.y, state.width, state.height);
+    const DamageRect damage = clip_damage(state, x, y, width, height);
+    if (!damage.valid) return 0;
+    const int rc = submit_resource(resource_id, scanout_id, state.x, state.y, state.width, state.height, damage);
     if (rc) loge("UPDATE failed resource=" + std::to_string(resource_id) + " rc=" + std::to_string(rc));
     return rc;
 }
