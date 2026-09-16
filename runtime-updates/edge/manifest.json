@@ -1,14 +1,14 @@
 {
   "hotApi": 1,
-  "revision": "v47.0.0-edge1",
+  "revision": "v49.0.0-edge2",
   "files": [
     {
       "name": "wayland-cleanup.sh",
-      "sha256": "3d06349031455ca43f5b90ee32651ffdfbe3aa677c1adef811cc202a762021e7"
+      "sha256": "6be9b89f45d5ec35009930737d0039b5d5c6348b3bef79fbde969f241d28f51f"
     },
     {
       "name": "wayland-check.sh",
-      "sha256": "1da03ba4fd2ed57d52a66fdf60a3e78a66cc937ce8bd4df52f331ffc6a71ad63"
+      "sha256": "697d1ec01ccdae95f18c4943f45b41a59ca39657798f4889a2abc0223c988495"
     },
     {
       "name": "wayland-session.sh",
@@ -16,11 +16,11 @@
     },
     {
       "name": "launch-wayland.py",
-      "sha256": "cc2a264ff627255a2a006ad52c998fd5586bdb73969aef71b6d27f129a517ec3"
+      "sha256": "f943784ecfd7a8caa17d6825d21c9f0c0c18285cfce5209695d10468dac92af5"
     },
     {
       "name": "wayland-postprep.sh",
-      "sha256": "496c5c7bd07746a610ce00323fae3f03f6f35d6fe85b1d35aa72228a16c142a2"
+      "sha256": "b152d9c996ee75d5b60129fd2677ac600e28abdd6c70d556e7baebd70e304e00"
     }
   ]
 }
