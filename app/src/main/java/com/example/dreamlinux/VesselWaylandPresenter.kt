@@ -29,6 +29,7 @@ object VesselWaylandPresenter {
     @JvmStatic private external fun nativeAhbStart()
     @JvmStatic private external fun nativeAhbStop()
     @JvmStatic private external fun nativeAhbAttachSurface(surface: Surface)
+    @JvmStatic private external fun nativeAhbSurfaceChanged(width: Int, height: Int)
     @JvmStatic private external fun nativeAhbDetachSurface()
     @JvmStatic private external fun nativeAhbStatus(): String
     @JvmStatic private external fun nativeAhbGuestWidth(): Int
@@ -46,6 +47,9 @@ object VesselWaylandPresenter {
     }
 
     fun attach(surface: Surface) = nativeAhbAttachSurface(surface)
+    fun surfaceChanged(width: Int, height: Int) {
+        if (width > 0 && height > 0) nativeAhbSurfaceChanged(width, height)
+    }
     fun detach() = nativeAhbDetachSurface()
 
     fun status(): String {
