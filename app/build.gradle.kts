@@ -18,8 +18,6 @@ android {
         applicationId = if (localTest) "com.example.dreamlinux.localvessel" else "com.example.dreamlinux"
         manifestPlaceholders["appLabel"] = if (localTest) "Vessel Local" else "Vessel"
         buildConfigField("boolean", "LOCAL_TEST", localTest.toString())
-        // The self-contained runtime persists its machine under Download/LinuxPC
-        // and intentionally uses Android's all-files app storage model, which starts at API 30.
         minSdk = 30
         targetSdk = 36
         versionCode = 3000 + buildRevision
@@ -44,7 +42,8 @@ android {
     buildTypes {
         debug { signingConfig = signingConfigs.getByName("debug") }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -59,9 +58,6 @@ android {
       shaders = false
     }
     packaging {
-      // Protocol 39 executes the UML/GPU/network helpers directly from the APK's
-      // nativeLibraryDir. Force extraction so those ELF files live on an executable
-      // filesystem rather than only inside the APK zip.
       jniLibs {
         useLegacyPackaging = true
         keepDebugSymbols += setOf(
