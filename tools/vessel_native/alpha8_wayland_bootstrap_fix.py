@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+import runpy
 import sys
 from pathlib import Path
 
@@ -95,3 +96,10 @@ if SERVICE.exists():
     ))
 
 print("[alpha8] live Wayland overrides folded into prep; Python detached dispatch preserved")
+
+# Alpha9 consumes the alpha8-generated source and makes the prep RPC the single
+# authoritative Wayland startup transaction. This is intentionally chained here
+# so every existing CI/native rebuild entry point gets the physical-device fix.
+next_patch = Path(__file__).with_name("alpha9_wayland_single_rpc.py")
+sys.argv = [str(next_patch), str(ROOT)]
+runpy.run_path(str(next_patch), run_name="__main__")
