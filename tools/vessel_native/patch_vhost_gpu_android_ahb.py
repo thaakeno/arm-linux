@@ -10,22 +10,24 @@ if len(sys.argv) != 2:
 root = pathlib.Path(sys.argv[1])
 path = root / "vhost-device-gpu/src/backend/virgl.rs"
 text = path.read_text()
-marker = "VESSEL_ANDROID_AHB_SCANOUT_V2"
+marker = "VESSEL_ANDROID_AHB_SCANOUT_V3"
 if marker in text:
-    print("[vhost-gpu-patch] synchronized Android HardwareBuffer scanout patch already applied")
+    print("[vhost-gpu-patch] resource-scoped Android HardwareBuffer scanout patch already applied")
     raise SystemExit(0)
 
 const_anchor = "const CAPSET_ID_VENUS: u32 = 4;\n"
 ffi = r'''
 
-// VESSEL_ANDROID_AHB_SCANOUT_V2
-// VirGL stays fully GPU accelerated. Every submitted VirGL context publishes a
-// GPU sync object into the bridge; scanout context 0 waits on those GPU-side
-// sync objects before reading the shared texture. The finished AHB copy is then
-// handed to Vulkan with an Android native sync FD. No CPU readback, glFinish,
-// software renderer, or TCP framebuffer path is involved.
+// VESSEL_ANDROID_AHB_SCANOUT_V3
+// VirGL remains GPU accelerated. Each VirGL context publishes its latest
+// producer GL sync, while each resource records only the contexts attached to
+// that resource. Scanout context 0 waits only those producer contexts before
+// reading the resource. The AHB copy then exports an Android native sync FD to
+// Vulkan. No CPU readback, global all-context barrier, glFinish, software
+// renderer, or framebuffer streaming path is involved.
 extern "C" {
     fn vessel_ahb_note_submit(ctx_id: u32) -> libc::c_int;
+    fn vessel_ahb_wait_context(ctx_id: u32) -> libc::c_int;
     fn vessel_ahb_set_scanout(
         resource_id: u32,
         scanout_id: u32,
@@ -34,13 +36,39 @@ extern "C" {
         width: u32,
         height: u32,
     ) -> libc::c_int;
-    fn vessel_ahb_update(resource_id: u32, scanout_id: u32) -> libc::c_int;
+    fn vessel_ahb_update(
+        resource_id: u32,
+        scanout_id: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> libc::c_int;
     fn vessel_ahb_disable(scanout_id: u32) -> libc::c_int;
 }
 '''
 if text.count(const_anchor) != 1:
     raise SystemExit("unexpected virgl capset constants")
 text = text.replace(const_anchor, const_anchor + ffi, 1)
+
+# Track which VirGL contexts can produce each resource. This gives scanout a
+# real resource dependency set instead of serializing every context in the VM.
+resource_field = "    pub uuid: Uuid,\n"
+if text.count(resource_field) != 1:
+    raise SystemExit("unexpected GpuResource layout")
+text = text.replace(resource_field, resource_field + "    pub vessel_contexts: HashSet<u32>,\n", 1)
+resource_init = "            uuid: Uuid::new_v4(),\n"
+if text.count(resource_init) != 1:
+    raise SystemExit("unexpected GpuResource initializer")
+text = text.replace(resource_init, resource_init + "            vessel_contexts: HashSet::new(),\n", 1)
+
+# Transfer writes are resource-writing paths too. Publish the producer context
+# after virglrenderer has queued the write so flush_resource can order it.
+transfer1 = '''        self.renderer\n            .transfer_write(resource_id, ctx_id, transfer.into(), None)?;\n        Ok(OkNoData)\n'''
+transfer_new = '''        self.renderer\n            .transfer_write(resource_id, ctx_id, transfer.into(), None)?;\n        // SAFETY: process-local C ABI and virglrenderer left this context current.\n        let sync_rc = unsafe { vessel_ahb_note_submit(ctx_id) };\n        if sync_rc != 0 {\n            error!("Vessel failed to publish VirGL transfer sync ctx={ctx_id} resource={resource_id}: rc={sync_rc}");\n            return Err(ErrUnspec);\n        }\n        Ok(OkNoData)\n'''
+if text.count(transfer1) != 2:
+    raise SystemExit("unexpected transfer_write layouts")
+text = text.replace(transfer1, transfer_new, 2)
 
 submit_anchor = "    fn submit_command("
 fence_anchor = "    fn create_fence("
@@ -66,10 +94,10 @@ new_submit = r'''    fn submit_command(
             .submit_cmd(ctx_id, commands, fence_ids)
             .map_err(|_| ErrUnspec)?;
 
-        // virglrenderer has just submitted this context's GL command stream and
-        // leaves its shared host context current. Publish a server-side GL sync
-        // now so a later scanout flush can wait on every rendering context on
-        // the GPU without stalling the CPU with glFinish().
+        // virglrenderer has queued this context's command stream and leaves the
+        // shared host GL context current. Publish only this context's newest
+        // producer fence; resource flush later waits it iff the resource is
+        // actually attached to this context.
         // SAFETY: process-local C ABI, scalar context ID only.
         let sync_rc = unsafe { vessel_ahb_note_submit(ctx_id) };
         if sync_rc != 0 {
@@ -81,6 +109,25 @@ new_submit = r'''    fn submit_command(
 
 '''
 text = text[:submit_start] + new_submit + text[fence_start:]
+
+# Keep resource<->context membership synchronized with virglrenderer.
+attach_old = '''        self.renderer.ctx_attach_resource(ctx_id, resource_id);\n        Ok(OkNoData)\n'''
+attach_new = '''        self.renderer.ctx_attach_resource(ctx_id, resource_id);\n        self.resources\n            .get_mut(&resource_id)\n            .ok_or(ErrInvalidResourceId)?\n            .vessel_contexts\n            .insert(ctx_id);\n        Ok(OkNoData)\n'''
+if text.count(attach_old) != 1:
+    raise SystemExit("unexpected context_attach_resource layout")
+text = text.replace(attach_old, attach_new, 1)
+
+detach_old = '''        self.renderer.ctx_detach_resource(ctx_id, resource_id);\n        Ok(OkNoData)\n'''
+detach_new = '''        self.renderer.ctx_detach_resource(ctx_id, resource_id);\n        if let Some(resource) = self.resources.get_mut(&resource_id) {\n            resource.vessel_contexts.remove(&ctx_id);\n        }\n        Ok(OkNoData)\n'''
+if text.count(detach_old) != 1:
+    raise SystemExit("unexpected context_detach_resource layout")
+text = text.replace(detach_old, detach_new, 1)
+
+destroy_old = '''        self.renderer.destroy_context(ctx_id);\n        Ok(OkNoData)\n'''
+destroy_new = '''        self.renderer.destroy_context(ctx_id);\n        for resource in self.resources.values_mut() {\n            resource.vessel_contexts.remove(&ctx_id);\n        }\n        Ok(OkNoData)\n'''
+if text.count(destroy_old) != 1:
+    raise SystemExit("unexpected destroy_context layout")
+text = text.replace(destroy_old, destroy_new, 1)
 
 set_start = text.index(set_anchor)
 flush_start = text.index(flush_anchor, set_start)
@@ -120,13 +167,26 @@ new_set = r'''    fn set_scanout(
             return Ok(OkNoData);
         }
 
-        if !self.resources.contains_key(&resource_id) {
-            return Err(ErrInvalidResourceId);
+        let producer_contexts = self
+            .resources
+            .get(&resource_id)
+            .ok_or(ErrInvalidResourceId)?
+            .vessel_contexts
+            .clone();
+
+        // Context 0 owns the scanout copy. Wait only contexts that can produce
+        // this resource, never every active VirGL context in the process.
+        self.renderer.force_ctx_0();
+        for ctx_id in producer_contexts {
+            // SAFETY: process-local C ABI; producer context came from the
+            // resource's virgl context-attachment set.
+            let rc = unsafe { vessel_ahb_wait_context(ctx_id) };
+            if rc != 0 {
+                error!("Vessel resource-scoped sync failed resource={resource_id} ctx={ctx_id}: rc={rc}");
+                return Err(ErrUnspec);
+            }
         }
 
-        // Context 0 owns the scanout copy. The bridge first waits, on-GPU, for
-        // the context sync objects recorded after guest render submissions.
-        self.renderer.force_ctx_0();
         // SAFETY: validated scalar values; bridge uses the public virglrenderer
         // resource API while context 0 is current.
         let rc = unsafe {
@@ -155,7 +215,7 @@ text = text[:set_start] + new_set + text[flush_start:]
 
 flush_start = text.index(flush_anchor)
 blob_start = text.index(blob_anchor, flush_start)
-new_flush = r'''    fn flush_resource(&mut self, resource_id: u32, _rect: virtio_gpu_rect) -> VirtioGpuResult {
+new_flush = r'''    fn flush_resource(&mut self, resource_id: u32, rect: virtio_gpu_rect) -> VirtioGpuResult {
         if self.gpu_backend.is_none() || resource_id == 0 {
             return Ok(OkNoData);
         }
@@ -166,12 +226,33 @@ new_flush = r'''    fn flush_resource(&mut self, resource_id: u32, _rect: virtio
             .ok_or(ErrInvalidResourceId)?
             .clone();
 
+        // Resource-scoped ordering: only producer contexts attached to this
+        // resource are dependencies of this scanout update.
         self.renderer.force_ctx_0();
+        for ctx_id in &resource.vessel_contexts {
+            // SAFETY: process-local C ABI; IDs are renderer-owned.
+            let rc = unsafe { vessel_ahb_wait_context(*ctx_id) };
+            if rc != 0 {
+                error!("Vessel resource-scoped sync failed resource={resource_id} ctx={ctx_id}: rc={rc}");
+                return Err(ErrUnspec);
+            }
+        }
+
         for scanout_id in resource.scanouts.iter_enabled() {
+            // Preserve virtio-gpu's damage rectangle all the way into the AHB
+            // bridge. The bridge accumulates damage per triple-buffer slot so
+            // partial copies remain correct even when a slot is reused later.
             // SAFETY: resource and scanout IDs originate from renderer state.
-            // The bridge waits on render-context GL syncs, performs a GPU blit
-            // to AHB, and exports a native producer fence for Vulkan.
-            let rc = unsafe { vessel_ahb_update(resource_id, scanout_id) };
+            let rc = unsafe {
+                vessel_ahb_update(
+                    resource_id,
+                    scanout_id,
+                    rect.x.into(),
+                    rect.y.into(),
+                    rect.width.into(),
+                    rect.height.into(),
+                )
+            };
             if rc != 0 {
                 error!("Vessel Android HardwareBuffer update failed for resource {resource_id}, scanout {scanout_id}: rc={rc}");
                 return Err(ErrUnspec);
@@ -188,11 +269,13 @@ final = path.read_text()
 for needle in (
     marker,
     "vessel_ahb_note_submit",
+    "vessel_ahb_wait_context",
+    "vessel_contexts",
     "vessel_ahb_set_scanout",
     "vessel_ahb_update",
     "vessel_ahb_disable",
     "self.renderer.force_ctx_0();",
-    "glFinish()",
+    "glFinish",
 ):
     if needle not in final:
         raise SystemExit(f"AHardwareBuffer patch verification failed: {needle}")
@@ -201,4 +284,4 @@ set_block = final[final.index(set_anchor):final.index(flush_anchor)]
 if "export_resource_dmabuf" in set_block or "set_dmabuf_scanout" in set_block:
     raise SystemExit("legacy DMA-BUF export/send survived in set_scanout")
 
-print("[vhost-gpu-patch] enabled synchronized AHardwareBuffer + native-fence VirGL scanout")
+print("[vhost-gpu-patch] enabled resource-scoped VirGL sync + damage-aware AHardwareBuffer scanout")
