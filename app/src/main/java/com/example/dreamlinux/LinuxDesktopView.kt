@@ -21,7 +21,6 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
-import kotlin.math.abs
 import kotlin.math.min
 
 /** Android Surface + Protocol 39 virtio-input + guest cursor overlay. */
@@ -41,6 +40,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     private val longPressMs = ViewConfiguration.getLongPressTimeout().toLong()
 
     @Volatile private var pointerMode = PointerMode.TRACKPAD
+    private var surfaceAttached = false
     private var lastX = 0f
     private var lastY = 0f
     private var downX = 0f
@@ -144,29 +144,38 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     override fun onDetachedFromWindow() {
         releaseDrag()
         if (active === this) active = null
-        VesselWaylandPresenter.detach()
+        detachSurfaceOnce()
         super.onDetachedFromWindow()
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         surfaceView.requestFocus()
-        VesselWaylandPresenter.attach(holder.surface)
+        if (!surfaceAttached) {
+            VesselWaylandPresenter.attach(holder.surface)
+            surfaceAttached = true
+        }
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        // Surface layout dimensions are intentionally NOT pushed into XRandR. Compose,
-        // rotation and fullscreen all produce transient sizes; the guest keeps one stable
-        // landscape mode and the Vulkan presenter letterboxes/scales it into this Surface.
+        // A Surface resize does not mean a new Surface. Re-attaching here used to
+        // tear down/rebuild Vulkan during Compose/fullscreen layout changes and
+        // caused black frames. The swapchain handles resize/out-of-date itself.
         val refresh = display?.refreshRate ?: 60f
         if (Build.VERSION.SDK_INT >= 30) {
             runCatching { holder.surface.setFrameRate(refresh, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT) }
         }
-        VesselWaylandPresenter.attach(holder.surface)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         releaseDrag()
-        VesselWaylandPresenter.detach()
+        detachSurfaceOnce()
+    }
+
+    private fun detachSurfaceOnce() {
+        if (surfaceAttached) {
+            surfaceAttached = false
+            VesselWaylandPresenter.detach()
+        }
     }
 
     fun setPointerMode(mode: PointerMode) {
@@ -309,7 +318,6 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
                     return true
                 }
                 MotionEvent.ACTION_HOVER_MOVE -> {
-                    // A physical mouse is treated as a direct pointer independent of touch mode.
                     val (x, y) = mapped(e.x, e.y)
                     VesselVirtioInput.absoluteNormalized(x, y, false)
                     return true
