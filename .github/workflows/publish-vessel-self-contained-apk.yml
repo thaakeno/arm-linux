@@ -1,0 +1,51 @@
+name: Publish Vessel Self-Contained APK
+
+on:
+  push:
+    branches: [ arch/vessel-self-contained ]
+    paths:
+      - '.github/workflows/publish-vessel-self-contained-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download verified Vessel APK artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: '35112643929'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -n vessel-self-contained-arm64 -D out
+          test -s out/app-debug.apk
+          mv out/app-debug.apk out/Vessel-alpha5-debug.apk
+          sha256sum out/Vessel-alpha5-debug.apk | tee out/Vessel-alpha5-debug.apk.sha256
+
+      - name: Publish rolling prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=vessel-self-contained-latest
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" -R "$GITHUB_REPOSITORY" \
+              out/Vessel-alpha5-debug.apk \
+              out/Vessel-alpha5-debug.apk.sha256 \
+              --clobber
+          else
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+              --target arch/vessel-self-contained \
+              --title 'Vessel Self-Contained Latest' \
+              --prerelease \
+              --notes 'Rolling physical-device test APK for the self-contained Vessel branch. Built from successful Vessel APK run 35112643929.' \
+              out/Vessel-alpha5-debug.apk \
+              out/Vessel-alpha5-debug.apk.sha256
+          fi
