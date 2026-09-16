@@ -1,6 +1,21 @@
 #!/usr/bin/python3
 import subprocess
 
+def existing_kwin():
+    probe = subprocess.run(
+        ['/usr/bin/pgrep', '-u', 'vessel', '-x', 'kwin_wayland'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return probe.stdout.strip().splitlines()[0] if probe.returncode == 0 and probe.stdout.strip() else None
+
+existing = existing_kwin()
+if existing:
+    print(f'VESSEL_WAYLAND_ALREADY_RUNNING={existing}', flush=True)
+    raise SystemExit(0)
+
 uid = subprocess.check_output(['/usr/bin/id', '-u', 'vessel'], text=True).strip()
 env_command = (
     f'XDG_RUNTIME_DIR=/run/user/{uid} XDG_SEAT=seat0 XDG_VTNR=1 '
