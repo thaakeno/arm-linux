@@ -21,7 +21,7 @@ android {
         minSdk = 30
         targetSdk = 36
         versionCode = 3000 + buildRevision
-        versionName = "2.1.0-alpha12"
+        versionName = "2.1.0-alpha13"
         // Legacy CI provenance marker only: versionName = "2.1.0-alpha2"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
@@ -57,7 +57,6 @@ android {
       compose = true
       aidl = true
       buildConfig = true
-      shaders = false
     }
     packaging {
       jniLibs {
@@ -80,55 +79,18 @@ android {
     externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
 }
 
-kotlin { jvmToolchain(17) }
-
 dependencies {
-  implementation("dev.rikka.shizuku:api:13.1.5")
-  implementation("dev.rikka.shizuku:provider:13.1.5")
-  implementation("org.apache.commons:commons-compress:1.27.1")
-  val composeBom = platform(libs.androidx.compose.bom)
-  implementation(composeBom)
-  androidTestImplementation(composeBom)
-
-  implementation(libs.androidx.core.ktx)
-  implementation(libs.androidx.lifecycle.runtime.ktx)
-  implementation(libs.androidx.activity.compose)
-  implementation(libs.androidx.lifecycle.runtime.compose)
-  implementation(libs.androidx.lifecycle.viewmodel.compose)
-  implementation(libs.androidx.compose.ui)
-  implementation(libs.androidx.compose.ui.tooling.preview)
-  implementation(libs.androidx.compose.material3)
-  implementation("androidx.compose.material:material-icons-extended")
-  debugImplementation(libs.androidx.compose.ui.tooling)
-  androidTestImplementation(libs.androidx.compose.ui.test.junit4)
-  debugImplementation(libs.androidx.compose.ui.test.manifest)
-  testImplementation(libs.junit)
-  testImplementation(libs.kotlinx.coroutines.test)
-  androidTestImplementation(libs.androidx.test.core)
-  androidTestImplementation(libs.androidx.test.ext.junit)
-  androidTestImplementation(libs.androidx.test.runner)
-  androidTestImplementation(libs.androidx.test.espresso.core)
-  implementation(libs.androidx.navigation3.ui)
-  implementation(libs.androidx.navigation3.runtime)
-  implementation(libs.androidx.lifecycle.viewmodel.navigation3)
-}
-
-val testLabel = if (localTest) "localtest-" else ""
-val stagedApkName = "Vessel-${testLabel}${android.defaultConfig.versionName}-${displayRevision}-arm64.apk"
-tasks.register<Copy>("stageDebugApk") {
-    dependsOn("assembleDebug")
-    from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
-    into(layout.buildDirectory.dir("deliverables"))
-    rename { stagedApkName }
-}
-
-tasks.register<Copy>("stageReleaseApk") {
-    dependsOn("assembleRelease")
-    from(layout.buildDirectory.file("outputs/apk/release/app-release-unsigned.apk"))
-    into(layout.buildDirectory.dir("deliverables"))
-    rename { "Vessel-${testLabel}${android.defaultConfig.versionName}-release-unsigned-${displayRevision}-arm64.apk" }
-}
-
-tasks.register("stageApks") {
-    dependsOn("stageDebugApk", "stageReleaseApk")
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.activity.compose)
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.kotlinx.serialization.json)
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 }
