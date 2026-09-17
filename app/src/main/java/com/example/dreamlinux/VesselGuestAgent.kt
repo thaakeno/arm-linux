@@ -37,10 +37,10 @@ object VesselGuestAgent {
     @Volatile private var lastStatus: String = "stopped"
     @Volatile private var connectionGeneration = 0L
 
-    fun start() {
+    fun start(bindAddress: String = "127.0.0.1") {
         if (!started.compareAndSet(false, true)) return
         authToken = UUID.randomUUID().toString() + UUID.randomUUID().toString()
-        val srv = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
+        val srv = ServerSocket(0, 8, InetAddress.getByName(bindAddress))
         server = srv
         lastStatus = "listening:${srv.localPort}"
         Thread({ acceptLoop(srv) }, "vessel-guest-agent-accept").apply {
