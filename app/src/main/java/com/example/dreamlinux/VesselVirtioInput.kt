@@ -15,16 +15,7 @@ object VesselVirtioInput {
     private var wheelX = 0f
     private var wheelY = 0f
 
-    @Volatile private var crosvmMode = false
-
     @JvmStatic private external fun nativeConfigure(touch: String, pointer: String, keyboard: String)
-    @JvmStatic private external fun nativeCrosvmConfigure(touch: String, pointer: String, keyboard: String): Boolean
-    @JvmStatic private external fun nativeCrosvmAbsolute(x: Int, y: Int, down: Boolean): Boolean
-    @JvmStatic private external fun nativeCrosvmRelative(dx: Int, dy: Int): Boolean
-    @JvmStatic private external fun nativeCrosvmButton(code: Int, down: Boolean): Boolean
-    @JvmStatic private external fun nativeCrosvmScroll(x: Int, y: Int): Boolean
-    @JvmStatic private external fun nativeCrosvmKey(code: Int, down: Boolean): Boolean
-    @JvmStatic private external fun nativeCrosvmStatus(): String
     @JvmStatic private external fun nativeAbsolute(x: Int, y: Int, down: Boolean): Boolean
     @JvmStatic private external fun nativeRelative(dx: Int, dy: Int): Boolean
     @JvmStatic private external fun nativeButton(code: Int, down: Boolean): Boolean
@@ -32,30 +23,22 @@ object VesselVirtioInput {
     @JvmStatic private external fun nativeKey(code: Int, down: Boolean): Boolean
     @JvmStatic private external fun nativeStatus(): String
 
-    fun configure(touch: String, pointer: String, keyboard: String) {
-        crosvmMode = false
-        nativeConfigure(touch, pointer, keyboard)
-    }
-
-    fun configureCrosvm(touch: String, pointer: String, keyboard: String): Boolean {
-        crosvmMode = true
-        return nativeCrosvmConfigure(touch, pointer, keyboard)
-    }
+    fun configure(touch: String, pointer: String, keyboard: String) = nativeConfigure(touch, pointer, keyboard)
 
     fun send(type: String, values: Map<String, Any>): Boolean = when (type) {
-        "abs" -> if (crosvmMode) nativeCrosvmAbsolute(values.int("x"), values.int("y"), values.bool("down")) else nativeAbsolute(values.int("x"), values.int("y"), values.bool("down"))
-        "rel" -> if (crosvmMode) nativeCrosvmRelative(values.int("dx"), values.int("dy")) else nativeRelative(values.int("dx"), values.int("dy"))
-        "btn" -> if (crosvmMode) nativeCrosvmButton(values.int("code"), values.bool("down")) else nativeButton(values.int("code"), values.bool("down"))
-        "scroll" -> if (crosvmMode) nativeCrosvmScroll(values.int("x"), values.int("y")) else nativeScroll(values.int("x"), values.int("y"))
-        "key" -> if (crosvmMode) nativeCrosvmKey(values.int("code"), values.bool("down")) else nativeKey(values.int("code"), values.bool("down"))
+        "abs" -> nativeAbsolute(values.int("x"), values.int("y"), values.bool("down"))
+        "rel" -> nativeRelative(values.int("dx"), values.int("dy"))
+        "btn" -> nativeButton(values.int("code"), values.bool("down"))
+        "scroll" -> nativeScroll(values.int("x"), values.int("y"))
+        "key" -> nativeKey(values.int("code"), values.bool("down"))
         else -> false
     }
 
-    fun absoluteNormalized(x: Float, y: Float, down: Boolean): Boolean {
-        val ix = (x.coerceIn(0f, 1f) * 32767f).toInt()
-        val iy = (y.coerceIn(0f, 1f) * 32767f).toInt()
-        return if (crosvmMode) nativeCrosvmAbsolute(ix, iy, down) else nativeAbsolute(ix, iy, down)
-    }
+    fun absoluteNormalized(x: Float, y: Float, down: Boolean): Boolean = nativeAbsolute(
+        (x.coerceIn(0f, 1f) * 32767f).toInt(),
+        (y.coerceIn(0f, 1f) * 32767f).toInt(),
+        down,
+    )
 
     fun relative(dx: Float, dy: Float): Boolean {
         val ix: Int
@@ -68,11 +51,11 @@ object VesselVirtioInput {
             fracX -= ix
             fracY -= iy
         }
-        return (ix == 0 && iy == 0) || if (crosvmMode) nativeCrosvmRelative(ix, iy) else nativeRelative(ix, iy)
+        return (ix == 0 && iy == 0) || nativeRelative(ix, iy)
     }
 
-    fun button(code: Int, down: Boolean): Boolean = if (crosvmMode) nativeCrosvmButton(code, down) else nativeButton(code, down)
-    fun key(code: Int, down: Boolean): Boolean = if (crosvmMode) nativeCrosvmKey(code, down) else nativeKey(code, down)
+    fun button(code: Int, down: Boolean): Boolean = nativeButton(code, down)
+    fun key(code: Int, down: Boolean): Boolean = nativeKey(code, down)
 
     fun scrollPrecise(x: Float, y: Float): Boolean {
         val ix: Int
@@ -85,19 +68,19 @@ object VesselVirtioInput {
             wheelX -= ix
             wheelY -= iy
         }
-        return (ix == 0 && iy == 0) || if (crosvmMode) nativeCrosvmScroll(ix, iy) else nativeScroll(ix, iy)
+        return (ix == 0 && iy == 0) || nativeScroll(ix, iy)
     }
 
     fun tapKey(code: Int) {
-        key(code, true)
-        key(code, false)
+        nativeKey(code, true)
+        nativeKey(code, false)
     }
 
     private fun tap(code: Int, shift: Boolean = false) {
-        if (shift) key(42, true)
-        key(code, true)
-        key(code, false)
-        if (shift) key(42, false)
+        if (shift) nativeKey(42, true)
+        nativeKey(code, true)
+        nativeKey(code, false)
+        if (shift) nativeKey(42, false)
     }
 
     fun text(value: String) {
@@ -125,7 +108,7 @@ object VesselVirtioInput {
         fracX = 0f; fracY = 0f; wheelX = 0f; wheelY = 0f
     }
 
-    fun status(): String = runCatching { if (crosvmMode) nativeCrosvmStatus() else nativeStatus() }.getOrElse { "virtio-input-error:${it.message}" }
+    fun status(): String = runCatching { nativeStatus() }.getOrElse { "virtio-input-error:${it.message}" }
 
     private fun Map<String, Any>.int(name: String): Int = (this[name] as? Number)?.toInt() ?: 0
     private fun Map<String, Any>.bool(name: String): Boolean = this[name] as? Boolean ?: false
