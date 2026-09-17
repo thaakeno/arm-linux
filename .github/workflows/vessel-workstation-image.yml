@@ -10,7 +10,7 @@ on:
       - 'app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt'
 
 concurrency:
-  group: vessel-workstation-image-${{ github.ref }}
+  group: vessel-workstation-image-v2-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -58,7 +58,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG=vessel-workstation-edge
+          TAG=vessel-workstation-v2-edge
           BASE=build/workstation/Vessel-Workstation-bookworm-arm64
           MANIFEST="$BASE.json"
           SOURCE_ARCHIVE="$BASE.ext4.zst"
@@ -70,21 +70,18 @@ jobs:
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title 'Vessel Workstation Edge' \
-              --notes 'Rolling prebuilt Debian Bookworm ARM64 + KDE Plasma workstation used by Vessel first-run setup.'
+              --title 'Vessel Workstation v2 Edge' \
+              --notes 'Atomic rolling prebuilt Debian Bookworm ARM64 + KDE Plasma workstation for Vessel.'
           fi
 
           cp "$SOURCE_ARCHIVE" "$STAGED_ARCHIVE"
           EXPECTED_BYTES="$(stat -c '%s' "$STAGED_ARCHIVE")"
 
-          # A rerun for the same commit must replace only that immutable-name asset.
           EXISTING_ID="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq ".assets[] | select(.name == \"$ASSET_NAME\") | .id" | head -1 || true)"
           if [ -n "$EXISTING_ID" ]; then
             gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$EXISTING_ID"
           fi
 
-          # Upload the large image by itself. Do not expose a manifest pointing at
-          # it until GitHub reports the asset fully uploaded and publicly readable.
           gh release upload "$TAG" "$STAGED_ARCHIVE" --repo "$GITHUB_REPOSITORY"
 
           READY=0
@@ -101,7 +98,6 @@ jobs:
           done
           [ "$READY" = 1 ]
 
-          # Verify CDN/public propagation before publishing the tiny pointer file.
           curl -fsSIL --retry 12 --retry-all-errors --retry-delay 5 "$PUBLIC_URL" >/dev/null
 
           python3 - "$MANIFEST" "$PUBLIC_URL" "$GITHUB_SHA" <<'PY'
@@ -117,9 +113,6 @@ jobs:
               f.write('\n')
           PY
 
-          # The manifest is the atomic publication pointer. It is replaced only
-          # after the versioned image is complete, so clients can never receive a
-          # manifest that points at a half-uploaded/404 asset.
           gh release upload "$TAG" "$MANIFEST" --clobber --repo "$GITHUB_REPOSITORY"
 
           PUBLISHED="$(curl -fsSL --retry 12 --retry-all-errors --retry-delay 3 \

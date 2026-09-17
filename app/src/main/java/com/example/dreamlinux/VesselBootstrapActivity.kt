@@ -6,7 +6,6 @@ import android.os.Environment
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -72,7 +71,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class VesselBootstrapActivity : ComponentActivity() {
     companion object {
         private const val MANIFEST_URL =
-            "https://github.com/thaakeno/arm-linux/releases/download/vessel-workstation-edge/Vessel-Workstation-bookworm-arm64.json"
+            "https://github.com/thaakeno/arm-linux/releases/download/vessel-workstation-v2-edge/Vessel-Workstation-bookworm-arm64.json"
         private const val MAX_MANIFEST_BYTES = 128 * 1024
         private const val MIN_VALID_DISK_BYTES = 512L * 1024L * 1024L
         private const val EXTRA_FREE_BYTES = 3L * 1024L * 1024L * 1024L
@@ -280,7 +279,7 @@ class VesselBootstrapActivity : ComponentActivity() {
         val url = json.getString("url")
         val parsed = URL(url)
         check(parsed.protocol == "https" && parsed.host == "github.com") { "Untrusted workstation download URL" }
-        check(parsed.path.startsWith("/thaakeno/arm-linux/releases/download/vessel-workstation-edge/")) {
+        check(parsed.path.startsWith("/thaakeno/arm-linux/releases/download/vessel-workstation-v2-edge/")) {
             "Unexpected workstation download location"
         }
         val compressedSha = json.getString("compressedSha256").lowercase()
@@ -536,12 +535,7 @@ class VesselBootstrapActivity : ComponentActivity() {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                    Icon(
-                        Icons.Default.Laptop,
-                        null,
-                        Modifier.padding(9.dp),
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
+                    Icon(Icons.Default.Laptop, null, Modifier.padding(9.dp), tint = MaterialTheme.colorScheme.primary)
                 }
                 Spacer(Modifier.width(11.dp))
                 Column(Modifier.weight(1f)) {
@@ -569,10 +563,7 @@ class VesselBootstrapActivity : ComponentActivity() {
     @Composable
     private fun SetupCard(state: BootstrapUiState) {
         ElevatedCard(shape = RoundedCornerShape(26.dp)) {
-            Column(
-                Modifier.fillMaxWidth().padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(13.dp),
-            ) {
+            Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("Debian workstation", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
@@ -629,11 +620,7 @@ class VesselBootstrapActivity : ComponentActivity() {
                         Text("Pause setup")
                     }
                 } else {
-                    Text(
-                        state.detail,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Text(state.detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (state.ready) {
                         Text(
                             "Nothing installs automatically. Press the button when you want the ${formatMiB(state.archiveBytes)} MiB workstation download to start.",
@@ -642,19 +629,11 @@ class VesselBootstrapActivity : ComponentActivity() {
                         )
                     }
                     Button(
-                        onClick = {
-                            if (state.ready) startPreparation() else refreshManifestAvailability()
-                        },
+                        onClick = { if (state.ready) startPreparation() else refreshManifestAvailability() },
                         enabled = !state.checking,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text(
-                            when {
-                                state.checking -> "Checking…"
-                                state.ready -> "Prepare workstation"
-                                else -> "Check again"
-                            },
-                        )
+                        Text(when { state.checking -> "Checking…"; state.ready -> "Prepare workstation"; else -> "Check again" })
                     }
                 }
             }
@@ -664,10 +643,7 @@ class VesselBootstrapActivity : ComponentActivity() {
     @Composable
     private fun MachineCard(state: BootstrapUiState) {
         ElevatedCard(shape = RoundedCornerShape(22.dp)) {
-            Column(
-                Modifier.fillMaxWidth().padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(13.dp),
-            ) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                 Metric(Icons.Default.DesktopWindows, "Desktop", "KDE Plasma/Wayland · preinstalled")
                 Metric(Icons.Default.Bolt, "Setup", "GitHub-built ARM64 image · no on-phone apt/dpkg")
                 Metric(Icons.Default.Computer, "Packages", "Debian Recommends enabled · full desktop integrations")

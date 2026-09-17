@@ -108,7 +108,7 @@ jobs:
           set -euxo pipefail
           grep -F 'versionName = "2.1.0-alpha16"' app/build.gradle.kts
           grep -F 'VesselBootstrapActivity' app/src/main/AndroidManifest.xml
-          grep -F 'Vessel-Workstation-bookworm-arm64.json' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
+          grep -F 'vessel-workstation-v2-edge' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
           grep -F 'ZstdInputStream' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
           grep -F 'Nothing installs automatically' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
           grep -F 'probeAsset' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
@@ -165,7 +165,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          MANIFEST_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/vessel-workstation-edge/Vessel-Workstation-bookworm-arm64.json"
+          MANIFEST_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/vessel-workstation-v2-edge/Vessel-Workstation-bookworm-arm64.json"
           READY=0
           for i in $(seq 1 180); do
             JSON="$(curl -fsSL --retry 2 --retry-all-errors --retry-delay 2 "$MANIFEST_URL" 2>/dev/null || true)"
