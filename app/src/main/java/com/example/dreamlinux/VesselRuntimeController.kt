@@ -678,7 +678,8 @@ class VesselRuntimeController(
             iface=${'$'}(ip -o link show 2>/dev/null | awk -F': ' '${'$'}2 == "vec0" {print ${'$'}2; exit}')
             [ -n "${'$'}iface" ] || iface=${'$'}(ip -o link show 2>/dev/null | awk -F': ' '${'$'}2 ~ /^vec/ {print ${'$'}2; exit}')
             if [ -z "${'$'}iface" ]; then echo VESSEL_NET_FAIL=no-vector-interface; exit 21; fi
-            ip link set "${'            ip addr replace 10.0.2.15/24 dev "${'$'}iface" || { echo VESSEL_NET_FAIL=address; exit 22; }
+            ip link set "${'$'}iface" mtu 1400 up || true
+            ip addr replace 10.0.2.15/24 dev "${'$'}iface" || { echo VESSEL_NET_FAIL=address; exit 22; }
             ip route replace default via 10.0.2.2 dev "${'$'}iface" || { echo VESSEL_NET_FAIL=route; exit 23; }
             cat >/etc/resolv.conf <<'VESSEL_RESOLV'
             nameserver 1.1.1.1
