@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
+import android.os.Environment
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
@@ -22,8 +23,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Fresh installs download a CI-built, already configured Debian + Plasma image.
- * Existing private disks are never replaced. The heavy apt/dpkg work therefore
- * happens once on GitHub's ARM64 runner instead of on the phone.
+ * Existing private or legacy disks are never replaced. The heavy apt/dpkg work
+ * therefore happens once on GitHub's ARM64 runner instead of on the phone.
  */
 class VesselBootstrapActivity : Activity() {
     companion object {
@@ -53,10 +54,20 @@ class VesselBootstrapActivity : Activity() {
 
     private val machineDir: File by lazy { File(filesDir, "vessel-machine").apply { mkdirs() } }
     private val disk: File by lazy { File(machineDir, "debian-docker.ext4") }
+    private val legacyDisk: File by lazy {
+        File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            "LinuxPC/Vessel-Debian/debian-docker.ext4",
+        )
+    }
+
+    private fun hasExistingLinuxDisk(): Boolean =
+        (disk.isFile && disk.length() > MIN_VALID_DISK_BYTES) ||
+            (legacyDisk.isFile && legacyDisk.length() > MIN_VALID_DISK_BYTES && legacyDisk.canRead())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (disk.isFile && disk.length() > MIN_VALID_DISK_BYTES) {
+        if (hasExistingLinuxDisk()) {
             openVessel()
             return
         }
@@ -138,7 +149,7 @@ class VesselBootstrapActivity : Activity() {
 
     private fun prepareWorkstation() {
         check(machineDir.exists() || machineDir.mkdirs()) { "Cannot create Vessel private storage" }
-        if (disk.isFile && disk.length() > MIN_VALID_DISK_BYTES) return
+        if (hasExistingLinuxDisk()) return
 
         val manifestText = readText(MANIFEST_URL, MAX_MANIFEST_BYTES)
         val manifest = parseManifest(manifestText)
