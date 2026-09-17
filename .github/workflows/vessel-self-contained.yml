@@ -106,7 +106,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.1.0-alpha17"' app/build.gradle.kts
+          grep -F 'versionName = "2.2.0"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
           grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
@@ -125,7 +125,9 @@ jobs:
           grep -F 'partialCopies=' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'FRAME_SLOTS = 3' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'resource_changed' tools/vessel_native/vessel_ahb_bridge.cpp
-          grep -F 'security.sandbox.content.level", 0' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          ! grep -Fq 'MOZ_DISABLE_CONTENT_SANDBOX=1' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          ! grep -Fq 'security.sandbox.content.level", 0' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'source_resource_id' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'state.resource_id == resource_id' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'VESSEL_ANDROID_AHB_SCANOUT_V3' tools/vessel_native/patch_vhost_gpu_android_ahb.py
           ! find tools/vessel_native -maxdepth 1 -name 'alpha*.py' -print -quit | grep -q .
