@@ -90,6 +90,7 @@ struct BufferSlot {
     bool registered = false;
     bool busy = false;
     bool content_valid = false;
+    uint32_t source_resource_id = 0;
     uint32_t serial = 0;
     DamageRect pending_damage{};
 };
@@ -504,11 +505,20 @@ int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t source_x, uin
     return 0;
 }
 
-int find_free_slot(ScanoutState& state) {
-    // Never block the vhost-user-gpu dispatch thread waiting for Android. ACKs
-    // are opportunistically retired; if every source buffer is still in
-    // flight we drop this presentation update and carry its damage forward.
+int find_free_slot(ScanoutState& state, uint32_t resource_id) {
+    // KWin page-flips between a small set of backing resources. Prefer the free
+    // Android buffer that already mirrors this exact resource, so RESOURCE_FLUSH
+    // damage can stay partial after the first copy instead of forcing a full-frame
+    // copy merely because the compositor changed front buffers.
     drain_acks();
+    for (size_t n = 0; n < FRAME_SLOTS; ++n) {
+        const uint32_t idx = (state.next_slot + static_cast<uint32_t>(n)) % FRAME_SLOTS;
+        const auto& slot = state.slots[idx];
+        if (!slot.busy && slot.content_valid && slot.source_resource_id == resource_id) {
+            state.next_slot = (idx + 1) % FRAME_SLOTS;
+            return static_cast<int>(idx);
+        }
+    }
     for (size_t n = 0; n < FRAME_SLOTS; ++n) {
         const uint32_t idx = (state.next_slot + static_cast<uint32_t>(n)) % FRAME_SLOTS;
         if (!state.slots[idx].busy) {
@@ -591,14 +601,9 @@ int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint3
         logi("scanout geometry changed; rebuilding AHB ring " +
              std::to_string(width) + "x" + std::to_string(height));
     } else if (resource_changed) {
-        // SET_SCANOUT is also the virtio-gpu page-flip operation. Keep the
-        // persistent AHB ring and simply make the next copy a full refresh.
-        // Subsequent RESOURCE_FLUSH damage can become partial again instead of
-        // paying AHardwareBuffer allocation/import/registration every frame.
-        const DamageRect full = full_damage(state);
-        for (auto& slot : state.slots) {
-            if (slot.buffer && slot.content_valid) slot.pending_damage = full;
-        }
+        // SET_SCANOUT is a page flip, not a display-mode change. Per-slot source
+        // identity below decides whether a full copy is required for the selected
+        // buffer. Do not poison every slot's damage history on each flip.
     }
     state.resource_id = resource_id;
     state.x = x;
@@ -611,7 +616,7 @@ int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint3
         }
     }
 
-    const int idx = find_free_slot(state);
+    const int idx = find_free_slot(state, resource_id);
     if (idx < 0) {
         ++g_drop_count;
         return 0;
@@ -620,7 +625,8 @@ int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint3
     const int alloc_rc = allocate_slot(slot, width, height, static_cast<uint32_t>(idx));
     if (alloc_rc) return alloc_rc;
 
-    DamageRect copy_damage = slot.content_valid ? slot.pending_damage : full_damage(state);
+    const bool same_resource = slot.content_valid && slot.source_resource_id == resource_id;
+    DamageRect copy_damage = same_resource ? union_damage(slot.pending_damage, incoming_damage) : full_damage(state);
     if (!copy_damage.valid) copy_damage = incoming_damage;
     const bool full = copy_damage.x == 0 && copy_damage.y == 0 && copy_damage.width == width && copy_damage.height == height;
     if (full) ++g_full_copy_count; else ++g_partial_copy_count;
@@ -629,6 +635,7 @@ int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint3
     const int copy_rc = copy_resource(resource_id, slot, state.x, state.y, copy_damage, &fence_fd);
     if (copy_rc) return copy_rc;
     slot.content_valid = true;
+    slot.source_resource_id = resource_id;
     slot.pending_damage = {};
     return send_frame(scanout_id, static_cast<uint32_t>(idx), state, fence_fd);
 }
