@@ -20,8 +20,8 @@ android {
         buildConfigField("boolean", "LOCAL_TEST", localTest.toString())
         minSdk = 30
         targetSdk = 36
-        versionCode = 3000 + buildRevision
-        versionName = "2.1.0-alpha17"
+        versionCode = 4000 + buildRevision
+        versionName = "2.2.0"
         // Legacy CI provenance marker only: versionName = "2.1.0-alpha2"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
