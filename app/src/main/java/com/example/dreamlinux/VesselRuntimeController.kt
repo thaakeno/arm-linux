@@ -37,7 +37,7 @@ class VesselRuntimeController(
 ) {
     companion object {
         const val PROTOCOL = 40
-        const val REVISION = "v60-private-rootfs-fast-storage-r1"
+        const val REVISION = "v61-dpkg-unattended-recovery-r1"
         const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahb-pageflip-ring-v7"
         const val INPUT_TRANSPORT = "virtio-input-vhost-user-same-uid-v1"
         const val UML_VCPUS = 6
@@ -387,7 +387,6 @@ class VesselRuntimeController(
         }
     }
 
-
     private val staleRuntimeNeedles = listOf(
         "libvessel_uml.so",
         "libvessel_umnet.so",
@@ -673,7 +672,6 @@ class VesselRuntimeController(
         }
     }
 
-
     private fun ensureGuestNetworkBlocking() {
         val command = """
             set +e
@@ -841,13 +839,13 @@ class VesselRuntimeController(
         progress("plasma_recovery", 53, "Checking interrupted Debian package state")
         val reporter = PackageProgressReporter("plasma_recovery", 53)
         val cmd = packagePolicyCommand() + "\n" + """
-            export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1
+            export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1 UCF_FORCE_CONFFOLD=1 NEEDRESTART_MODE=a
             pending=${'$'}(dpkg-query -W -f='${'$'}{db:Status-Abbrev} ${'$'}{binary:Package}\n' 2>/dev/null | awk '${'$'}1 !~ /^ii/ {c++} END {print c+0}')
             echo VESSEL_PENDING_PACKAGES=${'$'}pending
             if [ "${'$'}pending" -gt 0 ]; then
-              dpkg --configure -a || {
-                apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 -f install -y
-                dpkg --configure -a
+              dpkg --force-confdef --force-confold --configure -a || {
+                apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -f install -y
+                dpkg --force-confdef --force-confold --configure -a
               }
             fi
         """.trimIndent()
@@ -886,15 +884,15 @@ class VesselRuntimeController(
         progress("plasma_install", 56, "Installing missing Plasma components")
         val reporter = PackageProgressReporter("plasma_install", 56)
         val cmd = packagePolicyCommand() + "\n" +
-            "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
+            "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1 UCF_FORCE_CONFFOLD=1 NEEDRESTART_MODE=a; " +
             "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
-            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y " +
+            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y " +
             "kde-plasma-desktop plasma-workspace plasma-desktop kwin-x11 kwin-wayland plasma-workspace-wayland xwayland qtwayland5 wayland-utils systemsettings python3-dbus python3-gi " +
             "xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt " +
             "breeze breeze-icon-theme hicolor-icon-theme desktop-file-utils xdg-user-dirs shared-mime-info menu appstream apt-config-icons apt-config-icons-large apt-config-icons-hidpi packagekit packagekit-tools policykit-1 plasma-discover librsvg2-bin python3-yaml " +
             "qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons " +
             "qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects qml-module-qt-labs-platform plasma-integration plasma-pa pulseaudio pulseaudio-utils alsa-utils kactivitymanagerd libkf5service-data " +
-            "fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation firefox-esr konsole dolphin ark kcalc okular gwenview kate && dpkg --configure -a && apt-get clean"
+            "fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation firefox-esr konsole dolphin ark kcalc okular gwenview kate && dpkg --force-confdef --force-confold --configure -a && apt-get clean"
         val (rc, out) = guestBlocking(cmd, 2400, reporter::onLine)
         if (rc != 0) { append("[plasma] apt failed rc=$rc ${out.takeLast(6000)}\n"); error("Plasma Wayland package installation failed (apt rc=$rc)") }
         val metadataRefresh = guestBlocking(
@@ -907,7 +905,6 @@ class VesselRuntimeController(
         guestBlocking("install -d -m 755 /var/cache/vessel; touch $readyMarker", 5)
         progress("plasma_ready", 72, "KDE Plasma Wayland workstation ready")
     }
-
 
     private fun guestServicesCommand(): String {
         val audioPort = VesselAudioBridge.port()
@@ -987,8 +984,6 @@ class VesselRuntimeController(
         return command
     }
 
-    // X11 is an experimental fallback. It does not use the strict Wayland
-    // one-final-RPC path, so retain a blocking service setup helper for it.
     private fun setupGuestServicesBlocking() {
         val audioPort = VesselAudioBridge.port()
         val controlPort = VesselGuestAgent.port()
@@ -1036,7 +1031,6 @@ class VesselRuntimeController(
             set -e
             mkdir -p /run/dbus /run/user /usr/local/bin /home/vessel/.config /home/vessel/.mozilla/firefox/vessel.default
             mountpoint -q /tmp || mount -t tmpfs -o mode=1777,size=256m tmpfs /tmp
-            # tmpfs replaced the old /tmp tree, so recreate the Xwayland socket directory.
             mkdir -p /tmp/.X11-unix
             chmod 1777 /tmp/.X11-unix
             mkdir -p /run/user
@@ -1050,9 +1044,6 @@ class VesselRuntimeController(
             timeout 8s udevadm trigger --action=add || true
             timeout 12s udevadm settle --timeout=10 || true
             echo VESSEL_PREP_STAGE=udev-ready
-            # /run lives on the persistent rootfs, so a dead system bus can leave a
-            # stale socket behind across UML boots. Recreate the bus instead of trusting
-            # the socket inode, and load the ConsoleKit policy before startup.
             install -d -m 755 /run/dbus /etc/dbus-1/system.d
             cat >/etc/dbus-1/system.d/vessel-consolekit.conf <<'VDBUS'
             <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
@@ -1069,8 +1060,6 @@ class VesselRuntimeController(
               </policy>
             </busconfig>
             VDBUS
-            # No user session bus exists at this stage, so terminate any stale/system
-            # dbus-daemon left by an earlier prep attempt and create one known-good bus.
             pkill -x dbus-daemon 2>/dev/null || true
             for i in ${'$'}(seq 1 40); do pgrep -x dbus-daemon >/dev/null || break; sleep .05; done
             pgrep -x dbus-daemon >/dev/null && pkill -KILL -x dbus-daemon 2>/dev/null || true
@@ -1103,9 +1092,6 @@ class VesselRuntimeController(
             uid=${'$'}(id -u vessel); gid=${'$'}(id -g vessel)
             mkdir -p /run/user/${'$'}uid; chown ${'$'}uid:${'$'}gid /run/user/${'$'}uid; chmod 700 /run/user/${'$'}uid
             test -c /dev/tty1 || mknod -m 620 /dev/tty1 c 4 1
-            # KWin 5.27 requires a real session object for DRM/input fd acquisition.
-            # Vessel has no logind PID1, so expose a minimal ConsoleKit-compatible
-            # session broker that opens devices as root and passes the fds via D-Bus.
             install -d -m 755 /usr/local/lib/vessel
             cat >/usr/local/lib/vessel/consolekit_shim.py <<'VCK'
             #!/usr/bin/python3
@@ -1207,7 +1193,6 @@ class VesselRuntimeController(
             done
             dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ConsoleKit 2>/dev/null | grep -q 'boolean true' || { cat /tmp/vessel-consolekit.log; exit 47; }
             echo VESSEL_PREP_STAGE=consolekit-ready
-            # Keep ordinary unix permissions sane too; the broker still owns the fd handoff.
             test ! -c /dev/dri/card0 || { chgrp video /dev/dri/card0 || true; chmod 0660 /dev/dri/card0 || true; }
             test ! -c /dev/dri/renderD128 || { chgrp render /dev/dri/renderD128 || true; chmod 0660 /dev/dri/renderD128 || true; }
             rm -f /etc/X11/xorg.conf.d/99-vessel.conf
@@ -1299,9 +1284,6 @@ class VesselRuntimeController(
         }
         var waylandReadyInPrep = false
         if (backend == "wayland") {
-            // Take one atomic snapshot of the hot runtime. If an update races
-            // this boot, use the APK's built-in bootstrap rather than mixing
-            // files from two revisions.
             val hotRevisionBefore = VesselUpdateManager.currentRuntimeRevision(context)
             val stagedOverrides = listOf(
                 "wayland-session.sh" to "/usr/local/bin/vessel-plasma-session",
@@ -1341,26 +1323,16 @@ class VesselRuntimeController(
         append("[desktop] v57 authoritative ONE final tty RPC: services + prep + Wayland readiness\n")
         val prepResult = guestBlocking(preparedDesktop, 150) { raw ->
             when {
-                raw.contains("VESSEL_AUDIO_READY") ->
-                    progress("desktop_services", 73, "Linux audio bridge prepared")
-                raw.contains("VESSEL_CONTROL_AGENT_PREPARED") ->
-                    progress("desktop_control", 74, "Linux control service prepared")
-                raw.contains("VESSEL_PREP_STAGE=profile-ready") ->
-                    progress("desktop_profile", 75, "Desktop profile ready")
-                raw.contains("VESSEL_PREP_STAGE=udevd-ready") ->
-                    progress("desktop_devices", 76, "Desktop device service ready")
-                raw.contains("VESSEL_PREP_STAGE=udev-ready") ->
-                    progress("desktop_devices", 77, "Desktop devices ready")
-                raw.contains("VESSEL_PREP_STAGE=dbus-ready") ->
-                    progress("desktop_dbus", 79, "Wayland system bus ready")
-                raw.contains("VESSEL_PREP_STAGE=consolekit-ready") ->
-                    progress("desktop_session", 81, "DRM session broker ready")
-                raw.contains("VESSEL_WAYLAND_BOOTSTRAP_BEGIN") ->
-                    progress("desktop_launch", 83, "Launching KWin Wayland")
-                raw.contains("VESSEL_CONTROL_AGENT_DISPATCHED") ->
-                    progress("desktop_control_live", 87, "Desktop control service starting")
-                raw.contains("VESSEL_WAYLAND_READY") ->
-                    progress("desktop_ready", 88, "Plasma Wayland ready")
+                raw.contains("VESSEL_AUDIO_READY") -> progress("desktop_services", 73, "Linux audio bridge prepared")
+                raw.contains("VESSEL_CONTROL_AGENT_PREPARED") -> progress("desktop_control", 74, "Linux control service prepared")
+                raw.contains("VESSEL_PREP_STAGE=profile-ready") -> progress("desktop_profile", 75, "Desktop profile ready")
+                raw.contains("VESSEL_PREP_STAGE=udevd-ready") -> progress("desktop_devices", 76, "Desktop device service ready")
+                raw.contains("VESSEL_PREP_STAGE=udev-ready") -> progress("desktop_devices", 77, "Desktop devices ready")
+                raw.contains("VESSEL_PREP_STAGE=dbus-ready") -> progress("desktop_dbus", 79, "Wayland system bus ready")
+                raw.contains("VESSEL_PREP_STAGE=consolekit-ready") -> progress("desktop_session", 81, "DRM session broker ready")
+                raw.contains("VESSEL_WAYLAND_BOOTSTRAP_BEGIN") -> progress("desktop_launch", 83, "Launching KWin Wayland")
+                raw.contains("VESSEL_CONTROL_AGENT_DISPATCHED") -> progress("desktop_control_live", 87, "Desktop control service starting")
+                raw.contains("VESSEL_WAYLAND_READY") -> progress("desktop_ready", 88, "Plasma Wayland ready")
             }
         }
         check(prepResult.first == 0) { "desktop prep failed: ${prepResult.second.takeLast(8000)}" }
@@ -1479,8 +1451,6 @@ class VesselRuntimeController(
                 setupGuestServicesBlocking()
             }
             launchDesktop()
-            // From this point forward tty0 is never used for app/terminal/stats
-            // commands. The agent reconnects independently and cannot fail boot.
             useGuestAgent = true
             if (VesselGuestAgent.waitUntilConnected(8_000)) {
                 append("[control] persistent Debian control agent connected; post-boot RPC left tty0 permanently\n")
