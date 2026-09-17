@@ -1,26 +1,10 @@
 {
   "hotApi": 1,
-  "revision": "v49.0.0-edge2",
+  "revision": "v61.1.0-kwin-kservice-recovery",
   "files": [
     {
-      "name": "wayland-cleanup.sh",
-      "sha256": "6be9b89f45d5ec35009930737d0039b5d5c6348b3bef79fbde969f241d28f51f"
-    },
-    {
-      "name": "wayland-check.sh",
-      "sha256": "697d1ec01ccdae95f18c4943f45b41a59ca39657798f4889a2abc0223c988495"
-    },
-    {
-      "name": "wayland-session.sh",
-      "sha256": "1bbfb72fb6f2839b677e085fc22303c41fbbc1cd7ca9d7ecac9dbcb6e4877fa5"
-    },
-    {
-      "name": "launch-wayland.py",
-      "sha256": "f943784ecfd7a8caa17d6825d21c9f0c0c18285cfce5209695d10468dac92af5"
-    },
-    {
       "name": "wayland-postprep.sh",
-      "sha256": "b152d9c996ee75d5b60129fd2677ac600e28abdd6c70d556e7baebd70e304e00"
+      "sha256": "d7ed843915674162710b01f7173c8e3595d816030bec286a00f4dcd0041e158e"
     }
   ]
 }
