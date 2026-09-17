@@ -875,8 +875,8 @@ class VesselActivity : ComponentActivity() {
                         line.contains("READY", ignoreCase = true)
                     )
                 }
-                .takeLast(8)
                 .toList()
+                .takeLast(8)
         }
         ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
             Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
