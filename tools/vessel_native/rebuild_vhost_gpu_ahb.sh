@@ -20,7 +20,7 @@ INCLUDE_ROOT="$WORK/include"
 CXX="$TOOLCHAIN/bin/aarch64-linux-android29-clang++"
 NM="$TOOLCHAIN/bin/llvm-nm"
 
-echo "[vessel-v6] building penta-buffer AHB bridge variants"
+echo "[vessel-v7] building triple-buffer AHB bridge variants"
 "$CXX" --sysroot="$TOOLCHAIN/sysroot" -std=c++17 -fPIC -shared \
   -Wall -Wextra -Werror -I"$INCLUDE_ROOT" \
   "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp" \
@@ -64,9 +64,9 @@ grep -Fq 'glFenceSync' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
 grep -Fq 'glWaitSync' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
 grep -Fq 'vessel_ahb_wait_context' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
 grep -Fq 'pending_damage' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
-grep -Fq 'FRAME_SLOTS = 5' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
+grep -Fq 'FRAME_SLOTS = 3' "$ROOT/tools/vessel_native/vessel_ahb_bridge.cpp"
 
-echo "[vessel-v6] system EGL + bundled ANGLE bridge variants ready"
+echo "[vessel-v7] system EGL + bundled ANGLE bridge variants ready"
 
 for bridge in system angle; do
   "$NM" -D --undefined-only "$OUT/libvessel_ahb_bridge_${bridge}.so" | grep -F 'virgl_renderer_resource_get_info' >/dev/null
@@ -153,19 +153,19 @@ ANGLE_PACKAGE="$(tail -1 "$WORK/pkg-meta/angle-android.txt" 2>/dev/null || echo 
 VIRGL_PACKAGE="$(tail -1 "$WORK/pkg-meta/virglrenderer-android.txt" 2>/dev/null || echo cached)"
 {
   echo protocol=40
-  echo runtime=v41-wayland-async-surface-system-egl-r1
+  echo runtime=v58-smooth-pageflip-input-browser-r1
   echo "kernel_sha256=$(sha256sum "$OUT/libvessel_uml.so" | awk '{print $1}')"
   echo "vhost_gpu_system_sha256=$(sha256sum "$OUT/libvessel_vhost_gpu_system.so" | awk '{print $1}')"
   echo "vhost_gpu_angle_sha256=$(sha256sum "$OUT/libvessel_vhost_gpu_angle.so" | awk '{print $1}')"
   echo "angle_package=$ANGLE_PACKAGE"
   echo "virgl_package=$VIRGL_PACKAGE"
   echo rootfs=external:Download/LinuxPC/Vessel-Debian/debian-docker.ext4
-  echo display_bridge=ahb-async-native-surface-v6
+  echo display_bridge=ahb-pageflip-ring-v7
   echo "# legacy-ci display_bridge=android-hardware-buffer-syncfd-v2"
   echo "# legacy-ci runtime=v39-self-contained-ahb-syncfd-virtio-input-r7"
   echo virgl_sync=resource-scoped
   echo damage_updates=enabled
-  echo presenter_slots=5
+  echo presenter_slots=3
   echo presenter_socket_thread=decoupled
   echo presenter_fence_retirement=epoll-native-syncfd
   echo presenter_backpressure=drop-nonblocking
@@ -182,6 +182,6 @@ VIRGL_PACKAGE="$(tail -1 "$WORK/pkg-meta/virglrenderer-android.txt" 2>/dev/null 
   echo display_y_flip=runtime-selectable-default-on
 } > "$MANIFEST"
 
-echo "[vessel-v6] Wayland/system-EGL dual-backend runtime ready"
+echo "[vessel-v7] Wayland/system-EGL dual-backend runtime ready"
 file "$OUT/libvessel_ahb_bridge_system.so" "$OUT/libvessel_ahb_bridge_angle.so" "$OUT/libvessel_vhost_gpu_system.so" "$OUT/libvessel_vhost_gpu_angle.so"
 cat "$MANIFEST"
