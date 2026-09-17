@@ -452,7 +452,7 @@ class VesselBootstrapActivityV2 : ComponentActivity() {
         tracker: DownloadProgressTracker,
         manifest: ImageManifest,
     ) {
-        repeat(2) { attempt ->
+        for (attempt in 0 until 2) {
             check(!cancelled) { "Setup cancelled" }
 
             if (target.length() > chunk.bytes) {
