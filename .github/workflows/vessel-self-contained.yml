@@ -106,7 +106,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.1.0-alpha16"' app/build.gradle.kts
+          grep -F 'versionName = "2.1.0-alpha17"' app/build.gradle.kts
+          test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivity' app/src/main/AndroidManifest.xml
           grep -F 'vessel-workstation-v2-edge' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
           grep -F 'ZstdInputStream' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
@@ -167,16 +168,18 @@ jobs:
           set -euo pipefail
           MANIFEST_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/vessel-workstation-v2-edge/Vessel-Workstation-bookworm-arm64.json"
           READY=0
-          for i in $(seq 1 180); do
+          # The image workflow runs independently on native ARM64. Give it enough
+          # time to finish without turning a valid APK build into a race failure.
+          for i in $(seq 1 360); do
             JSON="$(curl -fsSL --retry 2 --retry-all-errors --retry-delay 2 "$MANIFEST_URL" 2>/dev/null || true)"
             ASSET_URL="$(jq -r '.url // empty' <<<"$JSON" 2>/dev/null || true)"
             SHA="$(jq -r '.compressedSha256 // empty' <<<"$JSON" 2>/dev/null || true)"
-            if [ -n "$ASSET_URL" ] && [ ${#SHA} -eq 64 ] && curl -fsSIL --retry 2 --retry-all-errors --retry-delay 2 "$ASSET_URL" >/dev/null 2>&1; then
+            if [ -n "$ASSET_URL" ] && [ ${#SHA} -eq 64 ] && curl -fsSIL --connect-timeout 15 --max-time 45 "$ASSET_URL" >/dev/null 2>&1; then
               READY=1
               echo "workstation bootstrap asset is publicly readable: $ASSET_URL"
               break
             fi
-            echo "waiting for complete workstation release publication ($i/180)"
+            echo "waiting for complete workstation release publication ($i/360)"
             sleep 5
           done
           [ "$READY" = 1 ]
