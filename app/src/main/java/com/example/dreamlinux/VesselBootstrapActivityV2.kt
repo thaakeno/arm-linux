@@ -3,6 +3,7 @@ package com.example.dreamlinux
 import android.content.Intent
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -62,7 +63,11 @@ import java.net.URL
 import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.util.Collections
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLongArray
 
 /**
  * Second-generation first-run workstation bootstrap.
@@ -85,6 +90,9 @@ class VesselBootstrapActivityV2 : ComponentActivity() {
         private const val MAX_CHUNK_BYTES = 512L * 1024L * 1024L
         private const val MAX_CHUNKS = 32
         private const val BUFFER_BYTES = 1024 * 1024
+        private const val PARALLEL_DOWNLOADS = 6
+        private const val PROGRESS_UI_INTERVAL_MS = 250L
+        private const val SPEED_SAMPLE_INTERVAL_MS = 500L
     }
 
     private data class ImageChunk(
@@ -115,6 +123,82 @@ class VesselBootstrapActivityV2 : ComponentActivity() {
         val archiveBytes: Long = 0L,
         val chunkCount: Int = 0,
     )
+
+    private data class DownloadSnapshot(
+        val doneBytes: Long,
+        val bytesPerSecond: Double,
+        val etaSeconds: Long,
+        val activeStreams: Int,
+    )
+
+    private class DownloadProgressTracker(
+        private val totalBytes: Long,
+        initialDone: LongArray,
+    ) {
+        private val doneByChunk = AtomicLongArray(initialDone)
+        private val activeStreams = AtomicInteger(0)
+        private val lock = Any()
+        private var sampleAtMs = SystemClock.elapsedRealtime()
+        private var sampleBytes = initialDone.sum()
+        private var smoothedBytesPerSecond = 0.0
+        private var lastUiAtMs = 0L
+
+        fun streamStarted() {
+            activeStreams.incrementAndGet()
+        }
+
+        fun streamStopped() {
+            activeStreams.decrementAndGet()
+        }
+
+        fun update(index: Int, doneBytes: Long, force: Boolean = false): DownloadSnapshot? {
+            doneByChunk.set(index, doneBytes.coerceAtLeast(0L))
+            return synchronized(lock) {
+                val now = SystemClock.elapsedRealtime()
+                var aggregate = 0L
+                for (i in 0 until doneByChunk.length()) {
+                    aggregate += doneByChunk.get(i)
+                }
+                aggregate = aggregate.coerceIn(0L, totalBytes)
+
+                val sampleDeltaMs = now - sampleAtMs
+                if (sampleDeltaMs >= SPEED_SAMPLE_INTERVAL_MS) {
+                    val byteDelta = (aggregate - sampleBytes).coerceAtLeast(0L)
+                    val instant = if (sampleDeltaMs > 0L) {
+                        byteDelta * 1000.0 / sampleDeltaMs.toDouble()
+                    } else {
+                        0.0
+                    }
+                    if (instant > 0.0) {
+                        smoothedBytesPerSecond = if (smoothedBytesPerSecond <= 0.0) {
+                            instant
+                        } else {
+                            smoothedBytesPerSecond * 0.72 + instant * 0.28
+                        }
+                    }
+                    sampleAtMs = now
+                    sampleBytes = aggregate
+                }
+
+                if (!force && now - lastUiAtMs < PROGRESS_UI_INTERVAL_MS) {
+                    return@synchronized null
+                }
+                lastUiAtMs = now
+                val remaining = (totalBytes - aggregate).coerceAtLeast(0L)
+                val eta = if (smoothedBytesPerSecond >= 1024.0) {
+                    (remaining / smoothedBytesPerSecond).toLong().coerceAtLeast(0L)
+                } else {
+                    -1L
+                }
+                DownloadSnapshot(
+                    doneBytes = aggregate,
+                    bytesPerSecond = smoothedBytesPerSecond,
+                    etaSeconds = eta,
+                    activeStreams = activeStreams.get().coerceAtLeast(0),
+                )
+            }
+        }
+    }
 
     private val uiState = MutableStateFlow(BootstrapUiState())
     private val running = AtomicBoolean(false)
@@ -251,54 +335,78 @@ class VesselBootstrapActivityV2 : ComponentActivity() {
             if (file.name !in expectedNames) file.delete()
         }
 
-        val chunkFiles = ArrayList<File>(manifest.chunks.size)
-        var baseDone = 0L
+        val chunkFiles = manifest.chunks.map { chunk -> File(chunkDir, chunk.name) }
+        val initialDone = LongArray(manifest.chunks.size)
+
         manifest.chunks.forEachIndexed { position, chunk ->
             check(!cancelled) { "Setup cancelled" }
-            val target = File(chunkDir, chunk.name)
+            val target = chunkFiles[position]
             if (target.length() > chunk.bytes) target.delete()
 
             if (target.isFile && target.length() == chunk.bytes) {
                 updateUi(
-                    downloadPercent(baseDone, manifest.compressedBytes),
+                    downloadPercent(initialDone.sum(), manifest.compressedBytes),
                     "Checking workstation download",
                     "Part ${position + 1}/${manifest.chunks.size} · verifying cached data",
                 )
-                if (sha256(target) != chunk.sha256) target.delete()
-            }
-
-            if (!target.isFile || target.length() != chunk.bytes) {
-                updateUi(
-                    downloadPercent(baseDone, manifest.compressedBytes),
-                    "Downloading complete Plasma workstation",
-                    "Part ${position + 1}/${manifest.chunks.size} · resumable · no apt install on your phone",
-                )
-                downloadResumable(chunk.url, target, chunk.bytes) { done, _ ->
-                    check(!cancelled) { "Setup cancelled" }
-                    val aggregate = baseDone + done
-                    updateUi(
-                        downloadPercent(aggregate, manifest.compressedBytes),
-                        "Downloading complete Plasma workstation",
-                        "Part ${position + 1}/${manifest.chunks.size} · ${formatMiB(aggregate)} / ${formatMiB(manifest.compressedBytes)} MiB",
-                    )
+                if (sha256(target) == chunk.sha256) {
+                    initialDone[position] = chunk.bytes
+                } else {
+                    target.delete()
                 }
+            } else if (target.isFile) {
+                initialDone[position] = target.length().coerceAtMost(chunk.bytes)
             }
-
-            check(target.length() == chunk.bytes) { "Workstation part ${position + 1} ended early" }
-            updateUi(
-                downloadPercent(baseDone + chunk.bytes, manifest.compressedBytes),
-                "Verifying workstation download",
-                "Part ${position + 1}/${manifest.chunks.size} · SHA-256",
-            )
-            if (sha256(target) != chunk.sha256) {
-                target.delete()
-                error("Workstation part ${position + 1} checksum mismatch; Retry will redownload only that part")
-            }
-            chunkFiles += target
-            baseDone += chunk.bytes
         }
 
-        check(baseDone == manifest.compressedBytes) { "Workstation download is incomplete" }
+        val tracker = DownloadProgressTracker(manifest.compressedBytes, initialDone)
+        val pendingChunks = manifest.chunks.filter { chunk -> initialDone[chunk.index] < chunk.bytes }
+
+        if (pendingChunks.isNotEmpty()) {
+            val workerCount = minOf(PARALLEL_DOWNLOADS, pendingChunks.size)
+            updateUi(
+                downloadPercent(initialDone.sum(), manifest.compressedBytes),
+                "Downloading complete Plasma workstation",
+                "$workerCount parallel streams · ${formatMiB(initialDone.sum())} / ${formatMiB(manifest.compressedBytes)} MiB · measuring speed…",
+            )
+
+            val executor = Executors.newFixedThreadPool(workerCount) { runnable ->
+                Thread(runnable, "vessel-workstation-download").apply { isDaemon = true }
+            }
+            val futures = pendingChunks.map { chunk ->
+                executor.submit {
+                    tracker.streamStarted()
+                    try {
+                        downloadAndVerifyChunk(
+                            chunk = chunk,
+                            target = chunkFiles[chunk.index],
+                            tracker = tracker,
+                            manifest = manifest,
+                        )
+                    } finally {
+                        tracker.streamStopped()
+                    }
+                }
+            }
+            executor.shutdown()
+            try {
+                futures.forEach { future ->
+                    try {
+                        future.get()
+                    } catch (t: Throwable) {
+                        executor.shutdownNow()
+                        throw (t.cause ?: t)
+                    }
+                }
+            } finally {
+                if (!executor.awaitTermination(2, TimeUnit.SECONDS)) {
+                    executor.shutdownNow()
+                }
+            }
+        }
+
+        val downloadedBytes = chunkFiles.sumOf { it.length() }
+        check(downloadedBytes == manifest.compressedBytes) { "Workstation download is incomplete" }
         check(!cancelled) { "Setup cancelled" }
 
         val tmp = File(machineDir, "debian-docker.ext4.part")
@@ -337,6 +445,61 @@ class VesselBootstrapActivityV2 : ComponentActivity() {
 
     private fun downloadPercent(done: Long, total: Long): Int =
         if (total <= 0L) 2 else (2 + done * 72L / total).toInt().coerceIn(2, 74)
+
+    private fun downloadAndVerifyChunk(
+        chunk: ImageChunk,
+        target: File,
+        tracker: DownloadProgressTracker,
+        manifest: ImageManifest,
+    ) {
+        repeat(2) { attempt ->
+            check(!cancelled) { "Setup cancelled" }
+
+            if (target.length() > chunk.bytes) {
+                target.delete()
+                tracker.update(chunk.index, 0L, force = true)?.let { showDownloadProgress(it, manifest) }
+            }
+
+            if (target.isFile && target.length() == chunk.bytes) {
+                if (sha256(target) == chunk.sha256) {
+                    tracker.update(chunk.index, chunk.bytes, force = true)?.let { showDownloadProgress(it, manifest) }
+                    return
+                }
+                target.delete()
+                tracker.update(chunk.index, 0L, force = true)?.let { showDownloadProgress(it, manifest) }
+            }
+
+            downloadResumable(chunk.url, target, chunk.bytes) { done, _ ->
+                check(!cancelled) { "Setup cancelled" }
+                tracker.update(chunk.index, done)?.let { showDownloadProgress(it, manifest) }
+            }
+
+            if (sha256(target) == chunk.sha256) {
+                tracker.update(chunk.index, chunk.bytes, force = true)?.let { showDownloadProgress(it, manifest) }
+                return
+            }
+
+            target.delete()
+            tracker.update(chunk.index, 0L, force = true)?.let { showDownloadProgress(it, manifest) }
+            if (attempt == 0) {
+                // A corrupt resumed prefix should not make the user manually restart setup.
+                // Retry this one part once from byte zero while the other streams keep going.
+                continue
+            }
+        }
+        error("Workstation part ${chunk.index + 1} failed checksum twice")
+    }
+
+    private fun showDownloadProgress(snapshot: DownloadSnapshot, manifest: ImageManifest) {
+        val streams = snapshot.activeStreams.coerceAtLeast(1)
+        val speed = formatRate(snapshot.bytesPerSecond)
+        val eta = formatEta(snapshot.etaSeconds)
+        updateUi(
+            downloadPercent(snapshot.doneBytes, manifest.compressedBytes),
+            "Downloading complete Plasma workstation",
+            "$streams parallel streams · ${formatMiB(snapshot.doneBytes)} / ${formatMiB(manifest.compressedBytes)} MiB\n$speed · ETA $eta",
+        )
+    }
 
     private fun parseManifest(text: String): ImageManifest {
         val json = JSONObject(text)
@@ -763,7 +926,7 @@ class VesselBootstrapActivityV2 : ComponentActivity() {
                     Icons.Default.Storage,
                     "Download",
                     if (state.archiveBytes > 0L) {
-                        "${formatMiB(state.archiveBytes)} MiB · ${state.chunkCount} resumable verified parts"
+                        "${formatMiB(state.archiveBytes)} MiB · ${state.chunkCount} verified parts · parallel + resumable"
                     } else {
                         "Chunk-resumable · SHA-256 verified"
                     },
@@ -823,5 +986,27 @@ class VesselBootstrapActivityV2 : ComponentActivity() {
     }
 
     private fun formatMiB(bytes: Long): Long = bytes.coerceAtLeast(0L) / (1024L * 1024L)
+
+    private fun formatRate(bytesPerSecond: Double): String {
+        if (bytesPerSecond <= 0.0) return "Measuring speed…"
+        val mib = bytesPerSecond / (1024.0 * 1024.0)
+        return if (mib >= 1.0) {
+            "%.1f MiB/s".format(java.util.Locale.US, mib)
+        } else {
+            "%.0f KiB/s".format(java.util.Locale.US, bytesPerSecond / 1024.0)
+        }
+    }
+
+    private fun formatEta(seconds: Long): String {
+        if (seconds < 0L) return "calculating…"
+        if (seconds < 60L) return "${seconds}s"
+        val minutes = seconds / 60L
+        val secs = seconds % 60L
+        if (minutes < 60L) return "${minutes}m ${secs.toString().padStart(2, '0')}s"
+        val hours = minutes / 60L
+        val mins = minutes % 60L
+        return "${hours}h ${mins.toString().padStart(2, '0')}m"
+    }
+
     private fun formatGiB(bytes: Long): String = "%.1f".format(bytes.toDouble() / (1024.0 * 1024.0 * 1024.0))
 }
