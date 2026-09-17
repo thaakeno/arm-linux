@@ -37,7 +37,7 @@
         </service>
 
         <activity
-            android:name=".VesselBootstrapActivity"
+            android:name=".VesselBootstrapActivityV2"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize|density"
             android:exported="true">
             <intent-filter>
@@ -45,6 +45,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".VesselBootstrapActivity"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize|density"
+            android:exported="false" />
 
         <activity
             android:name=".VesselActivity"
