@@ -155,10 +155,6 @@ class VesselActivity : ComponentActivity() {
     }
 
     private fun startLinux() {
-        if (!Environment.isExternalStorageManager()) {
-            startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
-            return
-        }
         VmSessionService.active?.refreshAvailability()
         VmSessionService.active?.startVm()
     }
