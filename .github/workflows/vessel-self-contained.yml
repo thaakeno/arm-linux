@@ -119,7 +119,7 @@ jobs:
           grep -F 'partialCopies=' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'FRAME_SLOTS = 3' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'resource_changed' tools/vessel_native/vessel_ahb_bridge.cpp
-          grep -F 'security.sandbox.content.level\", 0' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
+          grep -F 'security.sandbox.content.level", 0' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'state.resource_id == resource_id' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'VESSEL_ANDROID_AHB_SCANOUT_V3' tools/vessel_native/patch_vhost_gpu_android_ahb.py
           ! find tools/vessel_native -maxdepth 1 -name 'alpha*.py' -print -quit | grep -q .
