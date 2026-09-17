@@ -17,12 +17,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -31,7 +30,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -90,9 +88,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -340,62 +336,33 @@ class VesselActivity : ComponentActivity() {
             }
             if (state.running || state.busy) {
                 DesktopControls(mode, { newMode -> mode = newMode; LinuxDesktopView.active?.setPointerMode(newMode) }, fullscreen)
-                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                    val maxAreaDp = maxHeight.value.coerceAtLeast(220f)
-                    val minTotalDp = minOf(220f, maxAreaDp)
-                    var topDp by remember { mutableStateOf<Float?>(null) }
-                    var totalHeightDp by remember { mutableStateOf<Float?>(null) }
-                    val defaultTop = maxAreaDp * 0.06f
-                    val defaultTotal = (maxAreaDp * 0.88f).coerceAtLeast(minTotalDp).coerceAtMost(maxAreaDp - defaultTop)
-                    val resolvedTop = (topDp ?: defaultTop).coerceIn(0f, (maxAreaDp - minTotalDp).coerceAtLeast(0f))
-                    val resolvedTotal = (totalHeightDp ?: defaultTotal).coerceIn(minTotalDp, (maxAreaDp - resolvedTop).coerceAtLeast(minTotalDp))
-
-                    LaunchedEffect(maxAreaDp) {
-                        if (topDp == null || totalHeightDp == null) {
-                            topDp = defaultTop
-                            totalHeightDp = defaultTotal
-                        } else {
-                            val newTop = topDp!!.coerceIn(0f, (maxAreaDp - minTotalDp).coerceAtLeast(0f))
-                            topDp = newTop
-                            totalHeightDp = totalHeightDp!!.coerceIn(minTotalDp, (maxAreaDp - newTop).coerceAtLeast(minTotalDp))
-                        }
+                Box(
+                    Modifier.weight(1f).fillMaxWidth().padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val monitorAspect = remember(state.guestDisplayWidth, state.guestDisplayHeight) {
+                        (state.guestDisplayWidth.toFloat() / state.guestDisplayHeight.coerceAtLeast(1))
+                            .coerceIn(1.25f, 2.40f)
                     }
-
-                    Column(
+                    Box(
                         Modifier
                             .fillMaxWidth()
-                            .offset(y = resolvedTop.dp)
-                            .height(resolvedTotal.dp),
+                            .aspectRatio(monitorAspect)
+                            .background(Color.Black),
                     ) {
-                        DisplayResizeHandle { deltaDp ->
-                            val oldTop = topDp ?: resolvedTop
-                            val oldHeight = totalHeightDp ?: resolvedTotal
-                            val maxTop = (oldTop + oldHeight - minTotalDp).coerceAtLeast(0f)
-                            val newTop = (oldTop + deltaDp).coerceIn(0f, minOf(maxTop, maxAreaDp - minTotalDp))
-                            val applied = newTop - oldTop
-                            topDp = newTop
-                            totalHeightDp = (oldHeight - applied).coerceIn(minTotalDp, maxAreaDp - newTop)
-                        }
-                        Box(Modifier.weight(1f).fillMaxWidth().background(Color.Black)) {
-                            AndroidView(
-                                modifier = Modifier.fillMaxSize(),
-                                factory = { context -> LinuxDesktopView(context).apply { setPointerMode(mode); requestFocus() } },
-                                update = { view -> view.setPointerMode(mode); if (!view.hasFocus()) view.requestFocus() },
-                            )
-                            if (!state.displayReady) {
-                                Surface(Modifier.align(Alignment.Center).padding(18.dp), shape = RoundedCornerShape(18.dp), color = Color(0xD9101512)) {
-                                    Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                                        LinearProgressIndicator(progress = { state.progressPercent.coerceIn(0, 100) / 100f }, modifier = Modifier.width(220.dp))
-                                        Text("${state.message} · ${state.progressPercent.coerceIn(0, 100)}% · ${uptime(state.uptimeMs)}", maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                        Text("Presenter: ${state.presenterStatus}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    }
+                        AndroidView(
+                            modifier = Modifier.fillMaxSize(),
+                            factory = { context -> LinuxDesktopView(context).apply { setPointerMode(mode); requestFocus() } },
+                            update = { view -> view.setPointerMode(mode); if (!view.hasFocus()) view.requestFocus() },
+                        )
+                        if (!state.displayReady) {
+                            Surface(Modifier.align(Alignment.Center).padding(18.dp), shape = RoundedCornerShape(18.dp), color = Color(0xD9101512)) {
+                                Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                                    LinearProgressIndicator(progress = { state.progressPercent.coerceIn(0, 100) / 100f }, modifier = Modifier.width(220.dp))
+                                    Text("${state.message} · ${state.progressPercent.coerceIn(0, 100)}% · ${uptime(state.uptimeMs)}", maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                    Text("Presenter: ${state.presenterStatus}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
-                        }
-                        DisplayResizeHandle { deltaDp ->
-                            val currentTop = topDp ?: resolvedTop
-                            val currentHeight = totalHeightDp ?: resolvedTotal
-                            totalHeightDp = (currentHeight + deltaDp).coerceIn(minTotalDp, maxAreaDp - currentTop)
                         }
                     }
                 }
@@ -412,28 +379,6 @@ class VesselActivity : ComponentActivity() {
                     }
                 }
             }
-        }
-    }
-
-    @Composable
-    private fun DisplayResizeHandle(onDragDp: (Float) -> Unit) {
-        val density = LocalDensity.current.density
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(14.dp)
-                .pointerInput(density) {
-                    detectVerticalDragGestures { _, dragAmount ->
-                        onDragDp(dragAmount / density)
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            Surface(
-                modifier = Modifier.width(52.dp).height(3.dp),
-                shape = RoundedCornerShape(999.dp),
-                color = MaterialTheme.colorScheme.outline,
-            ) {}
         }
     }
 
@@ -914,22 +859,67 @@ class VesselActivity : ComponentActivity() {
     @Composable
     private fun LogCard(state: SessionState) {
         if (state.console.isBlank()) return
-        val vertical = rememberScrollState()
-        val horizontal = rememberScrollState()
+        var showRaw by remember { mutableStateOf(false) }
+        val important = remember(state.console) {
+            state.console.lineSequence()
+                .map { it.trim() }
+                .filter { line ->
+                    line.isNotBlank() && (
+                        line.contains("[error]", ignoreCase = true) ||
+                        line.contains("[crash]", ignoreCase = true) ||
+                        line.contains("[network]", ignoreCase = true) ||
+                        line.contains("[display]", ignoreCase = true) ||
+                        line.contains("[gpu]", ignoreCase = true) ||
+                        line.contains("[input]", ignoreCase = true) ||
+                        line.contains("[control]", ignoreCase = true) ||
+                        line.contains("READY", ignoreCase = true)
+                    )
+                }
+                .takeLast(8)
+                .toList()
+        }
         ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
             Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("Runtime log", fontWeight = FontWeight.SemiBold)
-                        Text("Full startup and native diagnostics", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Runtime status", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (showRaw) "Raw diagnostics" else "Recent meaningful events",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
+                    OutlinedButton(onClick = { showRaw = !showRaw }) { Text(if (showRaw) "Summary" else "Raw") }
+                    Spacer(Modifier.width(6.dp))
                     OutlinedButton(onClick = { copyText("Runtime log", state.console) }) { Text("Copy") }
                 }
-                Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), color = Color(0xff050706)) {
-                    Box(Modifier.fillMaxWidth().height(280.dp)) {
-                        SelectionContainer {
-                            Text(state.console.takeLast(40_000), modifier = Modifier.fillMaxSize().padding(12.dp).verticalScroll(vertical).horizontalScroll(horizontal), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, softWrap = false)
+                if (showRaw) {
+                    val vertical = rememberScrollState()
+                    val horizontal = rememberScrollState()
+                    Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), color = Color(0xff050706)) {
+                        Box(Modifier.fillMaxWidth().height(240.dp)) {
+                            SelectionContainer {
+                                Text(
+                                    state.console.takeLast(24_000),
+                                    modifier = Modifier.fillMaxSize().padding(12.dp).verticalScroll(vertical).horizontalScroll(horizontal),
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    softWrap = false,
+                                )
+                            }
                         }
+                    }
+                } else {
+                    val summary = if (important.isEmpty()) "Runtime is active. No warnings or failures in the recent log." else important.joinToString("\n")
+                    SelectionContainer {
+                        Text(
+                            summary,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 10,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }
