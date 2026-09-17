@@ -7,10 +7,11 @@ on:
     paths:
       - 'tools/vessel_workstation/**'
       - '.github/workflows/vessel-workstation-image.yml'
+      - 'app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt'
 
 concurrency:
   group: vessel-workstation-image-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -26,7 +27,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends curl zstd e2fsprogs util-linux
+          sudo apt-get install -y --no-install-recommends curl zstd e2fsprogs util-linux jq
       - name: Build complete ARM64 Plasma workstation image
         shell: bash
         run: |
@@ -51,20 +52,79 @@ jobs:
           assert len(x['compressedSha256'])==64
           assert len(x['imageSha256'])==64
           PY
-      - name: Publish rolling workstation release
+      - name: Publish image first, manifest last
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -euxo pipefail
-          if ! gh release view vessel-workstation-edge --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create vessel-workstation-edge \
+          set -euo pipefail
+          TAG=vessel-workstation-edge
+          BASE=build/workstation/Vessel-Workstation-bookworm-arm64
+          MANIFEST="$BASE.json"
+          SOURCE_ARCHIVE="$BASE.ext4.zst"
+          ASSET_NAME="Vessel-Workstation-bookworm-arm64-${GITHUB_SHA}.ext4.zst"
+          STAGED_ARCHIVE="/tmp/$ASSET_NAME"
+          PUBLIC_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET_NAME"
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title 'Vessel Workstation Edge' \
               --notes 'Rolling prebuilt Debian Bookworm ARM64 + KDE Plasma workstation used by Vessel first-run setup.'
           fi
-          gh release upload vessel-workstation-edge \
-            build/workstation/Vessel-Workstation-bookworm-arm64.ext4.zst \
-            build/workstation/Vessel-Workstation-bookworm-arm64.json \
-            --clobber --repo "$GITHUB_REPOSITORY"
+
+          cp "$SOURCE_ARCHIVE" "$STAGED_ARCHIVE"
+          EXPECTED_BYTES="$(stat -c '%s' "$STAGED_ARCHIVE")"
+
+          # A rerun for the same commit must replace only that immutable-name asset.
+          EXISTING_ID="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq ".assets[] | select(.name == \"$ASSET_NAME\") | .id" | head -1 || true)"
+          if [ -n "$EXISTING_ID" ]; then
+            gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$EXISTING_ID"
+          fi
+
+          # Upload the large image by itself. Do not expose a manifest pointing at
+          # it until GitHub reports the asset fully uploaded and publicly readable.
+          gh release upload "$TAG" "$STAGED_ARCHIVE" --repo "$GITHUB_REPOSITORY"
+
+          READY=0
+          for i in $(seq 1 180); do
+            ASSET_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+            STATE="$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .state // empty' <<<"$ASSET_JSON")"
+            SIZE="$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .size // 0' <<<"$ASSET_JSON")"
+            if [ "$STATE" = uploaded ] && [ "$SIZE" = "$EXPECTED_BYTES" ]; then
+              READY=1
+              break
+            fi
+            echo "waiting for GitHub release asset: state=${STATE:-missing} size=${SIZE:-0}/$EXPECTED_BYTES"
+            sleep 5
+          done
+          [ "$READY" = 1 ]
+
+          # Verify CDN/public propagation before publishing the tiny pointer file.
+          curl -fsSIL --retry 12 --retry-all-errors --retry-delay 5 "$PUBLIC_URL" >/dev/null
+
+          python3 - "$MANIFEST" "$PUBLIC_URL" "$GITHUB_SHA" <<'PY'
+          import json, sys
+          path, url, revision = sys.argv[1:]
+          with open(path, encoding='utf-8') as f:
+              data = json.load(f)
+          data['revision'] = revision
+          data['url'] = url
+          data['assetName'] = url.rsplit('/', 1)[-1]
+          with open(path, 'w', encoding='utf-8') as f:
+              json.dump(data, f, indent=2, sort_keys=True)
+              f.write('\n')
+          PY
+
+          # The manifest is the atomic publication pointer. It is replaced only
+          # after the versioned image is complete, so clients can never receive a
+          # manifest that points at a half-uploaded/404 asset.
+          gh release upload "$TAG" "$MANIFEST" --clobber --repo "$GITHUB_REPOSITORY"
+
+          PUBLISHED="$(curl -fsSL --retry 12 --retry-all-errors --retry-delay 3 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Vessel-Workstation-bookworm-arm64.json")"
+          test "$(jq -r '.revision' <<<"$PUBLISHED")" = "$GITHUB_SHA"
+          test "$(jq -r '.url' <<<"$PUBLISHED")" = "$PUBLIC_URL"
+          curl -fsSIL --retry 6 --retry-all-errors --retry-delay 3 "$(jq -r '.url' <<<"$PUBLISHED")" >/dev/null
+          echo "published workstation revision $GITHUB_SHA"

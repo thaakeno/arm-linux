@@ -1,17 +1,56 @@
 package com.example.dreamlinux
 
-import android.app.Activity
 import android.content.Intent
-import android.graphics.Color
 import android.os.Bundle
 import android.os.Environment
-import android.view.Gravity
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.ProgressBar
-import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.DesktopWindows
+import androidx.compose.material.icons.filled.Laptop
+import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.Button
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.github.luben.zstd.ZstdInputStream
+import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -22,11 +61,15 @@ import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Fresh installs download a CI-built, already configured Debian + Plasma image.
- * Existing private or legacy disks are never replaced. The heavy apt/dpkg work
- * therefore happens once on GitHub's ARM64 runner instead of on the phone.
+ * First-run workstation preparation. This deliberately uses the same Vessel
+ * visual language as the real app and never starts a multi-gigabyte download
+ * until the user presses the setup button.
+ *
+ * Heavy Debian/KDE package installation happens on GitHub's native ARM64
+ * runner. The phone only downloads, verifies and expands the finished ext4
+ * image. Existing private or legacy Linux disks are never replaced.
  */
-class VesselBootstrapActivity : Activity() {
+class VesselBootstrapActivity : ComponentActivity() {
     companion object {
         private const val MANIFEST_URL =
             "https://github.com/thaakeno/arm-linux/releases/download/vessel-workstation-edge/Vessel-Workstation-bookworm-arm64.json"
@@ -45,12 +88,21 @@ class VesselBootstrapActivity : Activity() {
         val imageBytes: Long,
     )
 
-    private lateinit var status: TextView
-    private lateinit var detail: TextView
-    private lateinit var progress: ProgressBar
-    private lateinit var retry: Button
+    private data class BootstrapUiState(
+        val checking: Boolean = true,
+        val ready: Boolean = false,
+        val running: Boolean = false,
+        val progress: Int = 0,
+        val title: String = "Checking workstation image",
+        val detail: String = "Making sure the prebuilt Debian desktop is ready",
+        val error: String = "",
+        val archiveBytes: Long = 0L,
+    )
+
+    private val uiState = MutableStateFlow(BootstrapUiState())
     private val running = AtomicBoolean(false)
     @Volatile private var cancelled = false
+    @Volatile private var manifestCache: ImageManifest? = null
 
     private val machineDir: File by lazy { File(filesDir, "vessel-machine").apply { mkdirs() } }
     private val disk: File by lazy { File(machineDir, "debian-docker.ext4") }
@@ -67,12 +119,13 @@ class VesselBootstrapActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         if (hasExistingLinuxDisk()) {
             openVessel()
             return
         }
-        buildUi()
-        startPreparation()
+        setContent { BootstrapApp() }
+        refreshManifestAvailability()
     }
 
     override fun onDestroy() {
@@ -80,66 +133,66 @@ class VesselBootstrapActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun buildUi() {
-        val density = resources.displayMetrics.density
-        fun dp(value: Int) = (value * density).toInt()
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(28), dp(28), dp(28), dp(28))
-            setBackgroundColor(Color.rgb(12, 14, 16))
-        }
-        status = TextView(this).apply {
-            text = "Preparing Vessel workstation"
-            textSize = 24f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-        }
-        detail = TextView(this).apply {
-            text = "Downloading the complete Debian + Plasma desktop once"
-            textSize = 14f
-            setTextColor(Color.rgb(190, 195, 202))
-            gravity = Gravity.CENTER
-            setPadding(0, dp(10), 0, dp(22))
-        }
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 100
-            this.progress = 0
-            isIndeterminate = false
-        }
-        retry = Button(this).apply {
-            text = "Retry"
-            visibility = Button.GONE
-            setOnClickListener { startPreparation() }
-        }
-
-        root.addView(status, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        root.addView(detail, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        root.addView(progress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(8)))
-        root.addView(retry, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            topMargin = dp(18)
-            gravity = Gravity.CENTER_HORIZONTAL
-        })
-        setContentView(root)
+    private fun refreshManifestAvailability() {
+        if (running.get()) return
+        uiState.value = BootstrapUiState(
+            checking = true,
+            title = "Checking workstation image",
+            detail = "No Linux download starts until you press Prepare workstation",
+        )
+        Thread({
+            try {
+                val manifest = parseManifest(readText(MANIFEST_URL, MAX_MANIFEST_BYTES))
+                check(probeAsset(manifest.url)) { "The workstation image is still publishing. Try again in a moment." }
+                manifestCache = manifest
+                uiState.value = BootstrapUiState(
+                    checking = false,
+                    ready = true,
+                    title = "Debian workstation",
+                    detail = "Prebuilt Plasma is ready · ${formatMiB(manifest.compressedBytes)} MiB one-time download",
+                    archiveBytes = manifest.compressedBytes,
+                )
+            } catch (t: Throwable) {
+                manifestCache = null
+                uiState.value = BootstrapUiState(
+                    checking = false,
+                    ready = false,
+                    title = "Workstation image unavailable",
+                    detail = "Nothing was downloaded to your phone",
+                    error = t.message ?: t.javaClass.simpleName,
+                )
+            }
+        }, "vessel-workstation-check").apply { isDaemon = true; start() }
     }
 
     private fun startPreparation() {
         if (!running.compareAndSet(false, true)) return
         cancelled = false
-        retry.visibility = Button.GONE
-        updateUi(0, "Checking workstation image", "This replaces the old 1,200+ package install on your phone")
+        uiState.value = uiState.value.copy(
+            checking = false,
+            ready = false,
+            running = true,
+            progress = 0,
+            title = "Preparing Debian workstation",
+            detail = "Starting one-time workstation setup",
+            error = "",
+        )
         Thread({
             try {
-                prepareWorkstation()
+                val manifest = manifestCache ?: parseManifest(readText(MANIFEST_URL, MAX_MANIFEST_BYTES))
+                check(probeAsset(manifest.url)) { "The workstation image is not publicly available yet" }
+                prepareWorkstation(manifest)
                 if (!cancelled) runOnUiThread { openVessel() }
             } catch (t: Throwable) {
                 if (!cancelled) {
-                    runOnUiThread {
-                        status.text = "Workstation setup failed"
-                        detail.text = t.message ?: t.javaClass.simpleName
-                        retry.visibility = Button.VISIBLE
-                    }
+                    uiState.value = uiState.value.copy(
+                        checking = false,
+                        ready = manifestCache != null,
+                        running = false,
+                        title = "Workstation setup failed",
+                        detail = "Your partial download is kept so Retry can resume",
+                        error = t.message ?: t.javaClass.simpleName,
+                    )
                 }
             } finally {
                 running.set(false)
@@ -147,13 +200,20 @@ class VesselBootstrapActivity : Activity() {
         }, "vessel-workstation-bootstrap").apply { isDaemon = true; start() }
     }
 
-    private fun prepareWorkstation() {
+    private fun cancelPreparation() {
+        cancelled = true
+        uiState.value = uiState.value.copy(
+            running = false,
+            ready = manifestCache != null,
+            title = "Setup paused",
+            detail = "The partial download is kept and will resume next time",
+        )
+    }
+
+    private fun prepareWorkstation(manifest: ImageManifest) {
         check(machineDir.exists() || machineDir.mkdirs()) { "Cannot create Vessel private storage" }
         if (hasExistingLinuxDisk()) return
-
-        val manifestText = readText(MANIFEST_URL, MAX_MANIFEST_BYTES)
-        val manifest = parseManifest(manifestText)
-        check(!cancelled)
+        check(!cancelled) { "Setup cancelled" }
 
         val available = machineDir.usableSpace
         val minimumFree = manifest.compressedBytes + EXTRA_FREE_BYTES
@@ -165,36 +225,50 @@ class VesselBootstrapActivity : Activity() {
         val tmp = File(machineDir, "debian-docker.ext4.part")
         if (archive.length() > manifest.compressedBytes) archive.delete()
 
-        updateUi(2, "Downloading complete Plasma workstation", "Resumable download · ${formatMiB(manifest.compressedBytes)} MiB")
+        updateUi(
+            2,
+            "Downloading complete Plasma workstation",
+            "Resumable · ${formatMiB(manifest.compressedBytes)} MiB · no apt install on your phone",
+        )
         downloadResumable(manifest.url, archive, manifest.compressedBytes) { done, total ->
-            check(!cancelled)
+            check(!cancelled) { "Setup cancelled" }
             val pct = if (total > 0L) (2 + done * 72L / total).toInt().coerceIn(2, 74) else 2
-            updateUi(pct, "Downloading complete Plasma workstation", "${formatMiB(done)} / ${formatMiB(total)} MiB")
+            updateUi(
+                pct,
+                "Downloading complete Plasma workstation",
+                "${formatMiB(done)} / ${formatMiB(total)} MiB",
+            )
         }
 
-        updateUi(77, "Verifying download", "SHA-256 · ${manifest.revision.take(12)}")
+        updateUi(77, "Verifying workstation", "SHA-256 · ${manifest.revision.take(12)}")
         check(archive.length() == manifest.compressedBytes) { "Workstation download is incomplete" }
         check(sha256(archive) == manifest.compressedSha256) { "Workstation download checksum mismatch" }
-        check(!cancelled)
+        check(!cancelled) { "Setup cancelled" }
 
         tmp.delete()
-        updateUi(82, "Unpacking workstation", "No apt or dpkg installation is running on the phone")
+        updateUi(82, "Unpacking workstation", "Plasma, apps and Debian packages are already configured")
         val imageSha = decompressSparse(archive, tmp, manifest.imageBytes) { done, total ->
-            check(!cancelled)
+            check(!cancelled) { "Setup cancelled" }
             val pct = (82 + done * 16L / total.coerceAtLeast(1L)).toInt().coerceIn(82, 98)
             updateUi(pct, "Unpacking workstation", "${formatMiB(done)} / ${formatMiB(total)} MiB")
         }
         check(tmp.length() == manifest.imageBytes) { "Workstation image size mismatch" }
         check(imageSha == manifest.imageSha256) { "Workstation image checksum mismatch" }
         check(tmp.length() > MIN_VALID_DISK_BYTES) { "Workstation image extraction failed" }
-        check(!cancelled)
+        check(!cancelled) { "Setup cancelled" }
 
-        updateUi(99, "Finalizing workstation", "Keeping the Linux disk in fast private storage")
+        updateUi(99, "Finalizing workstation", "Activating the verified Linux disk")
         if (disk.exists()) check(disk.delete()) { "Cannot replace incomplete Debian disk" }
         check(tmp.renameTo(disk)) { "Could not activate the workstation disk" }
-        File(machineDir, "workstation-image.json").writeText(manifestText)
+        File(machineDir, "workstation-image.json").writeText(
+            JSONObject()
+                .put("revision", manifest.revision)
+                .put("compressedSha256", manifest.compressedSha256)
+                .put("imageSha256", manifest.imageSha256)
+                .toString(2),
+        )
         archive.delete()
-        updateUi(100, "Workstation ready", "Starting Vessel")
+        updateUi(100, "Workstation ready", "Opening Vessel")
     }
 
     private fun parseManifest(text: String): ImageManifest {
@@ -231,9 +305,11 @@ class VesselBootstrapActivity : Activity() {
     }
 
     private fun readText(url: String, maxBytes: Int): String {
-        val connection = open(url, null)
+        val connection = open(url, null, "GET")
         return try {
-            check(connection.responseCode == HttpURLConnection.HTTP_OK) { "Could not fetch workstation manifest (${connection.responseCode})" }
+            check(connection.responseCode == HttpURLConnection.HTTP_OK) {
+                "Could not fetch workstation manifest (HTTP ${connection.responseCode})"
+            }
             val declared = connection.contentLengthLong
             check(declared <= 0L || declared <= maxBytes) { "Workstation manifest is too large" }
             connection.inputStream.buffered().use { input ->
@@ -254,7 +330,21 @@ class VesselBootstrapActivity : Activity() {
         }
     }
 
-    private fun downloadResumable(url: String, target: File, expectedBytes: Long, onProgress: (Long, Long) -> Unit) {
+    private fun probeAsset(url: String): Boolean {
+        val connection = open(url, null, "HEAD")
+        return try {
+            connection.responseCode in 200..299
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun downloadResumable(
+        url: String,
+        target: File,
+        expectedBytes: Long,
+        onProgress: (Long, Long) -> Unit,
+    ) {
         target.parentFile?.mkdirs()
         var existing = target.takeIf { it.isFile }?.length() ?: 0L
         if (existing > expectedBytes) {
@@ -266,13 +356,13 @@ class VesselBootstrapActivity : Activity() {
             return
         }
 
-        var connection = open(url, existing.takeIf { it > 0L })
+        var connection = open(url, existing.takeIf { it > 0L }, "GET")
         var code = connection.responseCode
         if (existing > 0L && code == HttpURLConnection.HTTP_OK) {
             connection.disconnect()
             target.delete()
             existing = 0L
-            connection = open(url, null)
+            connection = open(url, null, "GET")
             code = connection.responseCode
         }
         check(code == HttpURLConnection.HTTP_OK || code == HttpURLConnection.HTTP_PARTIAL) {
@@ -285,6 +375,7 @@ class VesselBootstrapActivity : Activity() {
                 FileOutputStream(target, append).buffered(BUFFER_BYTES).use { out ->
                     val buffer = ByteArray(BUFFER_BYTES)
                     while (true) {
+                        check(!cancelled) { "Setup cancelled" }
                         val n = input.read(buffer)
                         if (n < 0) break
                         out.write(buffer, 0, n)
@@ -300,21 +391,22 @@ class VesselBootstrapActivity : Activity() {
         check(done == expectedBytes) { "Workstation download ended early" }
     }
 
-    private fun open(url: String, rangeStart: Long?): HttpURLConnection {
+    private fun open(url: String, rangeStart: Long?, method: String): HttpURLConnection {
         var current = URL(url)
-        repeat(6) {
+        repeat(8) {
             val connection = (current.openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = false
                 connectTimeout = 20_000
                 readTimeout = 90_000
-                requestMethod = "GET"
+                requestMethod = method
                 setRequestProperty("User-Agent", "Vessel/${BuildConfig.VERSION_NAME}")
                 setRequestProperty("Accept-Encoding", "identity")
                 if (rangeStart != null) setRequestProperty("Range", "bytes=$rangeStart-")
             }
             val code = connection.responseCode
             if (code in 300..399) {
-                val location = connection.getHeaderField("Location") ?: error("Workstation download redirect had no location")
+                val location = connection.getHeaderField("Location")
+                    ?: error("Workstation download redirect had no location")
                 current = URL(current, location)
                 connection.disconnect()
             } else {
@@ -324,7 +416,12 @@ class VesselBootstrapActivity : Activity() {
         error("Too many workstation download redirects")
     }
 
-    private fun decompressSparse(source: File, target: File, expectedBytes: Long, onProgress: (Long, Long) -> Unit): String {
+    private fun decompressSparse(
+        source: File,
+        target: File,
+        expectedBytes: Long,
+        onProgress: (Long, Long) -> Unit,
+    ): String {
         val digest = MessageDigest.getInstance("SHA-256")
         var done = 0L
         val buffer = ByteArray(BUFFER_BYTES)
@@ -332,6 +429,7 @@ class VesselBootstrapActivity : Activity() {
             RandomAccessFile(target, "rw").use { out ->
                 out.setLength(0L)
                 while (true) {
+                    check(!cancelled) { "Setup cancelled" }
                     val n = input.read(buffer)
                     if (n < 0) break
                     digest.update(buffer, 0, n)
@@ -370,19 +468,267 @@ class VesselBootstrapActivity : Activity() {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun updateUi(percent: Int, title: String, text: String) {
-        runOnUiThread {
-            if (isFinishing || isDestroyed) return@runOnUiThread
-            progress.progress = percent.coerceIn(0, 100)
-            status.text = title
-            detail.text = text
-        }
+    private fun updateUi(percent: Int, title: String, detail: String) {
+        uiState.value = uiState.value.copy(
+            checking = false,
+            ready = false,
+            running = true,
+            progress = percent.coerceIn(0, 100),
+            title = title,
+            detail = detail,
+            error = "",
+        )
     }
 
     private fun openVessel() {
         if (isFinishing || isDestroyed) return
         startActivity(Intent(this, VesselActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
         finish()
+    }
+
+    @Composable
+    private fun BootstrapApp() {
+        val state by uiState.collectAsStateWithLifecycle()
+        MaterialTheme(
+            colorScheme = darkColorScheme(
+                primary = Color(0xff72F1B8),
+                onPrimary = Color(0xff002E20),
+                primaryContainer = Color(0xff113D30),
+                secondary = Color(0xff8CB8FF),
+                background = Color(0xff060807),
+                surface = Color(0xff0D110F),
+                surfaceVariant = Color(0xff171D1A),
+                outline = Color(0xff33443D),
+                error = Color(0xffFFB4AB),
+                errorContainer = Color(0xff3B171A),
+            ),
+        ) {
+            Scaffold(
+                containerColor = MaterialTheme.colorScheme.background,
+                topBar = { BootstrapTopBar(state) },
+                bottomBar = { BootstrapNavigation() },
+            ) { padding ->
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    item { Spacer(Modifier.height(2.dp)) }
+                    item { SetupCard(state) }
+                    item {
+                        Text(
+                            "Machine",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    item { MachineCard(state) }
+                    item { Spacer(Modifier.height(18.dp)) }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun BootstrapTopBar(state: BootstrapUiState) {
+        Surface(color = MaterialTheme.colorScheme.surface) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                    Icon(
+                        Icons.Default.Laptop,
+                        null,
+                        Modifier.padding(9.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Spacer(Modifier.width(11.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Vessel", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Rootless ARM64 Linux · VirtIO GPU · Native Surface · Adreno",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                val label = when {
+                    state.running -> "SETUP"
+                    state.checking -> "CHECKING"
+                    state.error.isNotBlank() -> "RETRY"
+                    state.ready -> "READY"
+                    else -> "SETUP"
+                }
+                StatusPill(label, state.running || state.ready)
+            }
+        }
+    }
+
+    @Composable
+    private fun SetupCard(state: BootstrapUiState) {
+        ElevatedCard(shape = RoundedCornerShape(26.dp)) {
+            Column(
+                Modifier.fillMaxWidth().padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(13.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Debian workstation", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                        Text(
+                            when {
+                                state.running -> state.title
+                                state.ready -> "One-time workstation setup"
+                                state.checking -> "Checking the prebuilt desktop"
+                                else -> state.title
+                            },
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    StatusPill(
+                        when {
+                            state.running -> "PREPARING"
+                            state.ready -> "READY"
+                            state.checking -> "CHECKING"
+                            else -> "OFF"
+                        },
+                        state.running || state.ready,
+                    )
+                }
+
+                if (state.error.isNotBlank()) {
+                    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.errorContainer) {
+                        Text(
+                            state.error,
+                            Modifier.fillMaxWidth().padding(12.dp),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+
+                if (state.running) {
+                    LinearProgressIndicator(
+                        progress = { state.progress.coerceIn(0, 100) / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            state.detail,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("${state.progress}%", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                    }
+                    OutlinedButton(onClick = ::cancelPreparation, modifier = Modifier.fillMaxWidth()) {
+                        Text("Pause setup")
+                    }
+                } else {
+                    Text(
+                        state.detail,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (state.ready) {
+                        Text(
+                            "Nothing installs automatically. Press the button when you want the ${formatMiB(state.archiveBytes)} MiB workstation download to start.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            if (state.ready) startPreparation() else refreshManifestAvailability()
+                        },
+                        enabled = !state.checking,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            when {
+                                state.checking -> "Checking…"
+                                state.ready -> "Prepare workstation"
+                                else -> "Check again"
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun MachineCard(state: BootstrapUiState) {
+        ElevatedCard(shape = RoundedCornerShape(22.dp)) {
+            Column(
+                Modifier.fillMaxWidth().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(13.dp),
+            ) {
+                Metric(Icons.Default.DesktopWindows, "Desktop", "KDE Plasma/Wayland · preinstalled")
+                Metric(Icons.Default.Bolt, "Setup", "GitHub-built ARM64 image · no on-phone apt/dpkg")
+                Metric(Icons.Default.Computer, "Packages", "Debian Recommends enabled · full desktop integrations")
+                Metric(Icons.Default.Storage, "Disk", "Persistent sparse ext4 · fast private storage")
+                Metric(
+                    Icons.Default.Storage,
+                    "Download",
+                    if (state.archiveBytes > 0L) "${formatMiB(state.archiveBytes)} MiB · resumable · SHA-256 verified" else "Resumable · SHA-256 verified",
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun Metric(icon: ImageVector, title: String, value: String) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, Modifier.size(26.dp), tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(13.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(value, style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+    }
+
+    @Composable
+    private fun StatusPill(label: String, active: Boolean) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        ) {
+            Text(
+                label,
+                Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+
+    @Composable
+    private fun BootstrapNavigation() {
+        NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+            NavItem(true, "Machine", Icons.Default.Computer, true)
+            NavItem(false, "Display", Icons.Default.DesktopWindows, false)
+            NavItem(false, "Apps", Icons.Default.Laptop, false)
+            NavItem(false, "Terminal", Icons.Default.Terminal, false)
+            NavItem(false, "System", Icons.Default.Tune, false)
+        }
+    }
+
+    @Composable
+    private fun RowScope.NavItem(selected: Boolean, label: String, icon: ImageVector, enabled: Boolean) {
+        NavigationBarItem(
+            selected = selected,
+            onClick = {},
+            enabled = enabled,
+            icon = { Icon(icon, null) },
+            label = { Text(label) },
+        )
     }
 
     private fun formatMiB(bytes: Long): Long = bytes.coerceAtLeast(0L) / (1024L * 1024L)

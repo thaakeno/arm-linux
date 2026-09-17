@@ -110,6 +110,8 @@ jobs:
           grep -F 'VesselBootstrapActivity' app/src/main/AndroidManifest.xml
           grep -F 'Vessel-Workstation-bookworm-arm64.json' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
           grep -F 'ZstdInputStream' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
+          grep -F 'Nothing installs automatically' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
+          grep -F 'probeAsset' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
           grep -F 'softwareFallback", false' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'selectedVcpus' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'ensureGuestNetworkBlocking' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
@@ -159,6 +161,25 @@ jobs:
           cp "$DEBUG_APK" build/deliverables/Vessel-arm64-debug.apk
           cp "$RELEASE_APK" build/deliverables/Vessel-arm64-release-unsigned.apk
           sha256sum build/deliverables/*.apk > build/deliverables/SHA256SUMS.txt
+      - name: Verify public workstation bootstrap target
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/vessel-workstation-edge/Vessel-Workstation-bookworm-arm64.json"
+          READY=0
+          for i in $(seq 1 180); do
+            JSON="$(curl -fsSL --retry 2 --retry-all-errors --retry-delay 2 "$MANIFEST_URL" 2>/dev/null || true)"
+            ASSET_URL="$(jq -r '.url // empty' <<<"$JSON" 2>/dev/null || true)"
+            SHA="$(jq -r '.compressedSha256 // empty' <<<"$JSON" 2>/dev/null || true)"
+            if [ -n "$ASSET_URL" ] && [ ${#SHA} -eq 64 ] && curl -fsSIL --retry 2 --retry-all-errors --retry-delay 2 "$ASSET_URL" >/dev/null 2>&1; then
+              READY=1
+              echo "workstation bootstrap asset is publicly readable: $ASSET_URL"
+              break
+            fi
+            echo "waiting for complete workstation release publication ($i/180)"
+            sleep 5
+          done
+          [ "$READY" = 1 ]
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
