@@ -23,6 +23,20 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Harden one-time integrator
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/vessel_native/integrate_real_source.py')
+          s = p.read_text()
+          old = '''old_xy = \'\'\'            val x = ox + (VesselWaylandPresenter.cursorX() - VesselWaylandPresenter.cursorHotX()) * scale\\n            val y = oy + (VesselWaylandPresenter.cursorY() - VesselWaylandPresenter.cursorHotY()) * scale\\n\'\'\'\nnew_xy = \'\'\'            val predictionActive = SystemClock.uptimeMillis() <= cursorPredictionUntil && predictedCursorX.isFinite() && predictedCursorY.isFinite()\\n            val cursorX = if (predictionActive) predictedCursorX else VesselWaylandPresenter.cursorX().toFloat()\\n            val cursorY = if (predictionActive) predictedCursorY else VesselWaylandPresenter.cursorY().toFloat()\\n            val x = ox + (cursorX - VesselWaylandPresenter.cursorHotX()) * scale\\n            val y = oy + (cursorY - VesselWaylandPresenter.cursorHotY()) * scale\\n\'\'\'\nif old_xy not in v:\n    raise SystemExit(\'LinuxDesktopView cursor draw anchor missing\')\nv = v.replace(old_xy, new_xy, 1)\n'''
+          new = '''new_xy = \'\'\'            val predictionActive = SystemClock.uptimeMillis() <= cursorPredictionUntil && predictedCursorX.isFinite() && predictedCursorY.isFinite()\\n            val cursorX = if (predictionActive) predictedCursorX else VesselWaylandPresenter.cursorX().toFloat()\\n            val cursorY = if (predictionActive) predictedCursorY else VesselWaylandPresenter.cursorY().toFloat()\\n            val x = ox + (cursorX - VesselWaylandPresenter.cursorHotX()) * scale\\n            val y = oy + (cursorY - VesselWaylandPresenter.cursorHotY()) * scale\\n\'\'\'\ncursor_pattern = re.compile(r\'            val x = ox \\+ .*VesselWaylandPresenter\\.cursorX\\(\\).*\\n            val y = oy \\+ .*VesselWaylandPresenter\\.cursorY\\(\\).*\\n\')\nmatches = list(cursor_pattern.finditer(v))\nif len(matches) != 1:\n    context = \'\\n\'.join(line for line in v.splitlines() if \'cursorX()\' in line or \'cursorY()\' in line)\n    raise SystemExit(f\'LinuxDesktopView cursor draw anchor ambiguous ({len(matches)}): {context}\')\nv = cursor_pattern.sub(new_xy, v, count=1)\n'''
+          if old not in s:
+              raise SystemExit('integrator cursor block not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+
       - name: Materialize runtime and apply fixes
         run: python3 tools/vessel_native/integrate_real_source.py
 
