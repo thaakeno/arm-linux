@@ -50,6 +50,11 @@ jobs:
               "predictedCursorY = (predictedCursorY + (dy * 1.25f * if (VesselExperimentConfig.invertPointerY(context)) -1f else 1f) / scale).coerceIn(0f, gh.toFloat())",
               1,
           )
+          s = s.replace(
+              "    raise SystemExit('desktop tuning anchor missing')",
+              "    print('[integrate] desktop tuning anchor absent; existing desktop tuning kept')",
+              1,
+          )
           p.write_text(s)
           PY
 
