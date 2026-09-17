@@ -51,6 +51,9 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     private var scrollY = 0f
     private var dragging = false
     private var movedBeyondTap = false
+    private var predictedCursorX = Float.NaN
+    private var predictedCursorY = Float.NaN
+    private var cursorPredictionUntil = 0L
 
     private val surfaceView = object : SurfaceView(context) {
         override fun onCheckIsTextEditor() = true
@@ -120,8 +123,12 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
             val scale = min(width.toFloat() / gw, height.toFloat() / gh)
             val ox = (width - gw * scale) / 2f
             val oy = (height - gh * scale) / 2f
-            val x = ox + (VesselWaylandPresenter.cursorX() - VesselWaylandPresenter.cursorHotX()) * scale
-            val y = oy + (VesselWaylandPresenter.cursorY() - VesselWaylandPresenter.cursorHotY()) * scale
+            val predictionActive = SystemClock.uptimeMillis() <= cursorPredictionUntil && predictedCursorX.isFinite() && predictedCursorY.isFinite()
+            val cursorX = if (predictionActive) predictedCursorX else VesselWaylandPresenter.cursorX().toFloat()
+            val rawY = if (predictionActive) predictedCursorY else VesselWaylandPresenter.cursorY().toFloat()
+            val guestY = if (VesselExperimentConfig.invertPointerY(context)) gh.toFloat() - rawY else rawY
+            val x = ox + (cursorX - VesselWaylandPresenter.cursorHotX()) * scale
+            val y = oy + (guestY - VesselWaylandPresenter.cursorHotY()) * scale
             canvas.drawBitmap(b, null, android.graphics.RectF(x, y, x + 64 * scale, y + 64 * scale), null)
         }
     }.apply {
@@ -160,7 +167,9 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
         // A resize can keep the same ANativeWindow object. Tell native Vulkan the
         // new extent without detaching the retained AHardwareBuffer frame.
         VesselWaylandPresenter.surfaceChanged(width, height)
-        val refresh = display?.refreshRate ?: 60f
+        val refresh = (display?.supportedModes?.maxOfOrNull { it.refreshRate }
+            ?: display?.refreshRate ?: 60f)
+            .coerceAtMost(VesselExperimentConfig.refreshHz(context).toFloat())
         if (Build.VERSION.SDK_INT >= 30) {
             runCatching { holder.surface.setFrameRate(refresh, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT) }
         }
@@ -203,14 +212,35 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
         val scale = min(width.toFloat() / gw, height.toFloat() / gh).coerceAtLeast(0.0001f)
         val ox = (width - gw * scale) / 2f
         val oy = (height - gh * scale) / 2f
-        return (((x - ox) / (gw * scale)).coerceIn(0f, 1f)) to
-            (((y - oy) / (gh * scale)).coerceIn(0f, 1f))
+        val nx = ((x - ox) / (gw * scale)).coerceIn(0f, 1f)
+        val rawY = ((y - oy) / (gh * scale)).coerceIn(0f, 1f)
+        val ny = if (VesselExperimentConfig.invertPointerY(context)) 1f - rawY else rawY
+        return nx to ny
     }
 
     private fun displacementSq(x: Float, y: Float): Float {
         val dx = x - downX
         val dy = y - downY
         return dx * dx + dy * dy
+    }
+
+    private fun beginCursorPrediction() {
+        predictedCursorX = VesselWaylandPresenter.cursorX().toFloat()
+        predictedCursorY = VesselWaylandPresenter.cursorY().toFloat()
+        cursorPredictionUntil = SystemClock.uptimeMillis() + 50L
+    }
+
+    private fun predictCursorRelative(dx: Float, dy: Float) {
+        if (!predictedCursorX.isFinite() || !predictedCursorY.isFinite() || SystemClock.uptimeMillis() > cursorPredictionUntil) {
+            beginCursorPrediction()
+        }
+        val gw = VesselWaylandPresenter.guestWidth().coerceAtLeast(1)
+        val gh = VesselWaylandPresenter.guestHeight().coerceAtLeast(1)
+        val scale = min(width.toFloat() / gw, height.toFloat() / gh).coerceAtLeast(0.0001f)
+        predictedCursorX = (predictedCursorX + (dx * 1.25f) / scale).coerceIn(0f, gw.toFloat())
+        predictedCursorY = (predictedCursorY + (dy * 1.25f * if (VesselExperimentConfig.invertPointerY(context)) -1f else 1f) / scale).coerceIn(0f, gh.toFloat())
+        cursorPredictionUntil = SystemClock.uptimeMillis() + 50L
+        cursorView.invalidate()
     }
 
     private fun touch(e: MotionEvent): Boolean {
@@ -240,6 +270,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
                 movedBeyondTap = false
                 scrollX = e.x
                 scrollY = e.y
+                beginCursorPrediction()
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
@@ -262,12 +293,13 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
                 } else {
                     val dx = e.x - lastX
                     val dy = e.y - lastY
+                    predictCursorRelative(dx, dy)
                     if (displacementSq(e.x, e.y) > touchSlopSq) movedBeyondTap = true
                     if (!dragging && !movedBeyondTap && SystemClock.uptimeMillis() - downAt >= longPressMs) {
                         VesselVirtioInput.button(LEFT, true)
                         dragging = true
                     }
-                    VesselVirtioInput.relative(dx * 1.25f, dy * 1.25f)
+                    VesselVirtioInput.relative(dx * 1.25f, dy * 1.25f * if (VesselExperimentConfig.invertPointerY(context)) -1f else 1f)
                     lastX = e.x
                     lastY = e.y
                 }
@@ -283,6 +315,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
             }
 
             MotionEvent.ACTION_UP -> {
+                cursorPredictionUntil = SystemClock.uptimeMillis() + 50L
                 if (dragging) {
                     releaseDrag()
                 } else if (!movedBeyondTap && displacementSq(e.x, e.y) <= touchSlopSq) {

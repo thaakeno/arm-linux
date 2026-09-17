@@ -19,6 +19,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -31,6 +33,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -68,6 +72,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -77,6 +82,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -94,33 +100,57 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class VesselActivity : ComponentActivity() {
+    @Volatile private var fullscreenRequested = false
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        immersive()
+        applySystemChrome(false)
+        preferHighRefresh()
         VesselHostDebug.initialize(this)
+        VesselUpdateManager.initialize(this)
         startForegroundService(Intent(this, VmSessionService::class.java))
         setContent { VesselApp() }
     }
 
     override fun onResume() {
         super.onResume()
-        immersive()
+        applySystemChrome(fullscreenRequested)
+        preferHighRefresh()
         startForegroundService(Intent(this, VmSessionService::class.java))
         VmSessionService.active?.refreshAvailability()
+        VesselUpdateManager.resumePendingInstall(this)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) immersive()
+        if (hasFocus) applySystemChrome(fullscreenRequested)
     }
 
-    private fun immersive() {
+    private fun applySystemChrome(fullscreen: Boolean) {
+        fullscreenRequested = fullscreen
+        WindowCompat.setDecorFitsSystemWindows(window, !fullscreen)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            hide(WindowInsetsCompat.Type.systemBars())
+            if (fullscreen) hide(WindowInsetsCompat.Type.systemBars()) else show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    private fun preferHighRefresh() {
+        val displayManager = getSystemService(android.hardware.display.DisplayManager::class.java)
+        val display = displayManager?.getDisplay(android.view.Display.DEFAULT_DISPLAY) ?: return
+        val current = display.mode
+        val requested = VesselExperimentConfig.refreshHz(this).toFloat().coerceAtMost(120f)
+        val best = display.supportedModes
+            .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight && it.refreshRate <= requested + 0.5f }
+            .maxByOrNull { it.refreshRate }
+            ?: return
+        if (best.modeId != current.modeId) {
+            val attrs = window.attributes
+            attrs.preferredDisplayModeId = best.modeId
+            window.attributes = attrs
         }
     }
 
@@ -145,14 +175,15 @@ class VesselActivity : ComponentActivity() {
         var fullscreen by remember { mutableStateOf(false) }
 
         LaunchedEffect(fullscreen) {
-            immersive()
+            applySystemChrome(fullscreen)
+            preferHighRefresh()
             requestedOrientation = if (fullscreen) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
         LaunchedEffect(state.frameReachedApp) { if (state.frameReachedApp) page = 1 }
 
         VesselTheme {
             if (fullscreen && (state.running || state.busy)) {
-                FullscreenDesktop { fullscreen = false }
+                FullscreenDesktop(state) { fullscreen = false }
             } else {
                 Scaffold(
                     containerColor = MaterialTheme.colorScheme.background,
@@ -241,7 +272,7 @@ class VesselActivity : ComponentActivity() {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("Debian workstation", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                            Text(if (state.running || state.busy) state.message else "Persistent Linux PC on your phone", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(if (state.running || state.busy) "${state.message} · ${uptime(state.uptimeMs)}" else "Persistent Linux PC on your phone", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         StatusPill(when { stopping -> "STOPPING"; state.running -> "LIVE"; state.busy -> "STARTING"; else -> "OFF" }, canStop)
                     }
@@ -274,7 +305,7 @@ class VesselActivity : ComponentActivity() {
             Text("Machine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Metric(Icons.Default.Memory, "Memory", "${if (state.guestMemoryMb > 0) state.guestMemoryMb else 4096} MiB UML guest · ${VesselRuntimeController.UML_VCPUS} vCPU")
+                    Metric(Icons.Default.Memory, "Memory", "${if (state.guestMemoryMb > 0) state.guestMemoryMb else 4096} MiB UML guest · ${VesselExperimentConfig.vcpus(this@VesselActivity)} vCPU")
                     Metric(Icons.Default.DesktopWindows, "Desktop", "${state.guestDisplayWidth} × ${state.guestDisplayHeight} · stable landscape")
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                     Metric(Icons.Default.DesktopWindows, "Android Surface", state.presenterStatus)
@@ -289,13 +320,14 @@ class VesselActivity : ComponentActivity() {
     @Composable
     private fun DesktopPage(state: SessionState, fullscreen: () -> Unit) {
         var mode by remember { mutableStateOf(LinuxDesktopView.PointerMode.DIRECT) }
-        Column(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        var displayScale by remember { mutableStateOf(1f) }
+        Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Linux display", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                     Text(
                         when {
-                            state.displayReady -> "Real GPU frame presented · ${uptime(state.uptimeMs)}"
+                            state.displayReady -> "Wayland · native GPU surface · ${uptime(state.uptimeMs)}"
                             state.frameReachedApp -> "Validated GPU frame reached Vessel"
                             state.running || state.busy -> state.progressDetail
                             else -> "Press Start Linux first"
@@ -311,22 +343,34 @@ class VesselActivity : ComponentActivity() {
             if (state.running || state.busy) {
                 DesktopControls(mode, { newMode -> mode = newMode; LinuxDesktopView.active?.setPointerMode(newMode) }, fullscreen)
                 Box(Modifier.weight(1f).fillMaxWidth()) {
-                    Surface(Modifier.fillMaxSize(), color = Color.Black, shape = RoundedCornerShape(16.dp)) {
-                        AndroidView(
-                            modifier = Modifier.fillMaxSize(),
-                            factory = { context -> LinuxDesktopView(context).apply { setPointerMode(mode); requestFocus() } },
-                            update = { view -> view.setPointerMode(mode); if (!view.hasFocus()) view.requestFocus() },
-                        )
-                    }
-                    if (!state.displayReady) {
-                        Surface(Modifier.align(Alignment.Center).padding(18.dp), shape = RoundedCornerShape(18.dp), color = Color(0xD9101512)) {
-                            Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                                LinearProgressIndicator(progress = { state.progressPercent.coerceIn(0, 100) / 100f }, modifier = Modifier.width(220.dp))
-                                Text("${state.message} · ${state.progressPercent.coerceIn(0, 100)}%", maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                Text("Presenter: ${state.presenterStatus}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val aspect = (state.guestDisplayWidth.coerceAtLeast(1).toFloat() / state.guestDisplayHeight.coerceAtLeast(1).toFloat()).coerceIn(1.2f, 3.0f)
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(displayScale).aspectRatio(aspect).align(Alignment.Center),
+                        color = Color.Black,
+                        shape = RoundedCornerShape(20.dp),
+                        tonalElevation = 6.dp,
+                    ) {
+                        Box(Modifier.fillMaxSize()) {
+                            AndroidView(
+                                modifier = Modifier.fillMaxSize(),
+                                factory = { context -> LinuxDesktopView(context).apply { setPointerMode(mode); requestFocus() } },
+                                update = { view -> view.setPointerMode(mode); if (!view.hasFocus()) view.requestFocus() },
+                            )
+                            if (!state.displayReady) {
+                                Surface(Modifier.align(Alignment.Center).padding(18.dp), shape = RoundedCornerShape(18.dp), color = Color(0xD9101512)) {
+                                    Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                                        LinearProgressIndicator(progress = { state.progressPercent.coerceIn(0, 100) / 100f }, modifier = Modifier.width(220.dp))
+                                        Text("${state.message} · ${state.progressPercent.coerceIn(0, 100)}% · ${uptime(state.uptimeMs)}", maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                        Text("Presenter: ${state.presenterStatus}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
                             }
                         }
                     }
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Display size", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Slider(value = displayScale, onValueChange = { displayScale = it.coerceIn(0.68f, 1f) }, valueRange = 0.68f..1f, modifier = Modifier.weight(1f))
                 }
                 ExtraKeys()
             } else {
@@ -346,55 +390,77 @@ class VesselActivity : ComponentActivity() {
 
     @Composable
     private fun DesktopControls(mode: LinuxDesktopView.PointerMode, setMode: (LinuxDesktopView.PointerMode) -> Unit, fullscreen: () -> Unit) {
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                FilterChip(modifier = Modifier.weight(1f), selected = mode == LinuxDesktopView.PointerMode.DIRECT, onClick = { setMode(LinuxDesktopView.PointerMode.DIRECT) }, label = { Text("Touch") }, leadingIcon = { Icon(Icons.Default.TouchApp, null) })
-                FilterChip(modifier = Modifier.weight(1f), selected = mode == LinuxDesktopView.PointerMode.TRACKPAD, onClick = { setMode(LinuxDesktopView.PointerMode.TRACKPAD) }, label = { Text("Trackpad") }, leadingIcon = { Icon(Icons.Default.Mouse, null) })
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                AssistChip(modifier = Modifier.weight(1f), onClick = { LinuxDesktopView.active?.showKeyboard() }, label = { Text("Keyboard") }, leadingIcon = { Icon(Icons.Default.Keyboard, null) })
-                AssistChip(modifier = Modifier.weight(1f), onClick = fullscreen, label = { Text("Fullscreen") }, leadingIcon = { Icon(Icons.Default.OpenInFull, null) })
-            }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+            FilterChip(selected = mode == LinuxDesktopView.PointerMode.DIRECT, onClick = { setMode(LinuxDesktopView.PointerMode.DIRECT) }, label = { Text("Touch") }, leadingIcon = { Icon(Icons.Default.TouchApp, null) })
+            FilterChip(selected = mode == LinuxDesktopView.PointerMode.TRACKPAD, onClick = { setMode(LinuxDesktopView.PointerMode.TRACKPAD) }, label = { Text("Trackpad") }, leadingIcon = { Icon(Icons.Default.Mouse, null) })
+            AssistChip(onClick = { LinuxDesktopView.active?.showKeyboard() }, label = { Text("Keyboard") }, leadingIcon = { Icon(Icons.Default.Keyboard, null) })
+            AssistChip(onClick = fullscreen, label = { Text("Fullscreen") }, leadingIcon = { Icon(Icons.Default.OpenInFull, null) })
         }
     }
 
     @Composable
-    private fun FullscreenDesktop(exit: () -> Unit) {
+    private fun FullscreenDesktop(state: SessionState, exit: () -> Unit) {
         var mode by remember { mutableStateOf(LinuxDesktopView.PointerMode.TRACKPAD) }
         var controlsVisible by remember { mutableStateOf(true) }
-        LaunchedEffect(controlsVisible, mode) {
+        var controlsEpoch by remember { mutableIntStateOf(0) }
+        LaunchedEffect(controlsVisible, controlsEpoch) {
             if (controlsVisible) {
-                delay(2200)
+                delay(3200)
                 controlsVisible = false
             }
         }
-        Box(Modifier.fillMaxSize().background(Color.Black).clickable { controlsVisible = true }) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { context -> LinuxDesktopView(context).apply { setPointerMode(mode); requestFocus() } },
-                update = { it.setPointerMode(mode) },
-            )
+        Box(
+            Modifier.fillMaxSize()
+                .background(Color(0xff030504))
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(8.dp),
+        ) {
+            val aspect = (state.guestDisplayWidth.coerceAtLeast(1).toFloat() / state.guestDisplayHeight.coerceAtLeast(1).toFloat()).coerceIn(1.2f, 3.0f)
+            Surface(
+                modifier = Modifier.fillMaxWidth().aspectRatio(aspect).align(Alignment.Center),
+                color = Color.Black,
+                shape = RoundedCornerShape(12.dp),
+                tonalElevation = 4.dp,
+            ) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { context -> LinuxDesktopView(context).apply { setPointerMode(mode); requestFocus() } },
+                    update = { view -> view.setPointerMode(mode); if (!view.hasFocus()) view.requestFocus() },
+                )
+            }
+
             if (controlsVisible) {
                 Surface(
-                    Modifier.align(Alignment.TopEnd).padding(top = 10.dp, end = 12.dp),
-                    shape = RoundedCornerShape(18.dp),
-                    color = Color(0xD9101512),
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    shape = RoundedCornerShape(22.dp),
+                    color = Color(0xF4F3F7F4),
+                    shadowElevation = 10.dp,
                 ) {
-                    Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { mode = LinuxDesktopView.PointerMode.DIRECT; LinuxDesktopView.active?.setPointerMode(mode); controlsVisible = true }) { Icon(Icons.Default.TouchApp, "Touch") }
-                        IconButton(onClick = { mode = LinuxDesktopView.PointerMode.TRACKPAD; LinuxDesktopView.active?.setPointerMode(mode); controlsVisible = true }) { Icon(Icons.Default.Mouse, "Trackpad") }
-                        IconButton(onClick = { LinuxDesktopView.active?.showKeyboard(); controlsVisible = true }) { Icon(Icons.Default.Keyboard, "Keyboard") }
-                        IconButton(onClick = exit) { Icon(Icons.Default.CloseFullscreen, "Exit fullscreen") }
+                    Row(Modifier.padding(horizontal = 6.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = {
+                            mode = LinuxDesktopView.PointerMode.DIRECT
+                            LinuxDesktopView.active?.setPointerMode(mode)
+                            controlsEpoch++
+                        }) { Icon(Icons.Default.TouchApp, "Touch", tint = if (mode == LinuxDesktopView.PointerMode.DIRECT) Color(0xff0B6B4B) else Color(0xff18211D)) }
+                        IconButton(onClick = {
+                            mode = LinuxDesktopView.PointerMode.TRACKPAD
+                            LinuxDesktopView.active?.setPointerMode(mode)
+                            controlsEpoch++
+                        }) { Icon(Icons.Default.Mouse, "Trackpad", tint = if (mode == LinuxDesktopView.PointerMode.TRACKPAD) Color(0xff0B6B4B) else Color(0xff18211D)) }
+                        IconButton(onClick = { LinuxDesktopView.active?.showKeyboard(); controlsEpoch++ }) { Icon(Icons.Default.Keyboard, "Keyboard", tint = Color(0xff18211D)) }
+                        IconButton(onClick = exit) { Icon(Icons.Default.CloseFullscreen, "Exit fullscreen", tint = Color(0xff18211D)) }
                     }
                 }
             } else {
                 Surface(
-                    modifier = Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 10.dp).clickable { controlsVisible = true },
+                    modifier = Modifier.align(Alignment.TopCenter).clickable { controlsVisible = true; controlsEpoch++ },
                     shape = RoundedCornerShape(999.dp),
-                    color = Color(0x8A101512),
+                    color = Color(0xF2F3F7F4),
+                    shadowElevation = 8.dp,
                 ) {
-                    Box(Modifier.width(42.dp).height(10.dp), contentAlignment = Alignment.Center) {
-                        Surface(Modifier.width(22.dp).height(2.dp), shape = RoundedCornerShape(999.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) {}
+                    Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Icon(Icons.Default.Tune, null, Modifier.size(18.dp), tint = Color(0xff18211D))
+                        Text("Controls", color = Color(0xff18211D), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -414,8 +480,8 @@ class VesselActivity : ComponentActivity() {
     private fun AppsPage(state: SessionState) {
         val store by VmSessionService.appStore.collectAsStateWithLifecycle()
         var query by remember { mutableStateOf(store.query) }
-        LaunchedEffect(state.guestReady, state.busy, state.stage) {
-            if (state.guestReady && !state.busy && store.apps.isEmpty() && !store.loading) {
+        LaunchedEffect(state.guestReady, state.stage) {
+            if (state.guestReady && state.stage == "ready" && store.apps.isEmpty() && !store.loading) {
                 VmSessionService.active?.refreshApps("", "POPULAR", "All")
             }
         }
@@ -423,7 +489,7 @@ class VesselActivity : ComponentActivity() {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Debian apps", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text("Real AppStream apps · Debian ARM64", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Cached AppStream catalog · ARM64 · fast local search", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (store.loading) StatusPill("LOADING", true)
             }
@@ -443,7 +509,16 @@ class VesselActivity : ComponentActivity() {
             }
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                 VmSessionService.APP_SORTS.forEach { sort ->
-                    val label = when (sort) { "POPULAR" -> "Popular"; "NEW" -> "New"; "INSTALLED" -> "Installed"; "SIZE" -> "Size"; else -> "A–Z" }
+                    val label = when (sort) {
+                        "POPULAR" -> "Popular"
+                        "NEW" -> "New"
+                        "HOT_WEEK" -> "Hot week"
+                        "HOT_MONTH" -> "Hot month"
+                        "HOT_YEAR" -> "Hot year"
+                        "INSTALLED" -> "Installed"
+                        "SIZE" -> "Size"
+                        else -> "A–Z"
+                    }
                     FilterChip(
                         selected = store.sort == sort,
                         onClick = { VmSessionService.active?.refreshApps(query, sort, store.category) },
@@ -462,7 +537,10 @@ class VesselActivity : ComponentActivity() {
                     )
                 }
             }
-            if (!state.guestReady) ErrorStrip("Start Linux first. Vessel reads Debian's own AppStream catalog, so discovery always matches this ARM64 machine.")
+            if (!state.guestReady) ErrorStrip("Start Linux first. Vessel reads Debian's own ARM64 catalog.")
+            if (state.guestReady && store.sort.startsWith("HOT_")) {
+                Text("Hot combines recent AppStream releases with a small curated popularity signal; it is not global install telemetry.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             if (store.error.isNotBlank()) ErrorStrip(store.error)
             if (store.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 8.dp)) {
@@ -568,6 +646,18 @@ class VesselActivity : ComponentActivity() {
     @Composable
     private fun SystemPage(state: SessionState) {
         val stats by VmSessionService.machineStats.collectAsStateWithLifecycle()
+        val diagnostics by VmSessionService.diagnostics.collectAsStateWithLifecycle()
+        val updates by VesselUpdateManager.state.collectAsStateWithLifecycle()
+        val updateScope = rememberCoroutineScope()
+        var expVcpus by remember { mutableIntStateOf(VesselExperimentConfig.vcpus(this@VesselActivity)) }
+        var expMemory by remember { mutableIntStateOf(VesselExperimentConfig.memoryMb(this@VesselActivity)) }
+        var expRefresh by remember { mutableIntStateOf(VesselExperimentConfig.refreshHz(this@VesselActivity)) }
+        var expResolution by remember { mutableIntStateOf(VesselExperimentConfig.resolutionPercent(this@VesselActivity)) }
+        var expFlipY by remember { mutableStateOf(VesselExperimentConfig.flipDisplayY(this@VesselActivity)) }
+        var expPointerY by remember { mutableStateOf(VesselExperimentConfig.invertPointerY(this@VesselActivity)) }
+        var expDesktop by remember { mutableStateOf(VesselExperimentConfig.desktopBackend(this@VesselActivity)) }
+        var expHostGl by remember { mutableStateOf(VesselExperimentConfig.hostGl(this@VesselActivity)) }
+        var expFirefoxDmabuf by remember { mutableStateOf(VesselExperimentConfig.firefoxDmabuf(this@VesselActivity)) }
         LaunchedEffect(state.guestReady, state.running) { VmSessionService.active?.refreshSystemStats() }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -586,6 +676,64 @@ class VesselActivity : ComponentActivity() {
             }
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Experiment lab", fontWeight = FontWeight.SemiBold)
+                    Text("Stable default: 4 vCPU + 120 Hz request. Six CPUs stays available as an experiment, but it is no longer the restart default.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("UML vCPU", style = MaterialTheme.typography.labelMedium)
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        listOf(1, 2, 4, 6).forEach { value ->
+                            FilterChip(selected = expVcpus == value, onClick = { expVcpus = value; VesselExperimentConfig.setVcpus(this@VesselActivity, value) }, label = { Text("$value CPU") })
+                        }
+                    }
+                    Text("Guest memory", style = MaterialTheme.typography.labelMedium)
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        listOf(0 to "Auto", 2048 to "2 GB", 3072 to "3 GB", 4096 to "4 GB").forEach { (value, label) ->
+                            FilterChip(selected = expMemory == value, onClick = { expMemory = value; VesselExperimentConfig.setMemoryMb(this@VesselActivity, value) }, label = { Text(label) })
+                        }
+                    }
+                    Text("Refresh cap", style = MaterialTheme.typography.labelMedium)
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        listOf(60, 90, 120).forEach { value ->
+                            FilterChip(selected = expRefresh == value, onClick = { expRefresh = value; VesselExperimentConfig.setRefreshHz(this@VesselActivity, value) }, label = { Text("$value Hz") })
+                        }
+                    }
+                    Text("Guest resolution", style = MaterialTheme.typography.labelMedium)
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        listOf(67 to "~720p", 83 to "Balanced", 100 to "Native cap").forEach { (value, label) ->
+                            FilterChip(selected = expResolution == value, onClick = { expResolution = value; VesselExperimentConfig.setResolutionPercent(this@VesselActivity, value) }, label = { Text(label) })
+                        }
+                    }
+                    Text("Desktop stack", style = MaterialTheme.typography.labelMedium)
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        FilterChip(selected = expDesktop == "wayland", onClick = { expDesktop = "wayland"; VesselExperimentConfig.setDesktopBackend(this@VesselActivity, "wayland") }, label = { Text("Wayland (default)") })
+                        FilterChip(selected = expDesktop == "x11", onClick = { expDesktop = "x11"; VesselExperimentConfig.setDesktopBackend(this@VesselActivity, "x11") }, label = { Text("X11 fallback") })
+                    }
+                    Text("Host GL", style = MaterialTheme.typography.labelMedium)
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        FilterChip(selected = expHostGl == "system", onClick = { expHostGl = "system"; VesselExperimentConfig.setHostGl(this@VesselActivity, "system") }, label = { Text("System EGL") })
+                        FilterChip(selected = expHostGl == "angle", onClick = { expHostGl = "angle"; VesselExperimentConfig.setHostGl(this@VesselActivity, "angle") }, label = { Text("Bundled ANGLE") })
+                        FilterChip(selected = expFirefoxDmabuf, onClick = { expFirefoxDmabuf = !expFirefoxDmabuf; VesselExperimentConfig.setFirefoxDmabuf(this@VesselActivity, expFirefoxDmabuf) }, label = { Text("Firefox DMA-BUF experimental") })
+                    }
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        FilterChip(selected = expFlipY, onClick = { expFlipY = !expFlipY; VesselExperimentConfig.setFlipDisplayY(this@VesselActivity, expFlipY) }, label = { Text("Fix display Y flip") })
+                        FilterChip(selected = expPointerY, onClick = { expPointerY = !expPointerY; VesselExperimentConfig.setInvertPointerY(this@VesselActivity, expPointerY) }, label = { Text("Invert pointer Y") })
+                    }
+                    Text("Wayland + System EGL are the new defaults. Restart Linux after changing architecture settings.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedButton(onClick = {
+                        VesselExperimentConfig.reset(this@VesselActivity)
+                        expVcpus = VesselExperimentConfig.vcpus(this@VesselActivity)
+                        expMemory = VesselExperimentConfig.memoryMb(this@VesselActivity)
+                        expRefresh = VesselExperimentConfig.refreshHz(this@VesselActivity)
+                        expResolution = VesselExperimentConfig.resolutionPercent(this@VesselActivity)
+                        expFlipY = VesselExperimentConfig.flipDisplayY(this@VesselActivity)
+                        expPointerY = VesselExperimentConfig.invertPointerY(this@VesselActivity)
+                        expDesktop = VesselExperimentConfig.desktopBackend(this@VesselActivity)
+                        expHostGl = VesselExperimentConfig.hostGl(this@VesselActivity)
+                        expFirefoxDmabuf = VesselExperimentConfig.firefoxDmabuf(this@VesselActivity)
+                    }) { Text("Reset experiment defaults") }
+                }
+            }
+            ElevatedCard(shape = RoundedCornerShape(22.dp)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Storage", fontWeight = FontWeight.SemiBold)
                     Metric(Icons.Default.Storage, "Linux filesystem", if (stats.guestDiskFreeMb > 0) "${stats.guestDiskUsedMb} MiB used · ${stats.guestDiskFreeMb} MiB free" else "Start Linux for filesystem usage")
                     Metric(Icons.Default.Storage, "Sparse disk", "${stats.diskVirtualMb} MiB virtual · ~${stats.diskPhysicalMb} MiB physically allocated")
@@ -600,11 +748,56 @@ class VesselActivity : ComponentActivity() {
                     Metric(Icons.Default.Bolt, "Vessel", "${BuildConfig.VERSION_NAME} · ${state.runtimeRevision}")
                     Metric(Icons.Default.DesktopWindows, "Transport", state.displayTransport)
                     Metric(Icons.Default.DesktopWindows, "Presenter", state.presenterStatus)
+                    Metric(Icons.Default.Bolt, "Audio", VesselAudioBridge.status())
+                    Metric(Icons.Default.Terminal, "Control RPC", VesselGuestAgent.status())
                     Metric(Icons.Default.Storage, "Machine", state.machinePath)
                     if (stats.packageCount > 0) Metric(Icons.Default.Laptop, "Debian packages", "${stats.packageCount} installed")
                 }
             }
-            Button(onClick = { VmSessionService.active?.runGpuDiagnostics() }, enabled = state.guestReady && !state.busy) { Text("Run GPU + input diagnostics") }
+            ElevatedCard(shape = RoundedCornerShape(22.dp)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Updates", fontWeight = FontWeight.SemiBold)
+                    Metric(Icons.Default.Bolt, "App", "${BuildConfig.VERSION_NAME} · code ${BuildConfig.VERSION_CODE} · ${BuildConfig.GIT_COMMIT}")
+                    Metric(Icons.Default.Terminal, "Live runtime", updates.runtimeRevision)
+                    if (updates.busy) LinearProgressIndicator(progress = { updates.progressPercent.coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
+                    Text(updates.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { updateScope.launch { runCatching { VesselUpdateManager.checkRuntimeUpdate(this@VesselActivity) } } },
+                            enabled = !updates.busy,
+                        ) { Text("Update runtime") }
+                        OutlinedButton(
+                            onClick = { updateScope.launch { runCatching { VesselUpdateManager.checkAndInstallAppUpdate(this@VesselActivity) } } },
+                            enabled = !updates.busy,
+                        ) { Text("Update app") }
+                        OutlinedButton(
+                            onClick = { updateScope.launch { runCatching { VesselUpdateManager.rollbackRuntime(this@VesselActivity) } } },
+                            enabled = !updates.busy && updates.canRollback,
+                        ) { Text("Rollback runtime") }
+                    }
+                    Text("Runtime updates replace only allow-listed Wayland bootstrap scripts and apply on the next Linux start. Kotlin/native changes use the Android APK updater.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            ElevatedCard(shape = RoundedCornerShape(22.dp)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Crash diagnostics", fontWeight = FontWeight.SemiBold)
+                            Text("Host memory, UML exit state, Wayland/GPU, PulseAudio and Firefox crash artifacts", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        OutlinedButton(onClick = { copyText("Vessel diagnostics", diagnostics) }, enabled = diagnostics.isNotBlank()) { Text("Copy") }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { VmSessionService.active?.collectCrashDiagnostics() }) { Text("Collect") }
+                        OutlinedButton(onClick = { VmSessionService.active?.runGpuDiagnostics() }, enabled = state.guestReady) { Text("GPU + input") }
+                    }
+                    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = Color(0xff050706)) {
+                        SelectionContainer {
+                            Text(diagnostics.takeLast(6_000), Modifier.padding(12.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, maxLines = 18, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
             LogCard(state)
         }
     }
@@ -647,7 +840,7 @@ class VesselActivity : ComponentActivity() {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(state.progressDetail, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.width(10.dp))
-                Text("${state.progressPercent.coerceIn(0, 100)}%", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                Text("${state.progressPercent.coerceIn(0, 100)}% · ${uptime(state.uptimeMs)}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
             }
         }
     }

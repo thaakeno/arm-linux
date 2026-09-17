@@ -12,6 +12,7 @@ extern "C" {
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -33,7 +34,7 @@ constexpr uint32_t MSG_REGISTER_FRAME = 1;
 constexpr uint32_t MSG_FRAME = 2;
 constexpr uint32_t MSG_DISABLE = 3;
 constexpr size_t MAX_SCANOUTS = 16;
-constexpr size_t FRAME_SLOTS = 3;
+constexpr size_t FRAME_SLOTS = 5;
 constexpr uint8_t FENCE_TAG = 0xF3;
 
 constexpr int RC_EXTENSIONS = 101;
@@ -110,6 +111,7 @@ int g_socket = -1;
 uint64_t g_frame_count = 0;
 uint64_t g_full_copy_count = 0;
 uint64_t g_partial_copy_count = 0;
+uint64_t g_drop_count = 0;
 auto g_rate_started = std::chrono::steady_clock::now();
 
 using GetNativeClientBuffer = PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC;
@@ -145,6 +147,11 @@ void logi(const std::string& message) { emit_log(ANDROID_LOG_INFO, "I", message)
 
 void clear_gl_errors() { for (int i = 0; i < 16; ++i) if (glGetError() == GL_NO_ERROR) return; }
 void clear_egl_errors() { for (int i = 0; i < 16; ++i) if (eglGetError() == EGL_SUCCESS) return; }
+
+bool flip_y_enabled() {
+    const char* value = std::getenv("VESSEL_FLIP_Y");
+    return value == nullptr || std::strcmp(value, "0") != 0;
+}
 
 DamageRect full_damage(const ScanoutState& state) {
     return DamageRect{0, 0, state.width, state.height, state.width != 0 && state.height != 0};
@@ -273,7 +280,7 @@ bool connect_socket() {
         if (connect(fd, reinterpret_cast<sockaddr*>(&addr), len) == 0) {
             g_socket = fd;
             mark_transport_reset();
-            logi("connected presenter side channel name=" + name + " protocol=3 slots=3 syncfd=1 damage=1 resourceSync=1");
+            logi("connected presenter side channel name=" + name + " protocol=3 slots=5 syncfd=1 damage=1 resourceSync=1 dropOnBackpressure=1");
             return true;
         }
         last_errno = errno;
@@ -458,9 +465,14 @@ int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t source_x, uin
     const GLint src_x1 = static_cast<GLint>(source_x + damage.x + damage.width);
     const GLint src_y1 = static_cast<GLint>(source_y + damage.y + damage.height);
     const GLint dst_x0 = static_cast<GLint>(damage.x);
-    const GLint dst_y0 = static_cast<GLint>(damage.y);
     const GLint dst_x1 = static_cast<GLint>(damage.x + damage.width);
-    const GLint dst_y1 = static_cast<GLint>(damage.y + damage.height);
+    const bool flip_y = flip_y_enabled();
+    const GLint dst_y0 = flip_y
+        ? static_cast<GLint>(slot.height - damage.y)
+        : static_cast<GLint>(damage.y);
+    const GLint dst_y1 = flip_y
+        ? static_cast<GLint>(slot.height - damage.y - damage.height)
+        : static_cast<GLint>(damage.y + damage.height);
     glBlitFramebuffer(src_x0, src_y0, src_x1, src_y1,
                       dst_x0, dst_y0, dst_x1, dst_y1,
                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -491,19 +503,19 @@ int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t source_x, uin
     return 0;
 }
 
-int wait_for_free_slot(uint32_t scanout_id, ScanoutState& state) {
-    for (;;) {
-        drain_acks();
-        for (size_t n = 0; n < FRAME_SLOTS; ++n) {
-            const uint32_t idx = (state.next_slot + static_cast<uint32_t>(n)) % FRAME_SLOTS;
-            if (!state.slots[idx].busy) { state.next_slot = (idx + 1) % FRAME_SLOTS; return static_cast<int>(idx); }
-        }
-        if (!connect_socket() || !receive_one_ack(true)) {
-            if (g_socket < 0) continue;
-            loge("failed waiting for free AHB slot scanout=" + std::to_string(scanout_id));
-            return -1;
+int find_free_slot(ScanoutState& state) {
+    // Never block the vhost-user-gpu dispatch thread waiting for Android. ACKs
+    // are opportunistically retired; if all five source buffers are still in
+    // flight we drop this presentation update and carry its damage forward.
+    drain_acks();
+    for (size_t n = 0; n < FRAME_SLOTS; ++n) {
+        const uint32_t idx = (state.next_slot + static_cast<uint32_t>(n)) % FRAME_SLOTS;
+        if (!state.slots[idx].busy) {
+            state.next_slot = (idx + 1) % FRAME_SLOTS;
+            return static_cast<int>(idx);
         }
     }
+    return -1;
 }
 
 bool wait_scanout_idle(ScanoutState& state) {
@@ -547,11 +559,13 @@ int send_frame(uint32_t scanout_id, uint32_t slot_index, ScanoutState& state, in
     const double elapsed = std::chrono::duration<double>(now - g_rate_started).count();
     if (elapsed >= 2.0) {
         logi("producer=" + std::to_string(static_cast<int>(g_frame_count / elapsed)) +
-             " fps in_flight<=3 syncfd=1 full=" + std::to_string(g_full_copy_count) +
-             " partial=" + std::to_string(g_partial_copy_count));
+             " fps in_flight<=5 syncfd=1 fullCopies=" + std::to_string(g_full_copy_count) +
+             " partialCopies=" + std::to_string(g_partial_copy_count) +
+             " dropped=" + std::to_string(g_drop_count));
         g_frame_count = 0;
         g_full_copy_count = 0;
         g_partial_copy_count = 0;
+        g_drop_count = 0;
         g_rate_started = now;
     }
     return 0;
@@ -580,8 +594,11 @@ int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint3
         }
     }
 
-    const int idx = wait_for_free_slot(scanout_id, state);
-    if (idx < 0) return RC_SOCKET;
+    const int idx = find_free_slot(state);
+    if (idx < 0) {
+        ++g_drop_count;
+        return 0;
+    }
     auto& slot = state.slots[static_cast<size_t>(idx)];
     const int alloc_rc = allocate_slot(slot, width, height, static_cast<uint32_t>(idx));
     if (alloc_rc) return alloc_rc;

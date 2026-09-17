@@ -52,6 +52,7 @@ object VesselGuestAgent {
     fun token(): String = authToken
     fun isConnected(): Boolean = socket?.let { it.isConnected && !it.isClosed } == true
     fun status(): String = lastStatus
+    fun waitUntilConnected(waitMs: Long = 20_000): Boolean = awaitConnection(waitMs.coerceIn(1_000, 60_000))
 
     fun resetConnection() {
         synchronized(connectionLock) {
@@ -195,6 +196,11 @@ object VesselGuestAgent {
         } finally {
             runCatching { s.soTimeout = 0 }
         }
+        // The response loop exits only via return@synchronized or exception,
+        // but keeping an explicit Pair expression makes Kotlin's generic
+        // synchronized() return type unambiguous across compiler versions.
+        @Suppress("UNREACHABLE_CODE")
+        -1 to out.toString()
     }
 
     private fun closeConnectionLocked() {

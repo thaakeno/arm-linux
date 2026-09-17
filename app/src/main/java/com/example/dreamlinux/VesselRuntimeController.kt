@@ -3,6 +3,8 @@ package com.example.dreamlinux
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Environment
+import android.system.Os
+import android.system.OsConstants
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -35,8 +37,8 @@ class VesselRuntimeController(
 ) {
     companion object {
         const val PROTOCOL = 40
-        const val REVISION = "v40-native-surface-egl-virtio-input-r1"
-        const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahb-native-surface-v3"
+        const val REVISION = "v57-one-final-tty-rpc-r1"
+        const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahb-async-surface-v6"
         const val INPUT_TRANSPORT = "virtio-input-vhost-user-same-uid-v1"
         const val UML_VCPUS = 6
         private const val ROOTFS_URL = "https://github.com/zalexdev/linux-um-arm64/releases/download/prebuilt-20260816/debian-docker.ext4.gz"
@@ -78,14 +80,22 @@ class VesselRuntimeController(
         val info = ActivityManager.MemoryInfo()
         context.getSystemService(ActivityManager::class.java)?.getMemoryInfo(info)
         val totalMb = (info.totalMem / (1024L * 1024L)).toInt().coerceAtLeast(4096)
-        ((totalMb * 3) / 10).coerceIn(2048, 4096)
+        val automatic = ((totalMb * 3) / 10).coerceIn(2048, 4096)
+        VesselExperimentConfig.memoryMb(context).takeIf { it > 0 } ?: automatic
     }
+
+    val selectedVcpus: Int
+        get() = VesselExperimentConfig.vcpus(context)
 
     private val umlBin get() = File(nativeDir, "libvessel_uml.so")
     private val stubBin get() = File(nativeDir, "libvessel_stub.so")
     private val umnetBin get() = File(nativeDir, "libvessel_umnet.so")
     private val passtBin get() = File(nativeDir, "libvessel_passt.so")
-    private val gpuBin get() = File(nativeDir, "libvessel_vhost_gpu.so")
+    private val gpuSystemBin get() = File(nativeDir, "libvessel_vhost_gpu_system.so")
+    private val gpuAngleBin get() = File(nativeDir, "libvessel_vhost_gpu_angle.so")
+    private val gpuBin get() = if (VesselExperimentConfig.hostGl(context) == "angle") gpuAngleBin else gpuSystemBin
+    private val bridgeSystem get() = File(nativeDir, "libvessel_ahb_bridge_system.so")
+    private val bridgeAngle get() = File(nativeDir, "libvessel_ahb_bridge_angle.so")
     private val inputBin get() = File(nativeDir, "libvessel_vhost_input.so")
     private val virglLib get() = File(nativeDir, "libvessel_virglrenderer.so")
     private val epoxyLib get() = File(nativeDir, "libvessel_epoxy.so")
@@ -128,12 +138,13 @@ class VesselRuntimeController(
     private val pendingOutput = StringBuilder()
     private val commandId = AtomicLong()
     @Volatile private var guestShellReady = CompletableFuture<Unit>()
+    @Volatile private var useGuestAgent = false
 
     fun hasStorageAccess(): Boolean = Environment.isExternalStorageManager()
 
     private fun runtimeFiles(): List<File> = listOf(
-        umlBin, stubBin, umnetBin, passtBin, gpuBin, inputBin,
-        virglLib, epoxyLib, eglAngle, glesAngle, angleSelector,
+        umlBin, stubBin, umnetBin, passtBin, gpuSystemBin, gpuAngleBin, inputBin,
+        bridgeSystem, bridgeAngle, virglLib, epoxyLib, eglAngle, glesAngle, angleSelector,
     )
 
     fun hostAssetsReady(): Boolean = runtimeFiles().all { it.isFile && it.length() > 0L }
@@ -188,10 +199,11 @@ class VesselRuntimeController(
         .put("ok", ok)
         .put("protocolVersion", PROTOCOL)
         .put("runtimeRevision", REVISION)
+        .put("hotRuntimeRevision", VesselUpdateManager.currentRuntimeRevision(context))
         .put("displayTransport", DISPLAY_TRANSPORT)
         .put("inputTransport", INPUT_TRANSPORT)
         .put("backend", "UML_VIRTIO_GPU_VIRTIO_INPUT_NATIVE")
-        .put("renderer", "KDE Plasma/Xorg -> Mesa VirGL -> vhost-device-gpu -> virglrenderer -> ANGLE -> Adreno")
+        .put("renderer", "KDE Plasma/${if (VesselExperimentConfig.desktopBackend(context) == "wayland") "Wayland" else "X11"} -> Mesa VirGL -> virglrenderer -> ${VesselExperimentConfig.hostGl(context)} EGL -> async AHB -> SurfaceFlinger")
         .put("rendererMode", "virgl-opengl")
         .put("translationLayer", "VirGL")
         .put("gpuOnly", true)
@@ -200,13 +212,15 @@ class VesselRuntimeController(
         .put("runtimeDir", runtimeDir.absolutePath)
         .put("machineDir", machineDir.absolutePath)
         .put("guestMemoryMb", guestMemoryMb)
-        .put("vcpus", UML_VCPUS)
+        .put("vcpus", selectedVcpus)
         .put("running", running)
         .put("guestReady", guestReady)
         .put("desktopReady", desktopReady)
         .put("frameContentValidated", presenterVisible(VesselWaylandPresenter.status()))
         .put("inputConnected", inputReady && inputBackendsAlive())
         .put("inputSender", VesselVirtioInput.status())
+        .put("controlTransport", if (useGuestAgent) VesselGuestAgent.status() else "boot-tty")
+        .put("audioTransport", VesselAudioBridge.status())
         .put("displayWidth", displayWidth)
         .put("displayHeight", displayHeight)
         .put("displayDpi", displayDpi)
@@ -322,6 +336,44 @@ class VesselRuntimeController(
         }
     }
 
+
+    private val staleRuntimeNeedles = listOf(
+        "libvessel_uml.so",
+        "libvessel_umnet.so",
+        "libvessel_passt.so",
+        "libvessel_vhost_gpu.so",
+        "libvessel_vhost_gpu_system.so",
+        "libvessel_vhost_gpu_angle.so",
+        "libvessel_vhost_input.so",
+    )
+
+    private fun killStaleNativeRuntimeProcesses(reason: String) {
+        val myUid = android.os.Process.myUid()
+        val myPid = android.os.Process.myPid()
+        var killed = 0
+        File("/proc").listFiles().orEmpty().forEach { dir ->
+            val pid = dir.name.toIntOrNull() ?: return@forEach
+            if (pid == myPid) return@forEach
+            val uid = runCatching {
+                File(dir, "status").useLines { lines ->
+                    lines.firstOrNull { it.startsWith("Uid:") }
+                        ?.substringAfter("Uid:")?.trim()?.split(Regex("\\s+"))?.firstOrNull()?.toIntOrNull()
+                }
+            }.getOrNull()
+            if (uid != myUid) return@forEach
+            val command = runCatching {
+                File(dir, "cmdline").readBytes().toString(Charsets.UTF_8).replace('\u0000', ' ')
+            }.getOrDefault("")
+            if (staleRuntimeNeedles.none { command.contains(it) }) return@forEach
+            runCatching {
+                Os.kill(pid, OsConstants.SIGKILL)
+                killed++
+                append("[host] killed stale Vessel native pid=$pid reason=$reason cmd=${command.take(180)}\\n")
+            }
+        }
+        if (killed > 0) Thread.sleep(120)
+    }
+
     private fun startInputBackends() {
         stopInputBackends()
         val started = mutableListOf<Process>()
@@ -386,7 +438,8 @@ class VesselRuntimeController(
             presenterReady = displaySocket.exists()
         }
         check(presenterReady) { "Native vhost-user-gpu display socket did not start: ${VesselWaylandPresenter.status()}" }
-        append("[host] starting vhost-device-gpu; display=${displaySocket.absolutePath}\n")
+        val hostGl = VesselExperimentConfig.hostGl(context)
+        append("[host] starting vhost-device-gpu; display=${displaySocket.absolutePath} hostGl=$hostGl\n")
         val pb = ProcessBuilder(
             gpuBin.absolutePath,
             "--socket-path", gpuSocket.absolutePath,
@@ -398,10 +451,18 @@ class VesselRuntimeController(
             "--use-surfaceless", "true",
         ).redirectErrorStream(true)
         pb.environment()["LD_LIBRARY_PATH"] = nativeDir.absolutePath
-        pb.environment()["LD_PRELOAD"] = angleSelector.absolutePath
-        pb.environment()["VESSEL_ANGLE_PATH"] = nativeDir.absolutePath
-        pb.environment()["EPOXY_USE_ANGLE"] = "1"
+        if (hostGl == "angle") {
+            pb.environment()["LD_PRELOAD"] = angleSelector.absolutePath
+            pb.environment()["VESSEL_ANGLE_PATH"] = nativeDir.absolutePath
+            pb.environment()["EPOXY_USE_ANGLE"] = "1"
+        } else {
+            pb.environment().remove("LD_PRELOAD")
+            pb.environment().remove("VESSEL_ANGLE_PATH")
+            pb.environment().remove("EPOXY_USE_ANGLE")
+        }
+        pb.environment()["VESSEL_HOST_GL"] = hostGl
         pb.environment()["RUST_LOG"] = "info"
+        pb.environment()["VESSEL_FLIP_Y"] = if (VesselExperimentConfig.flipDisplayY(context)) "1" else "0"
         val p = pb.start()
         gpuProcess = p
         startProcessLogReader(p, "vessel-gpu-log", "[gpu] ")
@@ -417,11 +478,11 @@ class VesselRuntimeController(
     private fun startUml() {
         runCatching { umlProcess?.destroyForcibly() }
         guestShellReady = CompletableFuture()
-        append("[host] starting UML with ${guestMemoryMb} MiB RAM, $UML_VCPUS vCPUs\n")
+        append("[host] starting UML with ${guestMemoryMb} MiB RAM, $selectedVcpus vCPUs\n")
         val cmd = listOf(
             umnetBin.absolutePath, "--passt", passtBin.absolutePath, "--dns", "1.1.1.1", "--",
             umlBin.absolutePath,
-            "mem=${guestMemoryMb}M", "ncpus=$UML_VCPUS", "seccomp=on",
+            "mem=${guestMemoryMb}M", "ncpus=$selectedVcpus", "seccomp=on",
             "ubd0=${disk.absolutePath}", "root=/dev/ubda", "rw", "init=/umarm-init",
             "stub_exe=${stubBin.absolutePath}",
             "virtio_uml.device=${gpuSocket.absolutePath}:$VIRTIO_GPU_ID",
@@ -446,9 +507,11 @@ class VesselRuntimeController(
                         var observer: ((String) -> Unit)? = null
                         synchronized(consoleLock) {
                             val marker = pendingMarker
-                            val trimmed = line.trim()
-                            if (marker != null && trimmed.startsWith("$marker:")) {
-                                val rc = trimmed.removePrefix("$marker:").toIntOrNull()
+                            val markerToken = marker?.let { "$it:" }
+                            val markerAt = markerToken?.let { line.indexOf(it) } ?: -1
+                            if (marker != null && markerToken != null && markerAt >= 0) {
+                                val suffix = line.substring(markerAt + markerToken.length)
+                                val rc = Regex("""^-?\d+""").find(suffix)?.value?.toIntOrNull()
                                 if (rc != null) {
                                     pendingFuture?.complete(rc to pendingOutput.toString())
                                     pendingMarker = null
@@ -482,6 +545,12 @@ class VesselRuntimeController(
                 if (!stopping) {
                     guestShellReady.completeExceptionally(IllegalStateException("UML exited before guest shell was ready (rc=$rc)"))
                 }
+                if (!stopping) {
+                    val memory = ActivityManager.MemoryInfo()
+                    context.getSystemService(ActivityManager::class.java)?.getMemoryInfo(memory)
+                    val signalHint = if (rc == 137) "SIGKILL/137" else "exit=$rc"
+                    append("[crash] UML $signalHint; hostAvailMiB=${memory.availMem / (1024 * 1024)} lowMemory=${memory.lowMemory} thresholdMiB=${memory.threshold / (1024 * 1024)} control=${VesselGuestAgent.status()} audio=${VesselAudioBridge.status()}\n")
+                }
                 append("[host] UML launcher exited rc=$rc\n")
                 running = false
                 guestReady = false
@@ -505,6 +574,14 @@ class VesselRuntimeController(
         timeoutSeconds: Int,
         onLine: ((String) -> Unit)? = null,
     ): Pair<Int, String> = synchronized(commandLock) {
+        if (useGuestAgent) {
+            return@synchronized try {
+                VesselGuestAgent.execute(command, timeoutSeconds, onLine)
+            } catch (t: Throwable) {
+                append("[control] guest-agent command failed: ${t.message}\n")
+                throw t
+            }
+        }
         val future: CompletableFuture<Pair<Int, String>>
         synchronized(consoleLock) {
             check(umlProcess?.isAlive == true) { "UML is not running" }
@@ -520,12 +597,19 @@ class VesselRuntimeController(
                 // Feed arbitrary user commands to a fresh bash process instead of
                 // pasting them directly into the interactive root shell. This
                 // preserves quotes, pipes, semicolons and multiline commands.
-                write("printf '%s' '$encoded' | base64 -d | /bin/bash; __vessel_rc=\$?; printf '$marker:%s\\n' \"\$__vessel_rc\"\n")
+                write("printf '%s' '$encoded' | base64 -d | /bin/bash; __vessel_rc=\$?; printf '\\n$marker:%s\\n' \"\$__vessel_rc\"\n")
                 flush()
             }
         }
         try {
             future.get(timeoutSeconds.toLong(), TimeUnit.SECONDS)
+        } catch (t: java.util.concurrent.TimeoutException) {
+            val buffered = synchronized(consoleLock) {
+                if (pendingFuture === future) pendingOutput.takeLast(8000) else ""
+            }
+            append("[guest] command timeout after ${timeoutSeconds}s: ${command.lineSequence().firstOrNull()?.take(240) ?: "<empty>"}\n")
+            if (buffered.isNotBlank()) append("[guest] pending console output before timeout:\n$buffered\n")
+            throw IllegalStateException("Guest command timed out after ${timeoutSeconds}s", t)
         } finally {
             if (!future.isDone) synchronized(consoleLock) {
                 if (pendingFuture === future) {
@@ -536,6 +620,30 @@ class VesselRuntimeController(
                 }
             }
         }
+    }
+
+
+    private fun ensureGuestNetworkBlocking() {
+        val command = """
+            set +e
+            iface=${'$'}(ip -o link show 2>/dev/null | awk -F': ' '${'$'}2 == "vec0" {print ${'$'}2; exit}')
+            [ -n "${'$'}iface" ] || iface=${'$'}(ip -o link show 2>/dev/null | awk -F': ' '${'$'}2 ~ /^vec/ {print ${'$'}2; exit}')
+            if [ -z "${'$'}iface" ]; then echo VESSEL_NET_FAIL=no-vector-interface; exit 21; fi
+            ip link set "${'$'}iface" up || true
+            ip addr replace 10.0.2.15/24 dev "${'$'}iface" || { echo VESSEL_NET_FAIL=address; exit 22; }
+            ip route replace default via 10.0.2.2 dev "${'$'}iface" || { echo VESSEL_NET_FAIL=route; exit 23; }
+            cat >/etc/resolv.conf <<'VESSEL_RESOLV'
+            nameserver 1.1.1.1
+            nameserver 8.8.8.8
+            options timeout:2 attempts:2
+            VESSEL_RESOLV
+            getent ahosts deb.debian.org >/tmp/vessel-net-dns.txt 2>&1 || { echo VESSEL_NET_FAIL=dns; cat /tmp/vessel-net-dns.txt; exit 24; }
+            timeout 7 /bin/bash -lc 'exec 3<>/dev/tcp/deb.debian.org/443' >/tmp/vessel-net-tcp.txt 2>&1 || { echo VESSEL_NET_FAIL=tcp443; cat /tmp/vessel-net-tcp.txt; exit 25; }
+            echo VESSEL_NETWORK_READY iface=${'$'}iface route=${'$'}(ip route show default | head -1)
+        """.trimIndent()
+        val result = guestBlocking(command, 30)
+        if (result.first == 0) append("[network] ${result.second.lineSequence().lastOrNull { it.contains("VESSEL_NETWORK_READY") } ?: "external connectivity ready"}\\n")
+        else append("[network] external connectivity probe failed rc=${result.first}: ${result.second.takeLast(3000)}\\n")
     }
 
     private fun ensureGuestFilesystemCapacity() {
@@ -587,18 +695,15 @@ class VesselRuntimeController(
 
     private fun plasmaReadyCommand(): String =
         "missing=''; " +
-            "for c in startplasma-x11 Xorg xrandr xinput systemsettings konsole firefox-esr; do command -v \"\$c\" >/dev/null 2>&1 || missing=\"\$missing cmd:\$c\"; done; " +
-            "for p in qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects qml-module-qt-labs-platform plasma-integration plasma-pa kactivitymanagerd libkf5service-data fonts-noto-color-emoji; do " +
+            "for c in kwin_wayland startplasma-wayland Xwayland startplasma-x11 Xorg xrandr xinput systemsettings konsole firefox-esr; do command -v \"\$c\" >/dev/null 2>&1 || missing=\"\$missing cmd:\$c\"; done; " +
+            "for p in kwin-wayland plasma-workspace-wayland xwayland qtwayland5 python3-dbus python3-gi qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects qml-module-qt-labs-platform plasma-integration plasma-pa pulseaudio pulseaudio-utils alsa-utils kactivitymanagerd libkf5service-data fonts-noto-color-emoji packagekit packagekit-tools policykit-1 plasma-discover apt-config-icons apt-config-icons-large apt-config-icons-hidpi librsvg2-bin; do " +
             "dpkg-query -W -f='\${Status}' \"\$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"\$missing pkg:\$p\"; done; " +
-            "qml=/usr/lib/aarch64-linux-gnu/qt5/qml; " +
-            "test -d /usr/share/icons/breeze || missing=\"\$missing path:/usr/share/icons/breeze\"; " +
-            "test -f /etc/xdg/menus/kf5-applications.menu || missing=\"\$missing path:/etc/xdg/menus/kf5-applications.menu\"; " +
+            "qml=/usr/lib/aarch64-linux-gnu/qt5/qml; test -d /usr/share/icons/breeze || missing=\"\$missing path:breeze\"; " +
+            "test -f /etc/xdg/menus/kf5-applications.menu || missing=\"\$missing path:kf5-menu\"; " +
             "test -e /usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so || missing=\"\$missing path:virtio_gpu_dri.so\"; " +
-            "test -f \"\$qml/QtQuick/Templates.2/qmldir\" || missing=\"\$missing qml:QtQuick/Templates.2\"; " +
-            "test -f \"\$qml/QtGraphicalEffects/qmldir\" || missing=\"\$missing qml:QtGraphicalEffects\"; " +
-            "test -f \"\$qml/org/kde/kirigami.2/qmldir\" || missing=\"\$missing qml:org/kde/kirigami.2\"; " +
-            "test -f \"\$qml/Qt/labs/platform/qmldir\" || missing=\"\$missing qml:Qt/labs/platform\"; " +
-            "test -f \"\$qml/org/kde/plasma/private/volume/qmldir\" || missing=\"\$missing qml:org/kde/plasma/private/volume\"; " +
+            "test -f \"\$qml/QtQuick/Templates.2/qmldir\" || missing=\"\$missing qml:Templates.2\"; " +
+            "test -f \"\$qml/QtGraphicalEffects/qmldir\" || missing=\"\$missing qml:GraphicalEffects\"; " +
+            "test -f \"\$qml/org/kde/kirigami.2/qmldir\" || missing=\"\$missing qml:kirigami\"; " +
             "test -z \"\$missing\" || { echo VESSEL_MISSING_COMPONENTS=\"\$missing\"; exit 1; }"
 
     private fun packagePolicyCommand(): String = """
@@ -699,50 +804,125 @@ class VesselRuntimeController(
 
     private fun ensurePlasma() {
         recoverPackageState()
-        progress("plasma", 55, "Checking KDE Plasma desktop")
-        val check = guestBlocking(plasmaReadyCommand(), 20)
-        if (check.first == 0) {
-            append("[plasma] complete KDE Plasma/Xorg workstation already ready\n")
+        progress("plasma", 55, "Checking KDE Plasma Wayland workstation")
+        if (guestBlocking(plasmaReadyCommand(), 20).first == 0) {
+            append("[plasma] complete KDE Plasma Wayland/Xwayland workstation already ready\n")
             return
         }
-
-        progress("plasma_install", 56, "Resolving complete KDE Plasma workstation")
+        progress("plasma_install", 56, "Installing native Wayland Plasma workstation")
         val reporter = PackageProgressReporter("plasma_install", 56)
         val cmd = packagePolicyCommand() + "\n" +
             "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
             "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
             "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y " +
-            "kde-plasma-desktop plasma-workspace plasma-desktop kwin-x11 systemsettings " +
+            "kde-plasma-desktop plasma-workspace plasma-desktop kwin-x11 kwin-wayland plasma-workspace-wayland xwayland qtwayland5 wayland-utils systemsettings python3-dbus python3-gi " +
             "xserver-xorg-core xserver-xorg-input-libinput dbus dbus-x11 udev libinput-tools mesa-utils x11-xserver-utils xinput xcvt " +
-            "breeze breeze-icon-theme hicolor-icon-theme desktop-file-utils xdg-user-dirs shared-mime-info menu appstream python3-yaml " +
+            "breeze breeze-icon-theme hicolor-icon-theme desktop-file-utils xdg-user-dirs shared-mime-info menu appstream apt-config-icons apt-config-icons-large apt-config-icons-hidpi packagekit packagekit-tools policykit-1 plasma-discover librsvg2-bin python3-yaml " +
             "qml-module-org-kde-qqc2desktopstyle qml-module-org-kde-kirigami2 qml-module-org-kde-kitemmodels qml-module-org-kde-kquickcontrolsaddons " +
-            "qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects qml-module-qt-labs-platform plasma-integration plasma-pa kactivitymanagerd libkf5service-data " +
-            "fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation firefox-esr konsole dolphin ark kcalc okular gwenview kate && " +
-            "dpkg --configure -a && apt-get clean"
+            "qml-module-qtquick-controls qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick-window2 qml-module-qtquick2 qml-module-qtquick-templates2 qml-module-qtgraphicaleffects qml-module-qt-labs-platform plasma-integration plasma-pa pulseaudio pulseaudio-utils alsa-utils kactivitymanagerd libkf5service-data " +
+            "fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation firefox-esr konsole dolphin ark kcalc okular gwenview kate && dpkg --configure -a && apt-get clean"
         val (rc, out) = guestBlocking(cmd, 2400, reporter::onLine)
-        if (rc != 0) {
-            val lower = out.lowercase()
-            val reason = when {
-                "not enough free space" in lower || "no space left on device" in lower ->
-                    "Plasma setup could not finish because the Debian filesystem ran out of space"
-                "temporary failure resolving" in lower || "failed to fetch" in lower ->
-                    "Plasma setup could not download Debian packages; check the Linux network connection"
-                else -> "Plasma package installation failed (apt rc=$rc). See Runtime log for details"
-            }
-            append("[plasma] apt failed rc=$rc ${out.takeLast(6000)}\n")
-            error(reason)
-        }
-        progress("plasma_verify", 71, "Validating Plasma QML, menus and GPU runtime")
+        if (rc != 0) { append("[plasma] apt failed rc=$rc ${out.takeLast(6000)}\n"); error("Plasma Wayland package installation failed (apt rc=$rc)") }
+        val metadataRefresh = guestBlocking(
+            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update >/tmp/vessel-apt-icons.log 2>&1; appstreamcli refresh-cache --force >/tmp/vessel-appstream-refresh.log 2>&1 || true",
+            300,
+        )
+        if (metadataRefresh.first != 0) append("[apps] metadata/icon refresh rc=${metadataRefresh.first}: ${metadataRefresh.second.takeLast(2000)}\n")
         val verify = guestBlocking(plasmaReadyCommand(), 30)
-        val missing = verify.second.lineSequence()
-            .firstOrNull { it.contains("VESSEL_MISSING_COMPONENTS=") }
-            ?.substringAfter("VESSEL_MISSING_COMPONENTS=")?.trim().orEmpty()
-        if (verify.first != 0) {
-            append("[plasma] runtime validation failed ${verify.second.takeLast(6000)}\n")
-            error("Plasma runtime validation failed: ${missing.ifBlank { "see Runtime log" }}")
+        if (verify.first != 0) { append("[plasma] validation failed ${verify.second.takeLast(6000)}\n"); error("Plasma Wayland runtime validation failed") }
+        progress("plasma_ready", 72, "KDE Plasma Wayland workstation ready")
+    }
+
+
+    private fun guestServicesCommand(): String {
+        val audioPort = VesselAudioBridge.port()
+        check(audioPort > 0) { "Android audio bridge did not start" }
+        val audioHelper = context.assets.open("vessel/guest_audio_pipe.py").use { it.readBytes() }
+        val audioHelperB64 = Base64.getEncoder().encodeToString(audioHelper)
+
+        val controlPort = VesselGuestAgent.port()
+        check(controlPort > 0) { "Android guest-control server did not start" }
+        val controlHelper = context.assets.open("vessel/guest_control_agent.py").use { it.readBytes() }
+        val controlHelperB64 = Base64.getEncoder().encodeToString(controlHelper)
+        val token = VesselGuestAgent.token()
+
+        // One proven boot-tty transaction installs both service bridges. It
+        // starts no long-lived process, so it cannot hold the completion marker.
+        val command = """
+            set -e
+            install -d -m 755 /usr/local/lib/vessel
+            printf '%s' '$audioHelperB64' | base64 -d >/usr/local/lib/vessel/audio_pipe.py
+            chmod 0755 /usr/local/lib/vessel/audio_pipe.py
+            cat >/etc/asound.conf <<'VESSEL_ASOUND'
+            pcm.vessel_raw {
+                type file
+                slave.pcm "null"
+                file "|/usr/bin/python3 /usr/local/lib/vessel/audio_pipe.py $audioPort 48000 2 16 S16_LE"
+                format "raw"
+            }
+            pcm.vessel {
+                type plug
+                slave {
+                    pcm "vessel_raw"
+                    format S16_LE
+                    rate 48000
+                    channels 2
+                }
+            }
+            pcm.!default {
+                type plug
+                slave.pcm "vessel"
+            }
+            ctl.!default {
+                type hw
+                card 0
+            }
+            VESSEL_ASOUND
+            install -d -m 700 -o vessel -g vessel /home/vessel/.config/pulse /home/vessel/.config/autostart
+            cat >/home/vessel/.config/pulse/default.pa <<'VESSEL_PULSE'
+            .include /etc/pulse/default.pa
+            load-module module-alsa-sink device=vessel sink_name=vessel sink_properties=device.description=Vessel_Android_Audio
+            set-default-sink vessel
+            VESSEL_PULSE
+            cat >/home/vessel/.config/autostart/vessel-audio.desktop <<'VESSEL_AUDIO_DESKTOP'
+            [Desktop Entry]
+            Type=Application
+            Name=Vessel Android Audio
+            Exec=/bin/sh -lc 'pulseaudio --start --exit-idle-time=-1'
+            OnlyShowIn=KDE;
+            X-KDE-autostart-after=panel
+            VESSEL_AUDIO_DESKTOP
+            chown -R vessel:vessel /home/vessel/.config/pulse /home/vessel/.config/autostart
+            echo VESSEL_AUDIO_READY
+
+            printf '%s' '$controlHelperB64' | base64 -d >/usr/local/lib/vessel/control_agent.py
+            chmod 0755 /usr/local/lib/vessel/control_agent.py
+            install -d -m 755 /run/vessel
+            cat >/run/vessel/control-agent.env <<'VESSEL_CONTROL_ENV'
+            VESSEL_CONTROL_HOST=10.0.2.2
+            VESSEL_CONTROL_PORT=$controlPort
+            VESSEL_CONTROL_TOKEN='$token'
+            VESSEL_CONTROL_ENV
+            chmod 0600 /run/vessel/control-agent.env
+            rm -f /run/vessel-control-agent.pid
+            command -v setsid >/dev/null 2>&1 || echo VESSEL_CONTROL_WARNING=setsid-missing
+            echo VESSEL_CONTROL_AGENT_PREPARED
+            echo VESSEL_BOOT_SERVICES_READY
+        """.trimIndent()
+        return command
+    }
+
+    // X11 is an experimental fallback. It does not use the strict Wayland
+    // one-final-RPC path, so retain a blocking service setup helper for it.
+    private fun setupGuestServicesBlocking() {
+        val audioPort = VesselAudioBridge.port()
+        val controlPort = VesselGuestAgent.port()
+        val result = guestBlocking(guestServicesCommand(), 45)
+        check(result.first == 0 && result.second.contains("VESSEL_BOOT_SERVICES_READY")) {
+            "Could not configure guest services: ${result.second.takeLast(7000)}"
         }
-        progress("plasma_ready", 72, "KDE Plasma workstation ready")
-        append("[plasma] complete KDE Plasma/Xorg workstation ready\n")
+        append("[audio] guest PulseAudio/ALSA -> Android AudioTrack bridge configured port=$audioPort\n")
+        append("[control] helper/config prepared port=$controlPort\n")
     }
 
     private fun displayModeCommand(): String {
@@ -767,53 +947,418 @@ class VesselRuntimeController(
     }
 
     private fun applyDisplayModeBlocking(): Boolean {
+        if (VesselExperimentConfig.desktopBackend(context) == "wayland") return true
         val (rc, out) = guestBlocking(displayModeCommand(), 20)
         if (rc != 0) append("[display] xrandr rc=$rc ${out.takeLast(2000)}\n")
         return rc == 0
     }
 
     private fun launchDesktop() {
-        progress("desktop", 72, "Starting accelerated Plasma desktop")
-        val prep = "set -e; mkdir -p /run/dbus /run/user /etc/X11/xorg.conf.d /tmp/.X11-unix; " +
-            "dbus-uuidgen --ensure=/etc/machine-id; " +
-            "(pgrep -x systemd-udevd >/dev/null || (/lib/systemd/systemd-udevd --daemon 2>/tmp/vessel-udev.log || /usr/lib/systemd/systemd-udevd --daemon 2>/tmp/vessel-udev.log)); " +
-            "udevadm trigger --action=add || true; udevadm settle --timeout=10 || true; test -S /run/dbus/system_bus_socket || dbus-daemon --system --fork; " +
-            "id -u vessel >/dev/null 2>&1 || useradd -m -s /bin/bash vessel; for g in video render input; do getent group \"\$g\" >/dev/null || groupadd \"\$g\"; done; usermod -a -G video,render,input vessel; " +
-            "uid=\$(id -u vessel); gid=\$(id -g vessel); mkdir -p /run/user/\$uid; chown \$uid:\$gid /run/user/\$uid; chmod 700 /run/user/\$uid; test -c /dev/tty1 || mknod -m 620 /dev/tty1 c 4 1; " +
-            "cat >/etc/X11/xorg.conf.d/99-vessel.conf <<'XEOF'\n" +
-            "Section \"ServerFlags\"\n Option \"AutoAddDevices\" \"true\"\n Option \"DontVTSwitch\" \"true\"\nEndSection\n" +
-            "Section \"Device\"\n Identifier \"Vessel GPU\"\n Driver \"modesetting\"\n Option \"kmsdev\" \"/dev/dri/card0\"\n Option \"AccelMethod\" \"glamor\"\n Option \"SWcursor\" \"true\"\nEndSection\n" +
-            "Section \"InputClass\"\n Identifier \"Vessel Trackpad\"\n MatchProduct \"Vessel Trackpad\"\n Driver \"libinput\"\nEndSection\n" +
-            "Section \"InputClass\"\n Identifier \"Vessel Touchscreen\"\n MatchProduct \"Vessel Touchscreen\"\n Driver \"libinput\"\nEndSection\n" +
-            "Section \"InputClass\"\n Identifier \"Vessel Keyboard\"\n MatchProduct \"Vessel Keyboard\"\n Driver \"libinput\"\nEndSection\nXEOF\n"
-        val (prc, pout) = guestBlocking(prep, 50)
-        check(prc == 0) { "desktop prep failed: $pout" }
+        val backend = VesselExperimentConfig.desktopBackend(context)
+        val dmabuf = if (VesselExperimentConfig.firefoxDmabuf(context)) "true" else "false"
+        progress("desktop", 72, "Starting Plasma ${if (backend == "wayland") "Wayland" else "X11 fallback"}")
+        val prep = """
+            set -e
+            mkdir -p /run/dbus /run/user /usr/local/bin /home/vessel/.config /home/vessel/.mozilla/firefox/vessel.default
+            mountpoint -q /tmp || mount -t tmpfs -o mode=1777,size=256m tmpfs /tmp
+            # tmpfs replaced the old /tmp tree, so recreate the Xwayland socket directory.
+            mkdir -p /tmp/.X11-unix
+            chmod 1777 /tmp/.X11-unix
+            mkdir -p /run/user
+            mountpoint -q /run/user || mount -t tmpfs -o mode=0755,size=64m tmpfs /run/user
+            dbus-uuidgen --ensure=/etc/machine-id
+            if ! pgrep -x systemd-udevd >/dev/null 2>&1; then
+              timeout 6s /lib/systemd/systemd-udevd --daemon 2>/tmp/vessel-udev.log || timeout 6s /usr/lib/systemd/systemd-udevd --daemon 2>/tmp/vessel-udev.log || true
+            fi
+            echo VESSEL_PREP_STAGE=udevd-ready
+            echo VESSEL_PREP_STAGE=udev
+            timeout 8s udevadm trigger --action=add || true
+            timeout 12s udevadm settle --timeout=10 || true
+            echo VESSEL_PREP_STAGE=udev-ready
+            # /run lives on the persistent rootfs, so a dead system bus can leave a
+            # stale socket behind across UML boots. Recreate the bus instead of trusting
+            # the socket inode, and load the ConsoleKit policy before startup.
+            install -d -m 755 /run/dbus /etc/dbus-1/system.d
+            cat >/etc/dbus-1/system.d/vessel-consolekit.conf <<'VDBUS'
+            <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+             "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+            <busconfig>
+              <policy user="root">
+                <allow own="org.freedesktop.ConsoleKit"/>
+                <allow send_destination="org.freedesktop.ConsoleKit"/>
+                <allow receive_sender="org.freedesktop.ConsoleKit"/>
+              </policy>
+              <policy context="default">
+                <allow send_destination="org.freedesktop.ConsoleKit"/>
+                <allow receive_sender="org.freedesktop.ConsoleKit"/>
+              </policy>
+            </busconfig>
+            VDBUS
+            # No user session bus exists at this stage, so terminate any stale/system
+            # dbus-daemon left by an earlier prep attempt and create one known-good bus.
+            pkill -x dbus-daemon 2>/dev/null || true
+            for i in ${'$'}(seq 1 40); do pgrep -x dbus-daemon >/dev/null || break; sleep .05; done
+            pgrep -x dbus-daemon >/dev/null && pkill -KILL -x dbus-daemon 2>/dev/null || true
+            rm -f /run/dbus/system_bus_socket /run/dbus/pid
+            : >/tmp/vessel-dbus.log
+            timeout 8s dbus-daemon --system --fork 2>/tmp/vessel-dbus.log || { echo VESSEL_DBUS_START_FAILED; cat /tmp/vessel-dbus.log; exit 48; }
+            for i in ${'$'}(seq 1 80); do
+              dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames >/dev/null 2>&1 && break
+              sleep .1
+            done
+            dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames >/dev/null 2>&1 || { echo VESSEL_DBUS_HEALTHCHECK_FAILED; cat /tmp/vessel-dbus.log 2>/dev/null || true; exit 48; }
+            echo VESSEL_PREP_STAGE=dbus-ready
+            id -u vessel >/dev/null 2>&1 || useradd -m -s /bin/bash vessel
+            for g in video render input; do getent group "${'$'}g" >/dev/null || groupadd "${'$'}g"; done
+            usermod -a -G video,render,input vessel
+            install -d -m 755 /etc/polkit-1/rules.d
+            cat >/etc/polkit-1/rules.d/49-vessel-packagekit.rules <<'VESSEL_POLKIT'
+            polkit.addRule(function(action, subject) {
+                if (subject.user == "vessel" && action.id.indexOf("org.freedesktop.packagekit.") == 0) {
+                    return polkit.Result.YES;
+                }
+            });
+            VESSEL_POLKIT
+            chmod 0644 /etc/polkit-1/rules.d/49-vessel-packagekit.rules
+            if [ -x /usr/lib/polkit-1/polkitd ] && ! pgrep -x polkitd >/dev/null 2>&1; then
+              /usr/lib/polkit-1/polkitd --no-debug >/tmp/vessel-polkit.log 2>&1 &
+            fi
+            appstreamcli refresh-cache --force >/tmp/vessel-appstream-refresh.log 2>&1 || true
+            pkcon get-roles >/tmp/vessel-packagekit.log 2>&1 || true
+            uid=${'$'}(id -u vessel); gid=${'$'}(id -g vessel)
+            mkdir -p /run/user/${'$'}uid; chown ${'$'}uid:${'$'}gid /run/user/${'$'}uid; chmod 700 /run/user/${'$'}uid
+            test -c /dev/tty1 || mknod -m 620 /dev/tty1 c 4 1
+            # KWin 5.27 requires a real session object for DRM/input fd acquisition.
+            # Vessel has no logind PID1, so expose a minimal ConsoleKit-compatible
+            # session broker that opens devices as root and passes the fds via D-Bus.
+            install -d -m 755 /usr/local/lib/vessel
+            cat >/usr/local/lib/vessel/consolekit_shim.py <<'VCK'
+            #!/usr/bin/python3
+            import os
+            import stat
+            import dbus
+            import dbus.service
+            from dbus.mainloop.glib import DBusGMainLoop
+            from gi.repository import GLib
 
-        val session = "#!/bin/bash\n" +
-            "export DISPLAY=:0 XDG_SESSION_TYPE=x11 XDG_SESSION_DESKTOP=KDE XDG_CURRENT_DESKTOP=KDE DESKTOP_SESSION=plasma KDE_FULL_SESSION=true KDE_SESSION_VERSION=5 LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl MOZ_X11_EGL=1\n" +
-            "export XDG_RUNTIME_DIR=/run/user/\$(id -u)\n" +
-            "exec startplasma-x11\n"
-        val b64 = Base64.getEncoder().encodeToString(session.toByteArray())
-        val launch = "printf '%s' '$b64' | base64 -d >/usr/local/bin/vessel-plasma-session; chmod 755 /usr/local/bin/vessel-plasma-session; " +
-            "if [ -s /tmp/vessel-xorg.pid ]; then kill \$(cat /tmp/vessel-xorg.pid) 2>/dev/null || true; fi; pkill -u vessel -x plasmashell 2>/dev/null || true; pkill -u vessel -x kwin_x11 2>/dev/null || true; " +
-            "rm -f /tmp/.X0-lock /tmp/.X11-unix/X0; nohup setsid sh -c 'exec </dev/tty1 >/dev/tty1 2>&1; exec env LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl Xorg :0 -ac -noreset -nolisten tcp -novtswitch -sharevts vt1' >/tmp/vessel-xorg.log 2>&1 & echo \$! >/tmp/vessel-xorg.pid; " +
-            "for i in \$(seq 1 160); do test -S /tmp/.X11-unix/X0 && break; sleep .1; done; test -S /tmp/.X11-unix/X0; " +
-            "DISPLAY=:0 LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl glxinfo -B >/tmp/vessel-glx.log 2>&1; ! grep -Eqi 'llvmpipe|softpipe|swrast|software rasterizer' /tmp/vessel-glx.log; " +
-            "for i in \$(seq 1 50); do DISPLAY=:0 xinput list --name-only >/tmp/vessel-xinput.log 2>&1; grep -Fq 'Vessel Trackpad' /tmp/vessel-xinput.log && grep -Fq 'Vessel Touchscreen' /tmp/vessel-xinput.log && grep -Fq 'Vessel Keyboard' /tmp/vessel-xinput.log && break; sleep .1; done; " +
-            "DISPLAY=:0 xinput list --name-only >/tmp/vessel-xinput.log 2>&1; " +
-            "grep -Fq 'Vessel Trackpad' /tmp/vessel-xinput.log && grep -Fq 'Vessel Touchscreen' /tmp/vessel-xinput.log && grep -Fq 'Vessel Keyboard' /tmp/vessel-xinput.log || { cat /tmp/vessel-xinput.log; exit 43; }; " +
-            "nohup su -l vessel -c \"DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/\$(id -u vessel) MOZ_X11_EGL=1 dbus-run-session -- /usr/local/bin/vessel-plasma-session\" >/tmp/vessel-plasma.log 2>&1 </dev/null &"
-        val (rc, out) = guestBlocking(launch, 60)
-        check(rc == 0) { "Plasma launch failed: ${out.takeLast(12000)}" }
-        append("[input] Xorg/libinput attached all Vessel devices\n")
-        applyDisplayModeBlocking()
-        val shellCheck = guestBlocking(
-            "for i in \$(seq 1 120); do pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_x11 >/dev/null && break; sleep .1; done; " +
-                "pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_x11 >/dev/null || { tail -120 /tmp/vessel-plasma.log 2>/dev/null; exit 44; }; " +
-                "sleep .5; if grep -Eqi 'FullRepresentation unavailable|NormalPage unavailable|module .* is not installed' /tmp/vessel-plasma.log 2>/dev/null; then tail -160 /tmp/vessel-plasma.log; exit 45; fi",
-            30,
-        )
-        check(shellCheck.first == 0) { "Plasma shell/QML validation failed: ${shellCheck.second.takeLast(8000)}" }
+            SERVICE = 'org.freedesktop.ConsoleKit'
+            MANAGER = '/org/freedesktop/ConsoleKit/Manager'
+            SESSION = '/org/freedesktop/ConsoleKit/Session1'
+            SEAT = '/org/freedesktop/ConsoleKit/Seat1'
+            MANAGER_IF = 'org.freedesktop.ConsoleKit.Manager'
+            SESSION_IF = 'org.freedesktop.ConsoleKit.Session'
+            SEAT_IF = 'org.freedesktop.ConsoleKit.Seat'
+            PROPS_IF = 'org.freedesktop.DBus.Properties'
+
+            def device_path(major_num, minor_num):
+                preferred = ['/dev/dri/card0', '/dev/dri/renderD128']
+                for base in ('/dev/input', '/dev/dri'):
+                    try:
+                        preferred.extend(os.path.join(base, x) for x in os.listdir(base))
+                    except OSError:
+                        pass
+                for path in preferred:
+                    try:
+                        st = os.stat(path)
+                    except OSError:
+                        continue
+                    if stat.S_ISCHR(st.st_mode) and os.major(st.st_rdev) == major_num and os.minor(st.st_rdev) == minor_num:
+                        return path
+                raise dbus.exceptions.DBusException('org.freedesktop.ConsoleKit.Error.Failed', f'device {major_num}:{minor_num} not found')
+
+            class Manager(dbus.service.Object):
+                @dbus.service.method(MANAGER_IF, in_signature='u', out_signature='o')
+                def GetSessionByPID(self, pid):
+                    return dbus.ObjectPath(SESSION)
+
+            class Session(dbus.service.Object):
+                @dbus.service.method(SESSION_IF, in_signature='b', out_signature='')
+                def TakeControl(self, force):
+                    return
+
+                @dbus.service.method(SESSION_IF, in_signature='', out_signature='')
+                def ReleaseControl(self):
+                    return
+
+                @dbus.service.method(SESSION_IF, in_signature='', out_signature='')
+                def Activate(self):
+                    return
+
+                @dbus.service.method(SESSION_IF, in_signature='uu', out_signature='h')
+                def TakeDevice(self, major_num, minor_num):
+                    path = device_path(int(major_num), int(minor_num))
+                    fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NONBLOCK)
+                    try:
+                        return dbus.types.UnixFd(fd)
+                    finally:
+                        os.close(fd)
+
+                @dbus.service.method(SESSION_IF, in_signature='uu', out_signature='')
+                def ReleaseDevice(self, major_num, minor_num):
+                    return
+
+                @dbus.service.method(PROPS_IF, in_signature='ss', out_signature='v')
+                def Get(self, interface, prop):
+                    if interface != SESSION_IF:
+                        raise dbus.exceptions.DBusException('org.freedesktop.DBus.Error.InvalidArgs', 'unknown interface')
+                    if prop == 'active':
+                        return dbus.Boolean(True, variant_level=1)
+                    if prop == 'VTNr':
+                        return dbus.UInt32(1, variant_level=1)
+                    if prop == 'Seat':
+                        return dbus.Struct((dbus.String('seat0'), dbus.ObjectPath(SEAT)), signature='so', variant_level=1)
+                    raise dbus.exceptions.DBusException('org.freedesktop.DBus.Error.InvalidArgs', 'unknown property')
+
+            class Seat(dbus.service.Object):
+                @dbus.service.method(SEAT_IF, in_signature='u', out_signature='')
+                def SwitchTo(self, terminal):
+                    return
+
+            DBusGMainLoop(set_as_default=True)
+            bus = dbus.SystemBus()
+            name = dbus.service.BusName(SERVICE, bus=bus, do_not_queue=True)
+            Manager(bus, MANAGER)
+            Session(bus, SESSION)
+            Seat(bus, SEAT)
+            print('VESSEL_CONSOLEKIT_READY', flush=True)
+            GLib.MainLoop().run()
+            VCK
+            chmod 0755 /usr/local/lib/vessel/consolekit_shim.py
+            pkill -f '/usr/local/lib/vessel/consolekit_shim.py' 2>/dev/null || true
+            setsid -f /usr/bin/python3 /usr/local/lib/vessel/consolekit_shim.py </dev/null >/tmp/vessel-consolekit.log 2>&1
+            for i in ${'$'}(seq 1 80); do
+              dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ConsoleKit 2>/dev/null | grep -q 'boolean true' && break
+              sleep .1
+            done
+            dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ConsoleKit 2>/dev/null | grep -q 'boolean true' || { cat /tmp/vessel-consolekit.log; exit 47; }
+            echo VESSEL_PREP_STAGE=consolekit-ready
+            # Keep ordinary unix permissions sane too; the broker still owns the fd handoff.
+            test ! -c /dev/dri/card0 || { chgrp video /dev/dri/card0 || true; chmod 0660 /dev/dri/card0 || true; }
+            test ! -c /dev/dri/renderD128 || { chgrp render /dev/dri/renderD128 || true; chmod 0660 /dev/dri/renderD128 || true; }
+            rm -f /etc/X11/xorg.conf.d/99-vessel.conf
+            cat >/etc/profile.d/vessel-gpu.sh <<'VENV'
+            export LIBGL_ALWAYS_SOFTWARE=0
+            export GALLIUM_DRIVER=virgl
+            export GDK_BACKEND=wayland
+            export QT_QPA_PLATFORM=wayland
+            export CLUTTER_BACKEND=wayland
+            export SDL_VIDEODRIVER=wayland
+            export MOZ_ENABLE_WAYLAND=1
+            export MOZ_WEBRENDER=1
+            export MOZ_ACCELERATED=1
+            unset MOZ_X11_EGL
+            VENV
+            chmod 0644 /etc/profile.d/vessel-gpu.sh
+            cat >/home/vessel/.mozilla/firefox/profiles.ini <<'FPROFILES'
+            [Profile0]
+            Name=Vessel
+            IsRelative=1
+            Path=vessel.default
+            Default=1
+            [General]
+            StartWithLastProfile=1
+            Version=2
+            FPROFILES
+            cat >/home/vessel/.mozilla/firefox/vessel.default/user.js <<FUSER
+            user_pref("gfx.webrender.all", true);
+            user_pref("gfx.webrender.compositor", false);
+            user_pref("widget.dmabuf-textures.enabled", $dmabuf);
+            user_pref("widget.dmabuf-webgl.enabled", $dmabuf);
+            user_pref("gfx.x11-egl.force-disabled", true);
+            user_pref("gl.require-hardware", true);
+            user_pref("security.sandbox.content.level", 1);
+            FUSER
+            chown vessel:vessel /home/vessel/.mozilla /home/vessel/.mozilla/firefox /home/vessel/.mozilla/firefox/vessel.default /home/vessel/.config
+            chown vessel:vessel /home/vessel/.mozilla/firefox/profiles.ini /home/vessel/.mozilla/firefox/vessel.default/user.js
+            echo VESSEL_PREP_STAGE=profile-ready
+            cat >/usr/local/bin/vessel-plasma-session <<'VSESSION'
+            #!/bin/bash
+            set -e
+            export XDG_RUNTIME_DIR=/run/user/${'$'}(id -u)
+            export XDG_SESSION_TYPE=wayland XDG_SESSION_DESKTOP=KDE XDG_CURRENT_DESKTOP=KDE DESKTOP_SESSION=plasmawayland
+            export XDG_SESSION_CLASS=user XDG_SEAT=seat0 XDG_VTNR=1 KDE_FULL_SESSION=true KDE_SESSION_VERSION=5
+            export LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl
+            export GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland CLUTTER_BACKEND=wayland SDL_VIDEODRIVER=wayland
+            export MOZ_ENABLE_WAYLAND=1 MOZ_WEBRENDER=1 MOZ_ACCELERATED=1
+            unset DISPLAY MOZ_X11_EGL
+            exec startplasma-wayland
+            VSESSION
+            chmod 0755 /usr/local/bin/vessel-plasma-session
+            cat >/usr/local/lib/vessel/launch_wayland.py <<'VLAUNCH'
+            #!/usr/bin/python3
+            import os
+            import subprocess
+            import sys
+
+            uid = subprocess.check_output(['/usr/bin/id', '-u', 'vessel'], text=True).strip()
+            env_command = (
+                f'XDG_RUNTIME_DIR=/run/user/{uid} XDG_SEAT=seat0 XDG_VTNR=1 '
+                'exec dbus-run-session -- /usr/local/bin/vessel-plasma-session'
+            )
+            log = open('/tmp/vessel-plasma.log', 'ab', buffering=0)
+            try:
+                proc = subprocess.Popen(
+                    ['/usr/bin/su', '-l', 'vessel', '-c', env_command],
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    cwd='/home/vessel',
+                    close_fds=True,
+                    start_new_session=True,
+                )
+            except Exception:
+                log.close()
+                raise
+            print(f'VESSEL_WAYLAND_PID={proc.pid}', flush=True)
+            VLAUNCH
+            chmod 0755 /usr/local/lib/vessel/launch_wayland.py
+        """.trimIndent()
+        var preparedDesktop = prep
+        if (backend == "wayland") {
+            preparedDesktop += "\n" + guestServicesCommand()
+            append("[desktop] guest services folded into final authoritative tty RPC\n")
+        }
+        var waylandReadyInPrep = false
+        if (backend == "wayland") {
+            // Take one atomic snapshot of the hot runtime. If an update races
+            // this boot, use the APK's built-in bootstrap rather than mixing
+            // files from two revisions.
+            val hotRevisionBefore = VesselUpdateManager.currentRuntimeRevision(context)
+            val stagedOverrides = listOf(
+                "wayland-session.sh" to "/usr/local/bin/vessel-plasma-session",
+                "launch-wayland.py" to "/usr/local/lib/vessel/launch_wayland.py",
+            ).mapNotNull { (liveName, guestPath) ->
+                VesselUpdateManager.runtimeScriptOrNull(context, liveName)?.let { Triple(liveName, guestPath, it) }
+            }
+            val stagedPostPrep = VesselUpdateManager.runtimeScriptOrNull(context, "wayland-postprep.sh")
+            val hotRevisionAfter = VesselUpdateManager.currentRuntimeRevision(context)
+            var effectivePostPrep: String? = null
+
+            if (hotRevisionBefore == hotRevisionAfter) {
+                for ((liveName, guestPath, liveText) in stagedOverrides) {
+                    val liveB64 = Base64.getEncoder().encodeToString(liveText.toByteArray())
+                    preparedDesktop += "\nprintf '%s' '$liveB64' | base64 -d >'$guestPath'; chmod 0755 '$guestPath'"
+                    append("[update] staged $liveName from hot runtime $hotRevisionAfter into desktop prep\\n")
+                }
+                effectivePostPrep = stagedPostPrep
+                if (effectivePostPrep != null) {
+                    append("[update] staged authoritative Wayland bootstrap from hot runtime $hotRevisionAfter\\n")
+                }
+            } else {
+                append("[update] hot runtime changed during boot snapshot ($hotRevisionBefore -> $hotRevisionAfter); using built-in Wayland bootstrap\\n")
+            }
+
+            if (effectivePostPrep == null) {
+                effectivePostPrep = String(Base64.getDecoder().decode("IyEvYmluL2Jhc2gKc2V0IC1ldQoKZWNobyBWRVNTRUxfV0FZTEFORF9CT09UU1RSQVBfQkVHSU4KaWYgISBwZ3JlcCAtdSB2ZXNzZWwgLXgga3dpbl93YXlsYW5kID4vZGV2L251bGwgMj4mMTsgdGhlbgogIHBraWxsIC11IHZlc3NlbCAteCBrd2luX3gxMSAyPi9kZXYvbnVsbCB8fCB0cnVlCiAgcGtpbGwgLXUgdmVzc2VsIC14IGt3aW5fd2F5bGFuZCAyPi9kZXYvbnVsbCB8fCB0cnVlCiAgcGtpbGwgLXUgdmVzc2VsIC14IHBsYXNtYXNoZWxsIDI+L2Rldi9udWxsIHx8IHRydWUKICBwa2lsbCAteCBYb3JnIDI+L2Rldi9udWxsIHx8IHRydWUKICBybSAtZiAvdG1wLy5YMC1sb2NrIC90bXAvLlgxMS11bml4L1gwCiAgZmluZCAvcnVuL3VzZXIgLW1heGRlcHRoIDIgLXR5cGUgcyAtbmFtZSAnd2F5bGFuZC0qJyAtZGVsZXRlIDI+L2Rldi9udWxsIHx8IHRydWUKICA6ID4vdG1wL3Zlc3NlbC1wbGFzbWEubG9nCiAgL3Vzci9iaW4vcHl0aG9uMyAvdXNyL2xvY2FsL2xpYi92ZXNzZWwvbGF1bmNoX3dheWxhbmQucHkKZmkKCmZvciBpIGluICQoc2VxIDEgNjAwKTsgZG8KICBpZiBwZ3JlcCAtdSB2ZXNzZWwgLXgga3dpbl93YXlsYW5kID4vZGV2L251bGwgMj4mMSAmJiBcCiAgICAgcGdyZXAgLXUgdmVzc2VsIC14IHBsYXNtYXNoZWxsID4vZGV2L251bGwgMj4mMSAmJiBcCiAgICAgZmluZCAvcnVuL3VzZXIgLW1heGRlcHRoIDIgLXR5cGUgcyAtbmFtZSAnd2F5bGFuZC0qJyAtcHJpbnQgLXF1aXQgMj4vZGV2L251bGwgfCBncmVwIC1xIC47IHRoZW4KICAgIGVjaG8gVkVTU0VMX1dBWUxBTkRfUkVBRFkKICAgIGV4aXQgMAogIGZpCiAgc2xlZXAgLjEKZG9uZQoKZWNobyBWRVNTRUxfV0FZTEFORF9ESUFHCmlkIHZlc3NlbCB8fCB0cnVlCmRwa2ctcXVlcnkgLVcga3dpbi13YXlsYW5kIGt3aW4tY29tbW9uIHBsYXNtYS13b3Jrc3BhY2Utd2F5bGFuZCAyPi9kZXYvbnVsbCB8fCB0cnVlCmxzIC1sIC9kZXYvZHJpIDI+L2Rldi9udWxsIHx8IHRydWUKbHMgLWxhIC9ydW4vdXNlci8qIDI+L2Rldi9udWxsIHx8IHRydWUKbHMgLWxkIC90bXAvLlgxMS11bml4IDI+L2Rldi9udWxsIHx8IHRydWUKZGJ1cy1zZW5kIC0tc3lzdGVtIC0tcHJpbnQtcmVwbHkgLS1kZXN0PW9yZy5mcmVlZGVza3RvcC5EQnVzIC8gb3JnLmZyZWVkZXNrdG9wLkRCdXMuTmFtZUhhc093bmVyIHN0cmluZzpvcmcuZnJlZWRlc2t0b3AuQ29uc29sZUtpdCAyPi9kZXYvbnVsbCB8fCB0cnVlCmNhdCAvdG1wL3Zlc3NlbC1jb25zb2xla2l0LmxvZyAyPi9kZXYvbnVsbCB8fCB0cnVlCnRhaWwgLTQwMCAvdG1wL3Zlc3NlbC1wbGFzbWEubG9nIDI+L2Rldi9udWxsIHx8IHRydWUKZXhpdCA0NAo="), Charsets.UTF_8)
+                append("[update] using built-in authoritative Wayland bootstrap\\n")
+            }
+
+            val postB64 = Base64.getEncoder().encodeToString(effectivePostPrep.toByteArray())
+            preparedDesktop += "\nprintf '%s' '$postB64' | base64 -d | /bin/bash"
+            preparedDesktop += "\nprintf '%s' 'IyEvYmluL2Jhc2gKc2V0ICtlCmNmZz0vcnVuL3Zlc3NlbC9jb250cm9sLWFnZW50LmVudgpwaWRmaWxlPS9ydW4vdmVzc2VsLWNvbnRyb2wtYWdlbnQucGlkCmFnZW50PS91c3IvbG9jYWwvbGliL3Zlc3NlbC9jb250cm9sX2FnZW50LnB5CmxvZz0vdG1wL3Zlc3NlbC1jb250cm9sLWFnZW50LmxvZwoKaWYgWyAhIC1yICIkY2ZnIiBdIHx8IFsgISAteCAiJGFnZW50IiBdOyB0aGVuCiAgZWNobyBWRVNTRUxfQ09OVFJPTF9BR0VOVF9TS0lQUEVEPW5vdC1wcmVwYXJlZAogIGV4aXQgMApmaQppZiAhIGNvbW1hbmQgLXYgc2V0c2lkID4vZGV2L251bGwgMj4mMTsgdGhlbgogIGVjaG8gVkVTU0VMX0NPTlRST0xfQUdFTlRfU0tJUFBFRD1zZXRzaWQtbWlzc2luZwogIGV4aXQgMApmaQoKLiAiJGNmZyIKaWYgWyAteiAiJHtWRVNTRUxfQ09OVFJPTF9QT1JUOi19IiBdIHx8IFsgLXogIiR7VkVTU0VMX0NPTlRST0xfVE9LRU46LX0iIF07IHRoZW4KICBlY2hvIFZFU1NFTF9DT05UUk9MX0FHRU5UX1NLSVBQRUQ9YmFkLWNvbmZpZwogIGV4aXQgMApmaQoKb2xkX3BpZD0kKGNhdCAiJHBpZGZpbGUiIDI+L2Rldi9udWxsIHx8IHRydWUpCmlmIFsgLW4gIiRvbGRfcGlkIiBdICYmIFsgLXIgIi9wcm9jLyRvbGRfcGlkL2NtZGxpbmUiIF07IHRoZW4KICBpZiB0ciAnXDAwMCcgJyAnIDwiL3Byb2MvJG9sZF9waWQvY21kbGluZSIgMj4vZGV2L251bGwgfCBncmVwIC1GcSAiJGFnZW50IjsgdGhlbgogICAga2lsbCAiJG9sZF9waWQiIDI+L2Rldi9udWxsIHx8IHRydWUKICAgIGZvciBfIGluICQoc2VxIDEgMjApOyBkbwogICAgICBraWxsIC0wICIkb2xkX3BpZCIgMj4vZGV2L251bGwgfHwgYnJlYWsKICAgICAgc2xlZXAgLjA1CiAgICBkb25lCiAgICBraWxsIC1LSUxMICIkb2xkX3BpZCIgMj4vZGV2L251bGwgfHwgdHJ1ZQogIGZpCmZpCnJtIC1mICIkcGlkZmlsZSIKOiA+IiRsb2ciCgojIC1mIGFsd2F5cyBmb3Jrcy4gV2UgaW50ZW50aW9uYWxseSBkbyBOT1QgcGFzcyAtdywgc28gc2V0c2lkIGl0c2VsZiByZXR1cm5zCiMgaW1tZWRpYXRlbHkgd2hpbGUgdGhlIHJvb3QgY29udHJvbCBhZ2VudCBsaXZlcyBpbiBhIHNlcGFyYXRlIHNlc3Npb24uCnNldHNpZCAtZiAvdXNyL2Jpbi9weXRob24zICIkYWdlbnQiIFwKICAiJHtWRVNTRUxfQ09OVFJPTF9IT1NUOi0xMC4wLjIuMn0iICIkVkVTU0VMX0NPTlRST0xfUE9SVCIgIiRWRVNTRUxfQ09OVFJPTF9UT0tFTiIgXAogIDwvZGV2L251bGwgPj4iJGxvZyIgMj4mMQpzcGF3bl9yYz0kPwppZiBbICIkc3Bhd25fcmMiIC1lcSAwIF07IHRoZW4KICBlY2hvIFZFU1NFTF9DT05UUk9MX0FHRU5UX0RJU1BBVENIRUQKZWxzZQogIGVjaG8gVkVTU0VMX0NPTlRST0xfQUdFTlRfU0tJUFBFRD1zZXRzaWQtcmMtJHNwYXduX3JjCmZpCmV4aXQgMAo=' | base64 -d | /bin/bash"
+            waylandReadyInPrep = true
+        }
+        append("[desktop] authoritative single-RPC prep + Wayland bootstrap\n")
+        append("[desktop] v57 authoritative ONE final tty RPC: services + prep + Wayland readiness\n")
+        val prepResult = guestBlocking(preparedDesktop, 150) { raw ->
+            when {
+                raw.contains("VESSEL_AUDIO_READY") ->
+                    progress("desktop_services", 73, "Linux audio bridge prepared")
+                raw.contains("VESSEL_CONTROL_AGENT_PREPARED") ->
+                    progress("desktop_control", 74, "Linux control service prepared")
+                raw.contains("VESSEL_PREP_STAGE=profile-ready") ->
+                    progress("desktop_profile", 75, "Desktop profile ready")
+                raw.contains("VESSEL_PREP_STAGE=udevd-ready") ->
+                    progress("desktop_devices", 76, "Desktop device service ready")
+                raw.contains("VESSEL_PREP_STAGE=udev-ready") ->
+                    progress("desktop_devices", 77, "Desktop devices ready")
+                raw.contains("VESSEL_PREP_STAGE=dbus-ready") ->
+                    progress("desktop_dbus", 79, "Wayland system bus ready")
+                raw.contains("VESSEL_PREP_STAGE=consolekit-ready") ->
+                    progress("desktop_session", 81, "DRM session broker ready")
+                raw.contains("VESSEL_WAYLAND_BOOTSTRAP_BEGIN") ->
+                    progress("desktop_launch", 83, "Launching KWin Wayland")
+                raw.contains("VESSEL_CONTROL_AGENT_DISPATCHED") ->
+                    progress("desktop_control_live", 87, "Desktop control service starting")
+                raw.contains("VESSEL_WAYLAND_READY") ->
+                    progress("desktop_ready", 88, "Plasma Wayland ready")
+            }
+        }
+        check(prepResult.first == 0) { "desktop prep failed: ${prepResult.second.takeLast(8000)}" }
+
+        if (backend == "wayland" && waylandReadyInPrep) {
+            append("[desktop] authoritative Wayland prep RPC completed; KWin + Plasma + Wayland socket are ready\n")
+            return
+        }
+
+        if (backend == "wayland") {
+            val session = """
+                #!/bin/bash
+                set -e
+                export XDG_RUNTIME_DIR=/run/user/${'$'}(id -u)
+                export XDG_SESSION_TYPE=wayland XDG_SESSION_DESKTOP=KDE XDG_CURRENT_DESKTOP=KDE DESKTOP_SESSION=plasmawayland
+                export XDG_SEAT=seat0 XDG_VTNR=1 KDE_FULL_SESSION=true KDE_SESSION_VERSION=5
+                export LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl
+                export GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland CLUTTER_BACKEND=wayland SDL_VIDEODRIVER=wayland
+                export MOZ_ENABLE_WAYLAND=1 MOZ_WEBRENDER=1 MOZ_ACCELERATED=1
+                unset MOZ_X11_EGL
+                exec startplasma-wayland
+            """.trimIndent() + "\n"
+            val b64 = Base64.getEncoder().encodeToString(session.toByteArray())
+            val cleanup = VesselUpdateManager.runtimeScript(context, "wayland-cleanup.sh", """
+                #!/bin/bash
+                set -eu
+                pkill -u vessel -x kwin_x11 2>/dev/null || true
+                pkill -u vessel -x kwin_wayland 2>/dev/null || true
+                pkill -u vessel -x plasmashell 2>/dev/null || true
+                pkill -x Xorg 2>/dev/null || true
+                rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
+                find /run/user -maxdepth 2 -type s -name 'wayland-*' -delete 2>/dev/null || true
+                : >/tmp/vessel-plasma.log
+                echo VESSEL_WAYLAND_CLEAN
+            """.trimIndent())
+            val cleanupResult = guestBlocking(cleanup, 45)
+            check(cleanupResult.first == 0 && cleanupResult.second.contains("VESSEL_WAYLAND_CLEAN")) { "Wayland cleanup failed: ${cleanupResult.second.takeLast(8000)}" }
+            append("[desktop] Wayland stage 1/3: stale desktop state cleaned\\n")
+
+            val dispatchResult = guestBlocking("/usr/bin/python3 /usr/local/lib/vessel/launch_wayland.py && echo VESSEL_WAYLAND_DISPATCHED", 45)
+            check(dispatchResult.first == 0 && dispatchResult.second.contains("VESSEL_WAYLAND_DISPATCHED")) { "Plasma Wayland dispatch failed: ${dispatchResult.second.takeLast(10000)}" }
+            append("[desktop] Wayland stage 2/3: fully detached Plasma session dispatched\\n")
+            val checkCommand = VesselUpdateManager.runtimeScript(context, "wayland-check.sh", """
+                #!/bin/bash
+                for i in $(seq 1 600); do
+                  if pgrep -u vessel -x kwin_wayland >/dev/null && pgrep -u vessel -x plasmashell >/dev/null && find /run/user -maxdepth 2 -type s -name 'wayland-*' -print -quit 2>/dev/null | grep -q .; then
+                    echo VESSEL_WAYLAND_READY
+                    exit 0
+                  fi
+                  sleep .1
+                done
+                echo VESSEL_WAYLAND_DIAG
+                id vessel || true
+                dpkg-query -W kwin-wayland kwin-common plasma-workspace-wayland 2>/dev/null || true
+                ls -l /dev/dri 2>/dev/null || true
+                ls -la /run/user/* 2>/dev/null || true
+                ls -ld /tmp/.X11-unix 2>/dev/null || true
+                dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ConsoleKit 2>/dev/null || true
+                cat /tmp/vessel-consolekit.log 2>/dev/null || true
+                tail -400 /tmp/vessel-plasma.log 2>/dev/null || true
+                exit 44
+            """.trimIndent())
+            val check = guestBlocking(checkCommand, 75)
+            check(check.first == 0) { "Plasma Wayland validation failed: ${check.second.takeLast(10000)}" }
+            append("[desktop] Wayland stage 3/3: native KWin DRM + Plasma + Xwayland ready\n")
+        } else {
+            val xprep = "mkdir -p /etc/X11/xorg.conf.d /tmp/.X11-unix; cat >/etc/X11/xorg.conf.d/99-vessel.conf <<'XEOF'\nSection \"Device\"\n Identifier \"Vessel GPU\"\n Driver \"modesetting\"\n Option \"kmsdev\" \"/dev/dri/card0\"\n Option \"AccelMethod\" \"glamor\"\n Option \"SWcursor\" \"true\"\nEndSection\nXEOF\n"
+            check(guestBlocking(xprep, 20).first == 0)
+            val session = "#!/bin/bash\nexport DISPLAY=:0 XDG_SESSION_TYPE=x11 XDG_SESSION_DESKTOP=KDE XDG_CURRENT_DESKTOP=KDE DESKTOP_SESSION=plasma KDE_FULL_SESSION=true KDE_SESSION_VERSION=5 LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl MOZ_WEBRENDER=1\nexport XDG_RUNTIME_DIR=/run/user/\$(id -u)\nexec startplasma-x11\n"
+            val b64 = Base64.getEncoder().encodeToString(session.toByteArray())
+            val launch = "printf '%s' '$b64' | base64 -d >/usr/local/bin/vessel-plasma-session; chmod 755 /usr/local/bin/vessel-plasma-session; pkill -u vessel -x kwin_wayland 2>/dev/null || true; pkill -u vessel -x plasmashell 2>/dev/null || true; rm -f /tmp/.X0-lock /tmp/.X11-unix/X0; nohup setsid sh -c 'exec </dev/tty1 >/dev/tty1 2>&1; exec env LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl Xorg :0 -ac -noreset -nolisten tcp -novtswitch -sharevts vt1' >/tmp/vessel-xorg.log 2>&1 & for i in \$(seq 1 160); do test -S /tmp/.X11-unix/X0 && break; sleep .1; done; test -S /tmp/.X11-unix/X0; nohup su -l vessel -c \"DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/\$(id -u vessel) MOZ_WEBRENDER=1 dbus-run-session -- /usr/local/bin/vessel-plasma-session\" >/tmp/vessel-plasma.log 2>&1 </dev/null &"
+            val lr = guestBlocking(launch, 50); check(lr.first == 0) { "Plasma X11 fallback launch failed: ${lr.second.takeLast(10000)}" }
+            applyDisplayModeBlocking()
+            val check = guestBlocking("for i in \$(seq 1 120); do pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_x11 >/dev/null && break; sleep .1; done; pgrep -u vessel -x plasmashell >/dev/null && pgrep -u vessel -x kwin_x11 >/dev/null", 30)
+            check(check.first == 0) { "Plasma X11 fallback validation failed" }
+            append("[desktop] X11 fallback ready\n")
+        }
     }
 
     private fun displayFailureStatus(status: String): Boolean =
@@ -826,6 +1371,9 @@ class VesselRuntimeController(
         desktopReady = false
         try {
             assertAssets()
+            useGuestAgent = false
+            VesselGuestAgent.resetConnection()
+            killStaleNativeRuntimeProcesses("pre-start")
             ensureDisk()
             persistentLog.writeText("Vessel ${REVISION} startup\n")
             append("[host] machine=${machineDir.absolutePath}\n")
@@ -834,12 +1382,13 @@ class VesselRuntimeController(
             startInputBackends()
             progress("gpu", 31, "Starting native VirtIO GPU")
             startGpu()
-            progress("uml", 36, "Booting Debian ARM64 · ${guestMemoryMb} MiB · $UML_VCPUS vCPU")
+            progress("uml", 36, "Booting Debian ARM64 · ${guestMemoryMb} MiB · $selectedVcpus vCPU")
             startUml()
             startedAt = android.os.SystemClock.elapsedRealtime()
             running = true
             progress("guest_boot", 40, "Waiting for Debian userspace")
             awaitGuestShell(240)
+            ensureGuestNetworkBlocking()
             ensureGuestFilesystemCapacity()
             val ready = guestBlocking("stty -echo 2>/dev/null || true; test -c /dev/dri/card0 && test -c /dev/dri/renderD128", 30)
             check(ready.first == 0) { "Debian/VirtIO GPU did not become ready: ${ready.second.takeLast(8000)}" }
@@ -847,7 +1396,18 @@ class VesselRuntimeController(
             progress("input", 48, "Verifying native VirtIO evdev/libinput devices")
             awaitVirtioInputDevices()
             ensurePlasma()
+            if (VesselExperimentConfig.desktopBackend(context) == "x11") {
+                setupGuestServicesBlocking()
+            }
             launchDesktop()
+            // From this point forward tty0 is never used for app/terminal/stats
+            // commands. The agent reconnects independently and cannot fail boot.
+            useGuestAgent = true
+            if (VesselGuestAgent.waitUntilConnected(8_000)) {
+                append("[control] persistent Debian control agent connected; post-boot RPC left tty0 permanently\n")
+            } else {
+                append("[control] desktop is ready but agent is still reconnecting (${VesselGuestAgent.status()}); boot continues and post-boot calls stay off tty0\n")
+            }
             progress("frame", 88, "Waiting for Android native Surface frame")
 
             var tries = 0
@@ -900,6 +1460,13 @@ class VesselRuntimeController(
 
     private fun stopBlocking() {
         stopping = true
+        if (useGuestAgent && VesselGuestAgent.isConnected()) {
+            runCatching {
+                VesselGuestAgent.execute("sync; pkill -u vessel -x plasmashell 2>/dev/null || true; pkill -u vessel -x kwin_wayland 2>/dev/null || true", 5)
+            }
+        }
+        useGuestAgent = false
+        VesselGuestAgent.resetConnection()
         synchronized(consoleLock) {
             pendingFuture?.completeExceptionally(IllegalStateException("Vessel stopped"))
             pendingFuture = null
@@ -926,6 +1493,7 @@ class VesselRuntimeController(
         desktopReady = false
         stopInputBackends()
         gpuSocket.delete()
+        killStaleNativeRuntimeProcesses("stop")
     }
 
     suspend fun stop(): JSONObject = withContext(Dispatchers.IO) {

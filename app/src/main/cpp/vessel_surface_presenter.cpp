@@ -12,16 +12,22 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <poll.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -33,7 +39,8 @@ constexpr uint32_t VERSION = 3;
 constexpr uint32_t MSG_REGISTER_FRAME = 1;
 constexpr uint32_t MSG_FRAME = 2;
 constexpr uint32_t MSG_DISABLE = 3;
-constexpr uint32_t FRAME_SLOTS = 3;
+constexpr uint32_t FRAME_SLOTS = 5;
+constexpr size_t MAX_QUEUED_FRAMES = 2;
 constexpr uint8_t FENCE_TAG = 0xF3;
 
 #pragma pack(push, 1)
@@ -64,6 +71,7 @@ using ImageTargetTexture = PFNGLEGLIMAGETARGETTEXTURE2DOESPROC;
 using CreateSync = PFNEGLCREATESYNCKHRPROC;
 using DestroySync = PFNEGLDESTROYSYNCKHRPROC;
 using WaitSync = PFNEGLWAITSYNCKHRPROC;
+using DupNativeFence = PFNEGLDUPNATIVEFENCEFDANDROIDPROC;
 
 struct SourceSlot {
     AHardwareBuffer* buffer = nullptr;
@@ -74,8 +82,16 @@ struct SourceSlot {
     uint32_t height = 0;
 };
 
+struct FrameJob {
+    AhbMessage msg{};
+    int producer_fence_fd = -1;
+    int ack_fd = -1;
+    AHardwareBuffer* incoming = nullptr;
+};
+
 struct PendingAck {
-    GLsync sync = nullptr;
+    int fence_fd = -1;
+    int ack_fd = -1;
     uint32_t scanout = 0;
     uint32_t slot = 0;
     uint32_t serial = 0;
@@ -97,20 +113,6 @@ bool recv_all(int fd, void* data, size_t size) {
         if (n <= 0) return false;
         p += static_cast<size_t>(n);
         size -= static_cast<size_t>(n);
-    }
-    return true;
-}
-
-bool send_ack(int fd, uint32_t scanout, uint32_t slot, uint32_t serial, bool ok) {
-    if (fd < 0 || serial == 0) return true;
-    const AckMessage ack{MAGIC, VERSION, scanout, slot, serial, ok ? 1u : 0u};
-    const auto* ptr = reinterpret_cast<const uint8_t*>(&ack);
-    size_t left = sizeof(ack);
-    while (left) {
-        const ssize_t n = send(fd, ptr + sizeof(ack) - left, left, MSG_NOSIGNAL);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return false;
-        left -= static_cast<size_t>(n);
     }
     return true;
 }
@@ -148,11 +150,33 @@ public:
         std::lock_guard<std::mutex> guard(state_lock_);
         if (server_.joinable()) return;
         stop_ = false;
+        epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
+        wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        if (epoll_fd_ < 0 || wake_fd_ < 0) {
+            status_ = "presenter-error:epoll-create";
+            if (epoll_fd_ >= 0) close(epoll_fd_);
+            if (wake_fd_ >= 0) close(wake_fd_);
+            epoll_fd_ = wake_fd_ = -1;
+            return;
+        }
+        epoll_event ev{};
+        ev.events = EPOLLIN;
+        ev.data.fd = wake_fd_;
+        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &ev) != 0) {
+            status_ = "presenter-error:epoll-wake";
+            close(epoll_fd_); close(wake_fd_);
+            epoll_fd_ = wake_fd_ = -1;
+            return;
+        }
+        reaper_ = std::thread([this] { reaper_loop(); });
+        renderer_ = std::thread([this] { renderer_loop(); });
         server_ = std::thread([this] { server_loop(); });
     }
 
     void stop() {
         stop_ = true;
+        queue_cv_.notify_all();
+        wake_reaper();
         int listen_fd = -1;
         int client_fd = -1;
         {
@@ -163,6 +187,11 @@ public:
         if (client_fd >= 0) shutdown(client_fd, SHUT_RDWR);
         if (listen_fd >= 0) shutdown(listen_fd, SHUT_RDWR);
         if (server_.joinable()) server_.join();
+        if (renderer_.joinable()) renderer_.join();
+        if (reaper_.joinable()) reaper_.join();
+        if (epoll_fd_ >= 0) close(epoll_fd_);
+        if (wake_fd_ >= 0) close(wake_fd_);
+        epoll_fd_ = wake_fd_ = -1;
         std::lock_guard<std::mutex> guard(state_lock_);
         if (requested_window_) {
             ANativeWindow_release(requested_window_);
@@ -177,33 +206,42 @@ public:
             set_status("presenter-error:native-surface");
             return;
         }
-        std::lock_guard<std::mutex> guard(state_lock_);
-        if (requested_window_) ANativeWindow_release(requested_window_);
-        requested_window_ = next;
-        requested_width_ = static_cast<uint32_t>(std::max(1, ANativeWindow_getWidth(next)));
-        requested_height_ = static_cast<uint32_t>(std::max(1, ANativeWindow_getHeight(next)));
-        window_change_ = true;
-        status_ = "surface-attached-pending";
+        {
+            std::lock_guard<std::mutex> guard(state_lock_);
+            if (requested_window_) ANativeWindow_release(requested_window_);
+            requested_window_ = next;
+            requested_width_ = static_cast<uint32_t>(std::max(1, ANativeWindow_getWidth(next)));
+            requested_height_ = static_cast<uint32_t>(std::max(1, ANativeWindow_getHeight(next)));
+            window_change_ = true;
+            status_ = "surface-attached-pending";
+        }
+        queue_cv_.notify_all();
     }
 
     void surface_changed(uint32_t width, uint32_t height) {
         if (!width || !height) return;
-        std::lock_guard<std::mutex> guard(state_lock_);
-        requested_width_ = width;
-        requested_height_ = height;
-        surface_size_change_ = true;
+        {
+            std::lock_guard<std::mutex> guard(state_lock_);
+            requested_width_ = width;
+            requested_height_ = height;
+            surface_size_change_ = true;
+        }
+        queue_cv_.notify_all();
     }
 
     void detach() {
-        std::lock_guard<std::mutex> guard(state_lock_);
-        if (requested_window_) {
-            ANativeWindow_release(requested_window_);
-            requested_window_ = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(state_lock_);
+            if (requested_window_) {
+                ANativeWindow_release(requested_window_);
+                requested_window_ = nullptr;
+            }
+            window_change_ = true;
+            requested_width_ = 0;
+            requested_height_ = 0;
+            status_ = latest_width_.load() ? "frame-ready-waiting-for-surface" : "surface-detached";
         }
-        window_change_ = true;
-        requested_width_ = 0;
-        requested_height_ = 0;
-        status_ = latest_width_.load() ? "frame-ready-waiting-for-surface" : "surface-detached";
+        queue_cv_.notify_all();
     }
 
     std::string status() {
@@ -222,16 +260,28 @@ public:
 
 private:
     std::atomic<bool> stop_{false};
+    std::atomic<bool> renderer_ready_{false};
     std::thread server_;
+    std::thread renderer_;
+    std::thread reaper_;
     std::mutex state_lock_;
+    std::mutex send_lock_;
+    std::mutex queue_lock_;
+    std::mutex pending_lock_;
+    std::condition_variable queue_cv_;
     int listen_fd_ = -1;
     int client_fd_ = -1;
+    int epoll_fd_ = -1;
+    int wake_fd_ = -1;
     ANativeWindow* requested_window_ = nullptr;
     uint32_t requested_width_ = 0;
     uint32_t requested_height_ = 0;
     bool window_change_ = false;
     bool surface_size_change_ = false;
     std::string status_ = "not-started";
+    std::deque<FrameJob> queue_;
+    std::unordered_map<int, PendingAck> pending_acks_;
+    std::atomic<uint64_t> dropped_{0};
 
     std::atomic<uint32_t> preferred_width_{1920};
     std::atomic<uint32_t> preferred_height_{1080};
@@ -254,9 +304,9 @@ private:
     CreateSync create_sync_ = nullptr;
     DestroySync destroy_sync_ = nullptr;
     WaitSync wait_sync_ = nullptr;
+    DupNativeFence dup_native_fence_ = nullptr;
 
     std::array<SourceSlot, FRAME_SLOTS> sources_{};
-    std::vector<PendingAck> pending_;
     GLuint retained_texture_ = 0;
     GLuint retained_fbo_ = 0;
     uint32_t retained_width_ = 0;
@@ -266,6 +316,37 @@ private:
     void set_status(const std::string& value) {
         std::lock_guard<std::mutex> guard(state_lock_);
         status_ = value;
+    }
+
+    bool send_ack_safe(int fd, uint32_t scanout, uint32_t slot, uint32_t serial, bool ok) {
+        if (fd < 0 || serial == 0) return true;
+        const AckMessage ack{MAGIC, VERSION, scanout, slot, serial, ok ? 1u : 0u};
+        std::lock_guard<std::mutex> guard(send_lock_);
+        const auto* ptr = reinterpret_cast<const uint8_t*>(&ack);
+        size_t left = sizeof(ack);
+        while (left) {
+            const ssize_t n = send(fd, ptr + sizeof(ack) - left, left, MSG_NOSIGNAL);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) return false;
+            left -= static_cast<size_t>(n);
+        }
+        return true;
+    }
+
+    void dispose_job(FrameJob& job, bool ack) {
+        if (job.producer_fence_fd >= 0) close(job.producer_fence_fd);
+        if (job.incoming) AHardwareBuffer_release(job.incoming);
+        if (job.ack_fd >= 0) {
+            if (ack) send_ack_safe(job.ack_fd, job.msg.scanout_id, job.msg.slot, job.msg.serial, true);
+            close(job.ack_fd);
+        }
+        job = {};
+    }
+
+    void wake_reaper() {
+        if (wake_fd_ < 0) return;
+        uint64_t one = 1;
+        (void)write(wake_fd_, &one, sizeof(one));
     }
 
     bool init_egl() {
@@ -294,14 +375,16 @@ private:
         create_sync_ = reinterpret_cast<CreateSync>(eglGetProcAddress("eglCreateSyncKHR"));
         destroy_sync_ = reinterpret_cast<DestroySync>(eglGetProcAddress("eglDestroySyncKHR"));
         wait_sync_ = reinterpret_cast<WaitSync>(eglGetProcAddress("eglWaitSyncKHR"));
-        if (!get_native_client_buffer_ || !create_image_ || !destroy_image_ || !image_target_texture_ || !create_sync_ || !destroy_sync_ || !wait_sync_) {
+        dup_native_fence_ = reinterpret_cast<DupNativeFence>(eglGetProcAddress("eglDupNativeFenceFDANDROID"));
+        if (!get_native_client_buffer_ || !create_image_ || !destroy_image_ || !image_target_texture_ || !create_sync_ || !destroy_sync_ || !wait_sync_ || !dup_native_fence_) {
             return fail("presenter-error:egl-native-fence-extensions");
         }
         const char* egl_ext = eglQueryString(display_, EGL_EXTENSIONS);
         if (!egl_ext || !std::strstr(egl_ext, "EGL_ANDROID_native_fence_sync") || !std::strstr(egl_ext, "EGL_KHR_wait_sync") || !std::strstr(egl_ext, "EGL_ANDROID_image_native_buffer")) {
             return fail("presenter-error:required-egl-extensions");
         }
-        set_status("native-surface-socket-starting");
+        const char* vendor = eglQueryString(display_, EGL_VENDOR);
+        logi(std::string("renderer thread EGL ready vendor=") + (vendor ? vendor : "unknown") + " slots=5 asyncAck=epoll swapInterval=0");
         return true;
     }
 
@@ -333,25 +416,6 @@ private:
         retained_width_ = 0;
         retained_height_ = 0;
         retained_valid_ = false;
-    }
-
-    void finish_pending(int fd, bool force) {
-        for (size_t i = 0; i < pending_.size();) {
-            GLenum rc = GL_TIMEOUT_EXPIRED;
-            if (force) {
-                rc = glClientWaitSync(pending_[i].sync, GL_SYNC_FLUSH_COMMANDS_BIT, 2'000'000'000ULL);
-            } else {
-                rc = glClientWaitSync(pending_[i].sync, 0, 0);
-            }
-            if (rc == GL_ALREADY_SIGNALED || rc == GL_CONDITION_SATISFIED || rc == GL_WAIT_FAILED || force) {
-                const bool ok = rc != GL_WAIT_FAILED;
-                send_ack(fd, pending_[i].scanout, pending_[i].slot, pending_[i].serial, ok);
-                glDeleteSync(pending_[i].sync);
-                pending_.erase(pending_.begin() + static_cast<long>(i));
-            } else {
-                ++i;
-            }
-        }
     }
 
     bool register_source(uint32_t slot_index, AHardwareBuffer* incoming, uint32_t width, uint32_t height) {
@@ -390,7 +454,7 @@ private:
         const EGLint attrs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fence_fd, EGL_NONE};
         EGLSyncKHR sync = create_sync_(display_, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
         if (sync == EGL_NO_SYNC_KHR) {
-            close(fence_fd); // ownership transfers only on successful create
+            close(fence_fd);
             return fail("presenter-error:producer-fence-import");
         }
         const EGLBoolean ok = wait_sync_(display_, sync, 0);
@@ -447,21 +511,83 @@ private:
         if (!retained_valid_ || window_surface_ == EGL_NO_SURFACE) return true;
         blit_letterboxed(retained_fbo_, retained_width_, retained_height_);
         if (glGetError() != GL_NO_ERROR || eglSwapBuffers(display_, window_surface_) != EGL_TRUE) return fail("presenter-error:surface-swap-retained");
-        set_status("presenting-native-surface");
+        set_status("presenting-native-surface-v6");
         return true;
     }
 
-    bool render_frame(int fd, const AhbMessage& msg, int fence_fd) {
-        if (msg.slot >= FRAME_SLOTS || !sources_[msg.slot].buffer) {
-            if (fence_fd >= 0) close(fence_fd);
-            send_ack(fd, msg.scanout_id, msg.slot, msg.serial, false);
+    bool enqueue_async_ack(FrameJob& job) {
+        const EGLint attrs[] = {EGL_NONE};
+        EGLSyncKHR sync = create_sync_(display_, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
+        if (sync == EGL_NO_SYNC_KHR) return false;
+        glFlush();
+        const int fence_fd = dup_native_fence_(display_, sync);
+        destroy_sync_(display_, sync);
+        if (fence_fd < 0) return false;
+
+        epoll_event ev{};
+        ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+        ev.data.fd = fence_fd;
+        {
+            std::lock_guard<std::mutex> guard(pending_lock_);
+            pending_acks_.emplace(fence_fd, PendingAck{fence_fd, job.ack_fd, job.msg.scanout_id, job.msg.slot, job.msg.serial});
+        }
+        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fence_fd, &ev) != 0) {
+            std::lock_guard<std::mutex> guard(pending_lock_);
+            pending_acks_.erase(fence_fd);
+            close(fence_fd);
             return false;
         }
-        if (!wait_producer_fence(fence_fd)) {
-            send_ack(fd, msg.scanout_id, msg.slot, msg.serial, false);
-            return false;
+        job.ack_fd = -1;
+        wake_reaper();
+        return true;
+    }
+
+    void immediate_ack(FrameJob& job, bool ok) {
+        if (job.ack_fd >= 0) {
+            send_ack_safe(job.ack_fd, job.msg.scanout_id, job.msg.slot, job.msg.serial, ok);
+            close(job.ack_fd);
+            job.ack_fd = -1;
         }
-        SourceSlot& source = sources_[msg.slot];
+    }
+
+    void process_job(FrameJob job) {
+        if (job.msg.type == MSG_DISABLE) {
+            clear_sources();
+            clear_retained();
+            immediate_ack(job, true);
+            return;
+        }
+
+        if (job.msg.slot >= FRAME_SLOTS) {
+            immediate_ack(job, false);
+            dispose_job(job, false);
+            return;
+        }
+        if (job.incoming) {
+            AHardwareBuffer* incoming = job.incoming;
+            job.incoming = nullptr;
+            if (!register_source(job.msg.slot, incoming, job.msg.width, job.msg.height)) {
+                AHardwareBuffer_release(incoming);
+                if (job.producer_fence_fd >= 0) close(job.producer_fence_fd);
+                job.producer_fence_fd = -1;
+                immediate_ack(job, false);
+                return;
+            }
+        }
+        if (!sources_[job.msg.slot].buffer) {
+            if (job.producer_fence_fd >= 0) close(job.producer_fence_fd);
+            job.producer_fence_fd = -1;
+            immediate_ack(job, false);
+            return;
+        }
+        const int producer_fd = job.producer_fence_fd;
+        job.producer_fence_fd = -1;
+        if (!wait_producer_fence(producer_fd)) {
+            immediate_ack(job, false);
+            return;
+        }
+
+        SourceSlot& source = sources_[job.msg.slot];
         bool ok = true;
         if (window_surface_ != EGL_NO_SURFACE) {
             blit_letterboxed(source.read_fbo, source.width, source.height);
@@ -470,23 +596,26 @@ private:
             ok = copy_to_retained(source);
         }
         if (!ok) {
-            send_ack(fd, msg.scanout_id, msg.slot, msg.serial, false);
-            return fail("presenter-error:surface-gpu-blit");
+            immediate_ack(job, false);
+            fail("presenter-error:surface-gpu-blit");
+            return;
         }
-        GLsync consumed = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-        if (!consumed) {
-            send_ack(fd, msg.scanout_id, msg.slot, msg.serial, false);
-            return fail("presenter-error:consumer-fence");
+
+        if (!enqueue_async_ack(job)) {
+            // Error-only fallback: wait on this renderer thread, never on the socket/vhost thread.
+            glFinish();
+            immediate_ack(job, true);
         }
-        glFlush();
-        pending_.push_back(PendingAck{consumed, msg.scanout_id, msg.slot, msg.serial});
+
         if (window_surface_ != EGL_NO_SURFACE) {
-            if (eglSwapBuffers(display_, window_surface_) != EGL_TRUE) return fail("presenter-error:surface-swap");
-            set_status("presenting-native-surface");
+            if (eglSwapBuffers(display_, window_surface_) != EGL_TRUE) {
+                fail("presenter-error:surface-swap");
+                return;
+            }
+            set_status("presenting-native-surface-v6");
         } else {
             set_status("frame-ready-waiting-for-surface");
         }
-        return true;
     }
 
     void apply_window_change() {
@@ -531,10 +660,11 @@ private:
                 fail("presenter-error:egl-window-surface");
                 return;
             }
-            eglSwapInterval(display_, 1);
-            set_status("surface-attached");
+            // Let SurfaceFlinger pace independently. The renderer/socket path must never wait for VSYNC.
+            eglSwapInterval(display_, 0);
+            set_status("surface-attached-v6");
             present_retained();
-            logi("Android native Surface attached " + std::to_string(surface_width_) + "x" + std::to_string(surface_height_) + " swapInterval=1");
+            logi("Android native Surface attached " + std::to_string(surface_width_) + "x" + std::to_string(surface_height_) + " swapInterval=0 asyncAck=1");
         } else if (window_surface_ != EGL_NO_SURFACE) {
             surface_width_ = next_w;
             surface_height_ = next_h;
@@ -542,37 +672,66 @@ private:
         }
     }
 
+    bool queue_job(FrameJob job) {
+        std::unique_lock<std::mutex> lock(queue_lock_);
+        if (job.msg.type == MSG_DISABLE) {
+            while (!queue_.empty()) {
+                FrameJob old = std::move(queue_.front());
+                queue_.pop_front();
+                lock.unlock();
+                dispose_job(old, true);
+                lock.lock();
+            }
+        }
+        if (queue_.size() >= MAX_QUEUED_FRAMES) {
+            if (job.msg.type == MSG_REGISTER_FRAME) {
+                auto it = std::find_if(queue_.begin(), queue_.end(), [](const FrameJob& q) { return q.msg.type == MSG_FRAME; });
+                if (it != queue_.end()) {
+                    FrameJob old = std::move(*it);
+                    queue_.erase(it);
+                    lock.unlock();
+                    dispose_job(old, true);
+                    dropped_.fetch_add(1);
+                    lock.lock();
+                }
+            }
+            if (queue_.size() >= MAX_QUEUED_FRAMES) {
+                const bool droppable = job.msg.type == MSG_FRAME;
+                lock.unlock();
+                dispose_job(job, droppable);
+                if (droppable) dropped_.fetch_add(1);
+                return droppable;
+            }
+        }
+        queue_.push_back(std::move(job));
+        lock.unlock();
+        queue_cv_.notify_one();
+        return true;
+    }
+
     bool handle_message(int fd, const AhbMessage& msg) {
         if (msg.magic != MAGIC || msg.version != VERSION || msg.scanout_id != 0) {
-            send_ack(fd, msg.scanout_id, msg.slot, msg.serial, false);
+            send_ack_safe(fd, msg.scanout_id, msg.slot, msg.serial, false);
             return false;
         }
+        FrameJob job{};
+        job.msg = msg;
+        job.ack_fd = dup(fd);
+        if (job.ack_fd < 0) return false;
         if (msg.type == MSG_REGISTER_FRAME) {
-            if (msg.slot >= FRAME_SLOTS) return false;
-            AHardwareBuffer* incoming = nullptr;
-            if (AHardwareBuffer_recvHandleFromUnixSocket(fd, &incoming) != 0 || !incoming) return false;
-            const int fence_fd = recv_fence_fd(fd);
-            if (fence_fd < 0) { AHardwareBuffer_release(incoming); return false; }
-            if (!register_source(msg.slot, incoming, msg.width, msg.height)) {
-                AHardwareBuffer_release(incoming);
-                close(fence_fd);
-                send_ack(fd, msg.scanout_id, msg.slot, msg.serial, false);
-                return false;
-            }
-            return render_frame(fd, msg, fence_fd);
+            if (msg.slot >= FRAME_SLOTS) { dispose_job(job, false); return false; }
+            if (AHardwareBuffer_recvHandleFromUnixSocket(fd, &job.incoming) != 0 || !job.incoming) { dispose_job(job, false); return false; }
+            job.producer_fence_fd = recv_fence_fd(fd);
+            if (job.producer_fence_fd < 0) { dispose_job(job, false); return false; }
+            return queue_job(std::move(job));
         }
         if (msg.type == MSG_FRAME) {
-            const int fence_fd = recv_fence_fd(fd);
-            if (fence_fd < 0) return false;
-            return render_frame(fd, msg, fence_fd);
+            job.producer_fence_fd = recv_fence_fd(fd);
+            if (job.producer_fence_fd < 0) { dispose_job(job, false); return false; }
+            return queue_job(std::move(job));
         }
-        if (msg.type == MSG_DISABLE) {
-            finish_pending(fd, true);
-            clear_sources();
-            clear_retained();
-            set_status(window_surface_ != EGL_NO_SURFACE ? "surface-attached" : "surface-detached");
-            return send_ack(fd, msg.scanout_id, UINT32_MAX, msg.serial, true);
-        }
+        if (msg.type == MSG_DISABLE) return queue_job(std::move(job));
+        dispose_job(job, false);
         return false;
     }
 
@@ -582,28 +741,68 @@ private:
             client_fd_ = fd;
         }
         while (!stop_) {
-            apply_window_change();
-            finish_pending(fd, false);
             pollfd pfd{fd, POLLIN, 0};
-            const int rc = poll(&pfd, 1, 2);
+            const int rc = poll(&pfd, 1, 50);
             if (rc < 0 && errno == EINTR) continue;
             if (rc < 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) break;
             if (rc == 0) continue;
             AhbMessage msg{};
             if (!recv_all(fd, &msg, sizeof(msg)) || !handle_message(fd, msg)) break;
         }
-        finish_pending(fd, true);
         {
             std::lock_guard<std::mutex> guard(state_lock_);
             if (client_fd_ == fd) client_fd_ = -1;
         }
     }
 
+    void reaper_loop() {
+        std::array<epoll_event, 16> events{};
+        while (!stop_) {
+            const int count = epoll_wait(epoll_fd_, events.data(), static_cast<int>(events.size()), 250);
+            if (count < 0 && errno == EINTR) continue;
+            if (count < 0) break;
+            for (int i = 0; i < count; ++i) {
+                const int fd = events[static_cast<size_t>(i)].data.fd;
+                if (fd == wake_fd_) {
+                    uint64_t value;
+                    while (read(wake_fd_, &value, sizeof(value)) > 0) {}
+                    continue;
+                }
+                PendingAck ack{};
+                bool found = false;
+                {
+                    std::lock_guard<std::mutex> guard(pending_lock_);
+                    auto it = pending_acks_.find(fd);
+                    if (it != pending_acks_.end()) {
+                        ack = it->second;
+                        pending_acks_.erase(it);
+                        found = true;
+                    }
+                }
+                if (!found) continue;
+                epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+                send_ack_safe(ack.ack_fd, ack.scanout, ack.slot, ack.serial, true);
+                close(ack.ack_fd);
+                close(ack.fence_fd);
+            }
+        }
+        std::vector<PendingAck> leftovers;
+        {
+            std::lock_guard<std::mutex> guard(pending_lock_);
+            for (auto& [_, ack] : pending_acks_) leftovers.push_back(ack);
+            pending_acks_.clear();
+        }
+        for (auto& ack : leftovers) {
+            epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, ack.fence_fd, nullptr);
+            close(ack.fence_fd);
+            send_ack_safe(ack.ack_fd, ack.scanout, ack.slot, ack.serial, false);
+            close(ack.ack_fd);
+        }
+    }
+
     void destroy_egl() {
         if (display_ == EGL_NO_DISPLAY) return;
         if (context_ != EGL_NO_CONTEXT) eglMakeCurrent(display_, pbuffer_, pbuffer_, context_);
-        for (auto& pending : pending_) if (pending.sync) glDeleteSync(pending.sync);
-        pending_.clear();
         clear_sources();
         clear_retained();
         if (window_surface_ != EGL_NO_SURFACE) eglDestroySurface(display_, window_surface_);
@@ -618,30 +817,59 @@ private:
         context_ = EGL_NO_CONTEXT;
     }
 
-    void server_loop() {
+    void renderer_loop() {
         if (!init_egl()) return;
+        renderer_ready_ = true;
+        set_status("native-surface-renderer-v6-ready");
+        while (!stop_) {
+            apply_window_change();
+            FrameJob job{};
+            bool have_job = false;
+            {
+                std::unique_lock<std::mutex> lock(queue_lock_);
+                if (queue_.empty()) queue_cv_.wait_for(lock, std::chrono::milliseconds(2));
+                if (!queue_.empty()) {
+                    job = std::move(queue_.front());
+                    queue_.pop_front();
+                    have_job = true;
+                }
+            }
+            if (have_job) process_job(std::move(job));
+        }
+        std::deque<FrameJob> leftovers;
+        {
+            std::lock_guard<std::mutex> guard(queue_lock_);
+            leftovers.swap(queue_);
+        }
+        for (auto& job : leftovers) dispose_job(job, false);
+        destroy_egl();
+        renderer_ready_ = false;
+    }
+
+    void server_loop() {
+        for (int i = 0; i < 400 && !stop_ && !renderer_ready_.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (!renderer_ready_.load()) { fail("presenter-error:renderer-not-ready"); return; }
         const std::string name = "vessel-ahb-" + std::to_string(getuid());
         const int server = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        if (server < 0) { fail("presenter-error:surface-socket-create"); destroy_egl(); return; }
+        if (server < 0) { fail("presenter-error:surface-socket-create"); return; }
         sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
-        if (name.size() + 1 >= sizeof(addr.sun_path)) { close(server); fail("presenter-error:surface-socket-name"); destroy_egl(); return; }
+        if (name.size() + 1 >= sizeof(addr.sun_path)) { close(server); fail("presenter-error:surface-socket-name"); return; }
         addr.sun_path[0] = '\0';
         std::memcpy(addr.sun_path + 1, name.data(), name.size());
         const socklen_t len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + name.size());
         if (bind(server, reinterpret_cast<sockaddr*>(&addr), len) != 0 || listen(server, 2) != 0) {
-            close(server); fail("presenter-error:surface-bind"); destroy_egl(); return;
+            close(server); fail("presenter-error:surface-bind"); return;
         }
         {
             std::lock_guard<std::mutex> guard(state_lock_);
             listen_fd_ = server;
-            status_ = "native-surface-socket-ready";
+            status_ = "native-surface-socket-ready-v6";
         }
-        logi("DroidVM-style Android Surface presentation ready: AHB handoff -> EGL/GLES -> BufferQueue/SurfaceFlinger");
+        logi("Vessel v6 presenter ready: socket ingestion decoupled from SurfaceFlinger, slots=5, bounded queue=5, epoll fence retirement, drop-on-backpressure");
         while (!stop_) {
-            apply_window_change();
             pollfd pfd{server, POLLIN, 0};
-            const int prc = poll(&pfd, 1, 10);
+            const int prc = poll(&pfd, 1, 50);
             if (prc < 0 && errno == EINTR) continue;
             if (prc < 0 || stop_) break;
             if (prc == 0) continue;
@@ -656,7 +884,7 @@ private:
             client_fd_ = -1;
         }
         close(server);
-        destroy_egl();
+        logi("presenter socket stopped dropped=" + std::to_string(dropped_.load()));
     }
 };
 

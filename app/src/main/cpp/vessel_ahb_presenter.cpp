@@ -30,8 +30,8 @@ constexpr uint32_t VERSION = 3;
 constexpr uint32_t MSG_REGISTER_FRAME = 1;
 constexpr uint32_t MSG_FRAME = 2;
 constexpr uint32_t MSG_DISABLE = 3;
-constexpr uint32_t FRAME_SLOTS = 3;
-constexpr uint32_t FRAMES_IN_FLIGHT = 3;
+constexpr uint32_t FRAME_SLOTS = 5;
+constexpr uint32_t FRAMES_IN_FLIGHT = 5;
 constexpr uint8_t FENCE_TAG = 0xF3;
 
 #pragma pack(push, 1)
@@ -512,7 +512,7 @@ private:
         }
         swapchain_dirty_ = false;
         logi(std::string("Vulkan presenter ready extent=") + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) +
-             " presentMode=" + (present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO") + " frames=3 producerSyncFd=1");
+             " presentMode=" + (present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO") + " frames=5 producerSyncFd=1 nonBlockingAcquire=1");
         status_ = "ahb-vulkan-ready";
         return true;
     }
@@ -654,13 +654,12 @@ private:
         latest_height_ = source.height;
         latest_slot_ = slot_index;
         if (!window_) {
-            bool ok = true;
-            if (producer_fence_fd >= 0) {
-                ok = wait_sync_fd(producer_fence_fd);
-                close(producer_fence_fd);
-            }
+            // There is no Android consumer while Display is detached. Do not
+            // stall the GPU backend on the producer fence; the same GL queue
+            // orders subsequent writes and the next visible frame will catch up.
+            if (producer_fence_fd >= 0) close(producer_fence_fd);
             status_ = "frame-ready-waiting-for-surface";
-            return send_ack(fd, scanout, slot_index, serial, ok);
+            return send_ack(fd, scanout, slot_index, serial, true);
         }
         if (!create_vulkan_locked() || !ensure_surface_extent_locked()) {
             if (producer_fence_fd >= 0) close(producer_fence_fd);
@@ -673,16 +672,47 @@ private:
             return false;
         }
 
-        Frame& frame = frames_[frame_number_++ % FRAMES_IN_FLIGHT];
-        if (frame.pending && !finish_frame_locked(fd, frame, true)) {
-            if (producer_fence_fd >= 0) close(producer_fence_fd);
-            return false;
+        // Reap completed submissions without sleeping. If Android/Vulkan
+        // still owns all five frame contexts, drop this presentation update
+        // instead of blocking the vhost-user-gpu event loop.
+        Frame* selected = nullptr;
+        for (uint32_t n = 0; n < FRAMES_IN_FLIGHT; ++n) {
+            const uint32_t idx = (frame_number_ + n) % FRAMES_IN_FLIGHT;
+            Frame& candidate = frames_[idx];
+            if (candidate.pending) {
+                const VkResult fence_state = vkGetFenceStatus(device_, candidate.fence);
+                if (fence_state == VK_SUCCESS) {
+                    if (!finish_frame_locked(fd, candidate, false)) {
+                        if (producer_fence_fd >= 0) close(producer_fence_fd);
+                        return false;
+                    }
+                } else if (fence_state != VK_NOT_READY) {
+                    if (producer_fence_fd >= 0) close(producer_fence_fd);
+                    status_ = vk_error("vkGetFenceStatus", fence_state);
+                    return false;
+                }
+            }
+            if (!candidate.pending) {
+                selected = &candidate;
+                frame_number_ = (idx + 1) % FRAMES_IN_FLIGHT;
+                break;
+            }
         }
-        vkWaitForFences(device_, 1, &frame.fence, VK_TRUE, UINT64_MAX);
-        vkResetFences(device_, 1, &frame.fence);
+        if (!selected) {
+            if (producer_fence_fd >= 0) close(producer_fence_fd);
+            status_ = "presenting-ahardwarebuffer-backpressure-drop";
+            return send_ack(fd, scanout, slot_index, serial, true);
+        }
+        Frame& frame = *selected;
 
         uint32_t image_index = 0;
-        VkResult result = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, frame.acquire, VK_NULL_HANDLE, &image_index);
+        VkResult result = vkAcquireNextImageKHR(device_, swapchain_, 0, frame.acquire, VK_NULL_HANDLE, &image_index);
+        if (result == VK_NOT_READY || result == VK_TIMEOUT) {
+            if (producer_fence_fd >= 0) close(producer_fence_fd);
+            status_ = "presenting-ahardwarebuffer-swapchain-drop";
+            return send_ack(fd, scanout, slot_index, serial, true);
+        }
+        vkResetFences(device_, 1, &frame.fence);
         if (result == VK_ERROR_OUT_OF_DATE_KHR && allow_recreate) {
             swapchain_dirty_ = true;
             if (!recreate_swapchain_locked()) {

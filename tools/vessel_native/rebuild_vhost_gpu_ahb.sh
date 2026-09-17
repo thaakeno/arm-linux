@@ -2,11 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-python3 "$ROOT/tools/vessel_native/alpha4_experiment_lab.py" "$ROOT"
-python3 "$ROOT/tools/vessel_native/alpha5_async_presenter.py" "$ROOT"
-python3 "$ROOT/tools/vessel_native/alpha6_wayland_overhaul.py" "$ROOT"
-python3 "$ROOT/tools/vessel_native/alpha7_live_update.py" "$ROOT"
-python3 "$ROOT/tools/vessel_native/alpha8_wayland_bootstrap_fix.py" "$ROOT"
 NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
 [ -n "$NDK" ] || { echo "ANDROID_NDK_HOME is required" >&2; exit 2; }
 TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"

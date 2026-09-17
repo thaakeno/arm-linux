@@ -3,6 +3,7 @@ import base64
 import datetime
 import glob
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -290,13 +291,34 @@ def icon_file(icon):
     if not icon: return ""
     name = os.path.basename(icon)
     names = [name] if name.lower().endswith((".png", ".svg", ".xpm")) else [name, name + ".png", name + ".svg"]
+    patterns = (
+        "/var/cache/app-info/icons/*/64x64/{name}", "/var/cache/app-info/icons/*/128x128/{name}",
+        "/var/cache/app-info/icons/*/128x128@2/{name}", "/var/cache/swcatalog/icons/*/64x64/{name}",
+        "/var/cache/swcatalog/icons/*/128x128/{name}", "/var/cache/swcatalog/icons/*/128x128@2/{name}",
+        "/usr/share/pixmaps/{name}", "/usr/share/icons/hicolor/*/apps/{name}",
+        "/usr/share/icons/breeze/*/apps/{name}",
+    )
     for n in names:
-        for pattern in (f"/var/cache/app-info/icons/*/64x64/{n}", f"/var/cache/app-info/icons/*/128x128/{n}",
-                        f"/var/cache/swcatalog/icons/*/64x64/{n}", f"/var/cache/swcatalog/icons/*/128x128/{n}",
-                        f"/usr/share/pixmaps/{n}", f"/usr/share/icons/hicolor/*/apps/{n}", f"/usr/share/icons/breeze/*/apps/{n}"):
-            for path in glob.glob(pattern):
-                if os.path.isfile(path) and path.lower().endswith(".png") and os.path.getsize(path) <= 256 * 1024:
+        for template in patterns:
+            for path in glob.glob(template.format(name=n)):
+                if not os.path.isfile(path) or os.path.getsize(path) > 512 * 1024:
+                    continue
+                lower = path.lower()
+                if lower.endswith(".png"):
                     return path
+                if lower.endswith(".svg"):
+                    os.makedirs("/var/cache/vessel/icons", exist_ok=True)
+                    stamp = f"{path}:{os.path.getmtime(path)}:{os.path.getsize(path)}".encode()
+                    out = "/var/cache/vessel/icons/" + hashlib.sha256(stamp).hexdigest()[:24] + ".png"
+                    if os.path.isfile(out) and os.path.getsize(out) > 0:
+                        return out
+                    try:
+                        subprocess.run(["rsvg-convert", "-w", "128", "-h", "128", "-o", out, path],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8, check=False)
+                        if os.path.isfile(out) and 0 < os.path.getsize(out) <= 512 * 1024:
+                            return out
+                    except Exception:
+                        pass
     return ""
 
 
