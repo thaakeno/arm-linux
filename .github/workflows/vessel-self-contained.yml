@@ -2,9 +2,7 @@ name: Vessel APK
 
 on:
   push:
-    branches:
-      - arch/vessel-self-contained
-      - fix/vessel-real-source-20260917
+    branches: [ arch/vessel-self-contained ]
     paths:
       - 'app/**'
       - 'tools/vessel_native/**'
@@ -155,6 +153,7 @@ jobs:
           grep -F 'SOCK_NONBLOCK' app/src/main/cpp/vessel_virtio_input.cpp
           grep -F 'predictedCursorX' app/src/main/java/com/example/dreamlinux/LinuxDesktopView.kt
           grep -F 'partialCopies=' tools/vessel_native/vessel_ahb_bridge.cpp
+          grep -F 'state.resource_id == resource_id' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'VESSEL_ANDROID_AHB_SCANOUT_V3' tools/vessel_native/patch_vhost_gpu_android_ahb.py
           grep -F 'vessel_contexts' tools/vessel_native/patch_vhost_gpu_android_ahb.py
           ! find tools/vessel_native -maxdepth 1 -name 'alpha*.py' -print -quit | grep -q .
