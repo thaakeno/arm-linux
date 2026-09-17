@@ -1,0 +1,70 @@
+name: Vessel Workstation Image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ arch/vessel-self-contained ]
+    paths:
+      - 'tools/vessel_workstation/**'
+      - '.github/workflows/vessel-workstation-image.yml'
+
+concurrency:
+  group: vessel-workstation-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install workstation image tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl zstd e2fsprogs util-linux
+      - name: Build complete ARM64 Plasma workstation image
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x tools/vessel_workstation/build_prebuilt_workstation.sh
+          tools/vessel_workstation/build_prebuilt_workstation.sh build/workstation
+      - name: Verify workstation assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -s build/workstation/Vessel-Workstation-bookworm-arm64.ext4.zst
+          test -s build/workstation/Vessel-Workstation-bookworm-arm64.json
+          python3 - <<'PY'
+          import json
+          p='build/workstation/Vessel-Workstation-bookworm-arm64.json'
+          x=json.load(open(p))
+          assert x['schema']==1
+          assert x['arch']=='arm64'
+          assert x['compression']=='zstd'
+          assert x['recommends'] is True
+          assert x['compressedBytes'] < 2_000_000_000
+          assert len(x['compressedSha256'])==64
+          assert len(x['imageSha256'])==64
+          PY
+      - name: Publish rolling workstation release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if ! gh release view vessel-workstation-edge --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create vessel-workstation-edge \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title 'Vessel Workstation Edge' \
+              --notes 'Rolling prebuilt Debian Bookworm ARM64 + KDE Plasma workstation used by Vessel first-run setup.'
+          fi
+          gh release upload vessel-workstation-edge \
+            build/workstation/Vessel-Workstation-bookworm-arm64.ext4.zst \
+            build/workstation/Vessel-Workstation-bookworm-arm64.json \
+            --clobber --repo "$GITHUB_REPOSITORY"
