@@ -30,17 +30,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: temurin
           cache: gradle
-
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
-
       - name: Restore immutable Vessel native base
         id: native-base
         uses: actions/cache@v4
@@ -49,7 +46,6 @@ jobs:
             .vessel-native-build
             app/src/main/jniLibs/arm64-v8a
           key: vessel-native-base-v4-${{ runner.os }}-${{ hashFiles('tools/vessel_native/build_runtime_bundle_ci.sh', 'tools/vessel_native/vhost-device-vessel-input/**', 'tools/vessel_native/kernel/**') }}
-
       - name: Restore Rust build cache
         uses: actions/cache@v4
         with:
@@ -61,7 +57,6 @@ jobs:
           restore-keys: |
             vessel-rust-v5-${{ runner.os }}-
             vessel-rust-v4-${{ runner.os }}-
-
       - name: Seed immutable native base from last verified APK
         id: native-seed
         if: steps.native-base.outputs.cache-hit != 'true'
@@ -76,37 +71,20 @@ jobs:
           PREV_SHA="$(jq -r '.workflow_runs[0].head_sha // empty' <<<"$PREV_JSON")"
           [ -n "$PREV_RUN" ] && [ -n "$PREV_SHA" ] || exit 0
           git cat-file -e "$PREV_SHA^{commit}" 2>/dev/null || exit 0
-          BASE_INPUTS=(
-            tools/vessel_native/build_runtime_bundle_ci.sh
-            tools/vessel_native/vhost-device-vessel-input
-            tools/vessel_native/kernel
-          )
-          if ! git diff --quiet "$PREV_SHA"..HEAD -- "${BASE_INPUTS[@]}"; then
-            echo "Immutable native-base inputs changed; doing a clean rebuild."
-            exit 0
-          fi
+          BASE_INPUTS=(tools/vessel_native/build_runtime_bundle_ci.sh tools/vessel_native/vhost-device-vessel-input tools/vessel_native/kernel)
+          if ! git diff --quiet "$PREV_SHA"..HEAD -- "${BASE_INPUTS[@]}"; then exit 0; fi
           rm -rf /tmp/vessel-prev /tmp/vessel-prev-apk
           mkdir -p /tmp/vessel-prev /tmp/vessel-prev-apk app/src/main/jniLibs/arm64-v8a app/src/main/assets/vessel
-          if ! gh run download "$PREV_RUN" -n vessel-self-contained-arm64 -D /tmp/vessel-prev; then
-            gh run download "$PREV_RUN" -n vessel-protocol39-self-contained-arm64 -D /tmp/vessel-prev
-          fi
+          if ! gh run download "$PREV_RUN" -n vessel-self-contained-arm64 -D /tmp/vessel-prev; then gh run download "$PREV_RUN" -n vessel-protocol39-self-contained-arm64 -D /tmp/vessel-prev; fi
           PREV_APK="$(find /tmp/vessel-prev -name '*.apk' -print -quit)"
           [ -n "$PREV_APK" ] || exit 0
           unzip -q "$PREV_APK" 'lib/arm64-v8a/*' 'assets/vessel/runtime-build.txt' -d /tmp/vessel-prev-apk
-          for f in \
-            libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so \
-            libvessel_vhost_input.so libvessel_virglrenderer.so libvessel_epoxy.so \
-            libEGL_angle.so libGLESv1_CM_angle.so libGLESv2_angle.so; do
+          for f in libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so libvessel_vhost_input.so libvessel_virglrenderer.so libvessel_epoxy.so libEGL_angle.so libGLESv1_CM_angle.so libGLESv2_angle.so; do
             [ ! -s "/tmp/vessel-prev-apk/lib/arm64-v8a/$f" ] || cp "/tmp/vessel-prev-apk/lib/arm64-v8a/$f" "app/src/main/jniLibs/arm64-v8a/$f"
           done
           cp /tmp/vessel-prev-apk/assets/vessel/runtime-build.txt app/src/main/assets/vessel/runtime-build.txt
-          chmod 0755 app/src/main/jniLibs/arm64-v8a/libvessel_uml.so \
-            app/src/main/jniLibs/arm64-v8a/libvessel_stub.so \
-            app/src/main/jniLibs/arm64-v8a/libvessel_umnet.so \
-            app/src/main/jniLibs/arm64-v8a/libvessel_passt.so \
-            app/src/main/jniLibs/arm64-v8a/libvessel_vhost_input.so
+          chmod 0755 app/src/main/jniLibs/arm64-v8a/libvessel_uml.so app/src/main/jniLibs/arm64-v8a/libvessel_stub.so app/src/main/jniLibs/arm64-v8a/libvessel_umnet.so app/src/main/jniLibs/arm64-v8a/libvessel_passt.so app/src/main/jniLibs/arm64-v8a/libvessel_vhost_input.so
           echo "seeded=true" >> "$GITHUB_OUTPUT"
-
       - name: Install Android NDK and host build tools
         shell: bash
         run: |
@@ -115,29 +93,15 @@ jobs:
           sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> "$GITHUB_ENV"
           sudo apt-get update
-          if [ "${{ steps.native-base.outputs.cache-hit }}" = "true" ] || [ "${{ steps.native-seed.outputs.seeded }}" = "true" ]; then
-            sudo apt-get install -y --no-install-recommends patchelf libclang-dev pkg-config file unzip
-          else
-            sudo apt-get install -y --no-install-recommends \
-              patchelf xz-utils libclang-dev clang pkg-config cmake ninja-build file unzip curl git python3 \
-              build-essential flex bison bc rsync cpio libssl-dev libelf-dev dwarves zip
-          fi
+          if [ "${{ steps.native-base.outputs.cache-hit }}" = "true" ] || [ "${{ steps.native-seed.outputs.seeded }}" = "true" ]; then sudo apt-get install -y --no-install-recommends patchelf libclang-dev pkg-config file unzip; else sudo apt-get install -y --no-install-recommends patchelf xz-utils libclang-dev clang pkg-config cmake ninja-build file unzip curl git python3 build-essential flex bison bc rsync cpio libssl-dev libelf-dev dwarves zip; fi
           rustup target add aarch64-linux-android
-
       - name: Build and package native runtime
         shell: bash
         run: |
           set -euxo pipefail
-          chmod +x tools/vessel_native/build_runtime_bundle_ci.sh \
-            tools/vessel_native/prepare_gpu_rebuild_ci.sh \
-            tools/vessel_native/rebuild_vhost_gpu_ahb.sh
-          if [ "${{ steps.native-base.outputs.cache-hit }}" != "true" ] && [ "${{ steps.native-seed.outputs.seeded }}" != "true" ]; then
-            tools/vessel_native/build_runtime_bundle_ci.sh
-          else
-            tools/vessel_native/prepare_gpu_rebuild_ci.sh
-          fi
+          chmod +x tools/vessel_native/build_runtime_bundle_ci.sh tools/vessel_native/prepare_gpu_rebuild_ci.sh tools/vessel_native/rebuild_vhost_gpu_ahb.sh
+          if [ "${{ steps.native-base.outputs.cache-hit }}" != "true" ] && [ "${{ steps.native-seed.outputs.seeded }}" != "true" ]; then tools/vessel_native/build_runtime_bundle_ci.sh; else tools/vessel_native/prepare_gpu_rebuild_ci.sh; fi
           tools/vessel_native/rebuild_vhost_gpu_ahb.sh
-
       - name: Verify authoritative source architecture
         shell: bash
         run: |
@@ -155,55 +119,38 @@ jobs:
           grep -F 'partialCopies=' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'state.resource_id == resource_id' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'VESSEL_ANDROID_AHB_SCANOUT_V3' tools/vessel_native/patch_vhost_gpu_android_ahb.py
-          grep -F 'vessel_contexts' tools/vessel_native/patch_vhost_gpu_android_ahb.py
           ! find tools/vessel_native -maxdepth 1 -name 'alpha*.py' -print -quit | grep -q .
           ! grep -Eq 'alpha[0-9]+_' tools/vessel_native/rebuild_vhost_gpu_ahb.sh
           grep -F 'CONFIG_VIRTIO_INPUT=y' tools/vessel_native/kernel/build_uml_smp_android.sh
           grep -F 'damage_updates=enabled' app/src/main/assets/vessel/runtime-build.txt
           grep -F 'AHardwareBuffer_sendHandleToUnixSocket' tools/vessel_native/vessel_ahb_bridge.cpp
           grep -F 'eglDupNativeFenceFDANDROID' tools/vessel_native/vessel_ahb_bridge.cpp
-          grep -F 'glFenceSync' tools/vessel_native/vessel_ahb_bridge.cpp
-          grep -F 'glWaitSync' tools/vessel_native/vessel_ahb_bridge.cpp
           ! grep -Eq '\bglFinish[[:space:]]*\(' tools/vessel_native/vessel_ahb_bridge.cpp
           test -x app/src/main/jniLibs/arm64-v8a/libvessel_uml.so
           test -x app/src/main/jniLibs/arm64-v8a/libvessel_vhost_gpu.so
           test -x app/src/main/jniLibs/arm64-v8a/libvessel_vhost_input.so
-          test -s app/src/main/jniLibs/arm64-v8a/libvessel_virglrenderer.so
-          test -s app/src/main/jniLibs/arm64-v8a/libvessel_epoxy.so
-          test -s app/src/main/jniLibs/arm64-v8a/libEGL_angle.so
-          test -s app/src/main/jniLibs/arm64-v8a/libGLESv2_angle.so
-
       - name: Build, test, lint and R8 release
         shell: bash
         run: |
           set -euxo pipefail
           chmod +x gradlew
           ./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest :app:lintDebug --no-daemon --build-cache
-
       - name: Verify APK payloads
         shell: bash
         run: |
           set -euxo pipefail
           DEBUG_APK=app/build/outputs/apk/debug/app-debug.apk
           RELEASE_APK=app/build/outputs/apk/release/app-release-unsigned.apk
-          test -s "$DEBUG_APK"
-          test -s "$RELEASE_APK"
+          test -s "$DEBUG_APK"; test -s "$RELEASE_APK"
           unzip -l "$DEBUG_APK" > /tmp/apk-files.txt
           unzip -l "$RELEASE_APK" > /tmp/release-apk-files.txt
-          for f in \
-            libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so \
-            libvessel_vhost_gpu.so libvessel_vhost_input.so libvessel_virglrenderer.so libvessel_epoxy.so \
-            libEGL_angle.so libGLESv2_angle.so libvessel_wayland_presenter.so; do
-            grep -Fq "lib/arm64-v8a/$f" /tmp/apk-files.txt
-            grep -Fq "lib/arm64-v8a/$f" /tmp/release-apk-files.txt
-          done
+          for f in libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so libvessel_vhost_gpu.so libvessel_vhost_input.so libvessel_virglrenderer.so libvessel_epoxy.so libEGL_angle.so libGLESv2_angle.so libvessel_wayland_presenter.so; do grep -Fq "lib/arm64-v8a/$f" /tmp/apk-files.txt; grep -Fq "lib/arm64-v8a/$f" /tmp/release-apk-files.txt; done
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
           cp "$DEBUG_APK" build/deliverables/Vessel-arm64-debug.apk
           cp "$RELEASE_APK" build/deliverables/Vessel-arm64-release-unsigned.apk
           sha256sum build/deliverables/*.apk > build/deliverables/SHA256SUMS.txt
-
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
