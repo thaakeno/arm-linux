@@ -121,8 +121,8 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
             super.onDraw(canvas)
             if (pointerMode != PointerMode.TRACKPAD || !VesselWaylandPresenter.cursorVisible()) return
             val b = bitmap ?: return
-            val gw = VesselDisplayRouter.guestWidth(context).coerceAtLeast(1)
-            val gh = VesselDisplayRouter.guestHeight(context).coerceAtLeast(1)
+            val gw = VesselWaylandPresenter.guestWidth().coerceAtLeast(1)
+            val gh = VesselWaylandPresenter.guestHeight().coerceAtLeast(1)
             val scale = min(width.toFloat() / gw, height.toFloat() / gh).coerceAtLeast(0.0001f)
             val ox = (width - gw * scale) / 2f
             val oy = (height - gh * scale) / 2f
@@ -169,13 +169,13 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     override fun surfaceCreated(holder: SurfaceHolder) {
         surfaceView.requestFocus()
         if (!surfaceAttached) {
-            VesselDisplayRouter.attach(context, holder.surface)
+            VesselWaylandPresenter.attach(holder.surface)
             surfaceAttached = true
         }
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        VesselDisplayRouter.surfaceChanged(context, width, height)
+        VesselWaylandPresenter.surfaceChanged(width, height)
         val refresh = (display?.supportedModes?.maxOfOrNull { it.refreshRate }
             ?: display?.refreshRate ?: 60f)
             .coerceAtMost(VesselExperimentConfig.refreshHz(context).toFloat())
@@ -198,7 +198,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     private fun detachSurfaceOnce() {
         if (surfaceAttached) {
             surfaceAttached = false
-            VesselDisplayRouter.detach(context)
+            VesselWaylandPresenter.detach()
         }
     }
 
@@ -226,8 +226,8 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     }
 
     private fun mapped(x: Float, y: Float): Pair<Float, Float> {
-        val gw = VesselDisplayRouter.guestWidth(context).coerceAtLeast(1)
-        val gh = VesselDisplayRouter.guestHeight(context).coerceAtLeast(1)
+        val gw = VesselWaylandPresenter.guestWidth().coerceAtLeast(1)
+        val gh = VesselWaylandPresenter.guestHeight().coerceAtLeast(1)
         val scale = min(width.toFloat() / gw, height.toFloat() / gh).coerceAtLeast(0.0001f)
         val ox = (width - gw * scale) / 2f
         val oy = (height - gh * scale) / 2f
@@ -238,8 +238,8 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     }
 
     private fun pointerGain(): Float {
-        val gw = VesselDisplayRouter.guestWidth(context).coerceAtLeast(1)
-        val gh = VesselDisplayRouter.guestHeight(context).coerceAtLeast(1)
+        val gw = VesselWaylandPresenter.guestWidth().coerceAtLeast(1)
+        val gh = VesselWaylandPresenter.guestHeight().coerceAtLeast(1)
         val scale = min(width.toFloat() / gw, height.toFloat() / gh).coerceAtLeast(0.0001f)
         return (1f / scale).coerceIn(0.75f, 2.0f)
     }
