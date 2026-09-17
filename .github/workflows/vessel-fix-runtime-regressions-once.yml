@@ -1,0 +1,593 @@
+name: Fix Vessel runtime regressions once
+
+on:
+  push:
+    branches: [arch/vessel-self-contained]
+    paths: [.github/workflows/vessel-fix-runtime-regressions-once.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: arch/vessel-self-contained
+          fetch-depth: 0
+
+      - name: Apply runtime fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def read(path):
+              return Path(path).read_text()
+
+          def write(path, text):
+              Path(path).write_text(text)
+
+          def rep(path, old, new, count=1):
+              text = read(path)
+              found = text.count(old)
+              if found < count:
+                  raise SystemExit(f"{path}: expected at least {count} copies, found {found}: {old[:120]!r}")
+              text = text.replace(old, new, count)
+              write(path, text)
+
+          def sub(path, pattern, replacement, count=1, flags=0):
+              text = read(path)
+              text2, n = re.subn(pattern, replacement, text, count=count, flags=flags)
+              if n != count:
+                  raise SystemExit(f"{path}: regex replacement count {n}, expected {count}: {pattern[:120]!r}")
+              write(path, text2)
+
+          # ------------------------------------------------------------------
+          # GPU: resource IDs changing during virtio-gpu page flips must not
+          # destroy/reallocate the AndroidHardwareBuffer ring every frame.
+          # ------------------------------------------------------------------
+          bridge = 'tools/vessel_native/vessel_ahb_bridge.cpp'
+          rep(bridge, 'constexpr size_t FRAME_SLOTS = 5;', 'constexpr size_t FRAME_SLOTS = 3;')
+          rep(bridge, 'protocol=3 slots=5 syncfd=1 damage=1 resourceSync=1 dropOnBackpressure=1',
+                      'protocol=3 slots=3 syncfd=1 damage=1 resourceSync=1 dropOnBackpressure=1')
+          rep(bridge, 'in_flight<=5 syncfd=1 fullCopies=', 'in_flight<=3 syncfd=1 fullCopies=')
+          rep(bridge,
+              '''    const bool geometry_changed = state.width != width || state.height != height || state.x != x || state.y != y;
+    const bool resource_changed = state.resource_id != 0 && state.resource_id != resource_id;
+    if (geometry_changed || resource_changed) {
+        if (!wait_scanout_idle(state)) return RC_SOCKET;
+        destroy_scanout(state);
+        state.resource_id = resource_id;
+        state.width = width;
+        state.height = height;
+        state.x = x;
+        state.y = y;
+        logi(std::string(resource_changed ? "scanout resource changed; full refresh " : "scanout geometry changed; full refresh ") +
+             std::to_string(width) + "x" + std::to_string(height));
+    } else {
+        state.resource_id = resource_id;
+        state.x = x;
+        state.y = y;
+    }
+''',
+              '''    const bool geometry_changed = state.width != width || state.height != height || state.x != x || state.y != y;
+    const bool resource_changed = state.resource_id != 0 && state.resource_id != resource_id;
+    if (geometry_changed) {
+        // Only a real scanout geometry change invalidates the Android output
+        // ring. KWin page-flips between virtio resources constantly; treating
+        // every new resource id as a new display used to allocate/register AHBs
+        // on practically every frame and stall the vhost-user dispatch thread.
+        if (!wait_scanout_idle(state)) return RC_SOCKET;
+        destroy_scanout(state);
+        state.width = width;
+        state.height = height;
+        state.x = x;
+        state.y = y;
+        logi("scanout geometry changed; rebuilding AHB ring " +
+             std::to_string(width) + "x" + std::to_string(height));
+    } else if (resource_changed) {
+        // SET_SCANOUT is also the virtio-gpu page-flip operation. Keep the
+        // persistent AHB ring and simply make the next copy a full refresh.
+        // Subsequent RESOURCE_FLUSH damage can become partial again instead of
+        // paying AHardwareBuffer allocation/import/registration every frame.
+        const DamageRect full = full_damage(state);
+        for (auto& slot : state.slots) {
+            if (slot.buffer && slot.content_valid) slot.pending_damage = full;
+        }
+    }
+    state.resource_id = resource_id;
+    state.x = x;
+    state.y = y;
+''')
+          rep(bridge,
+              '''    // Never block the vhost-user-gpu dispatch thread waiting for Android. ACKs
+    // are opportunistically retired; if all five source buffers are still in
+    // flight we drop this presentation update and carry its damage forward.
+''',
+              '''    // Never block the vhost-user-gpu dispatch thread waiting for Android. ACKs
+    // are opportunistically retired; if every source buffer is still in
+    // flight we drop this presentation update and carry its damage forward.
+''')
+
+          presenter = 'app/src/main/cpp/vessel_ahb_presenter.cpp'
+          rep(presenter, 'constexpr uint32_t FRAME_SLOTS = 5;', 'constexpr uint32_t FRAME_SLOTS = 3;')
+          rep(presenter, 'constexpr uint32_t FRAMES_IN_FLIGHT = 5;', 'constexpr uint32_t FRAMES_IN_FLIGHT = 3;')
+
+          # ------------------------------------------------------------------
+          # Trackpad: preserve individual REL packets. Combining them changes
+          # libinput's velocity estimate and turns short finger moves into huge
+          # accelerated jumps. Also remove the fake Android-side cursor predictor
+          # which fought the real KWin/libinput cursor and snapped back after 50ms.
+          # ------------------------------------------------------------------
+          input_cpp = 'app/src/main/cpp/vessel_virtio_input.cpp'
+          rep(input_cpp,
+              '''                if (packet.kind == PacketKind::Relative && last.kind == PacketKind::Relative &&
+                    last.which == packet.which && last.events.size() >= 3 && packet.events.size() >= 3) {
+                    const int32_t dx = signed_value(last.events[0].value) + signed_value(packet.events[0].value);
+                    const int32_t dy = signed_value(last.events[1].value) + signed_value(packet.events[1].value);
+                    last.events[0].value = bits(dx);
+                    last.events[1].value = bits(dy);
+                    cv.notify_one();
+                    return true;
+                }
+''',
+              '''                // Do not merge relative pointer packets. libinput acceleration is
+                // velocity/time based, so collapsing several small moves into one large
+                // delta creates the exact teleport/jump behaviour a trackpad must avoid.
+''')
+
+          desktop_view = 'app/src/main/java/com/example/dreamlinux/LinuxDesktopView.kt'
+          rep(desktop_view,
+              '''    private var predictedCursorX = Float.NaN
+    private var predictedCursorY = Float.NaN
+    private var cursorPredictionUntil = 0L
+''', '')
+          rep(desktop_view,
+              '''            val predictionActive = SystemClock.uptimeMillis() <= cursorPredictionUntil && predictedCursorX.isFinite() && predictedCursorY.isFinite()
+            val cursorX = if (predictionActive) predictedCursorX else VesselWaylandPresenter.cursorX().toFloat()
+            val rawY = if (predictionActive) predictedCursorY else VesselWaylandPresenter.cursorY().toFloat()
+''',
+              '''            // KWin/libinput is authoritative. A local predictor cannot reproduce
+            // libinput acceleration and used to snap the cursor backwards/forwards.
+            val cursorX = VesselWaylandPresenter.cursorX().toFloat()
+            val rawY = VesselWaylandPresenter.cursorY().toFloat()
+''')
+          sub(desktop_view,
+              r'''\n    private fun beginCursorPrediction\(\) \{.*?\n    private fun touch\(e: MotionEvent\): Boolean \{''',
+              '\n    private fun touch(e: MotionEvent): Boolean {',
+              flags=re.S)
+          rep(desktop_view, '                beginCursorPrediction()\n', '')
+          rep(desktop_view, '                    predictCursorRelative(dx, dy)\n', '')
+          rep(desktop_view, '                cursorPredictionUntil = SystemClock.uptimeMillis() + 50L\n', '')
+          rep(desktop_view,
+              '                    VesselVirtioInput.relative(dx * 1.25f, dy * 1.25f * if (VesselExperimentConfig.invertPointerY(context)) -1f else 1f)\n',
+              '                    VesselVirtioInput.relative(dx, dy * if (VesselExperimentConfig.invertPointerY(context)) -1f else 1f)\n')
+
+          # ------------------------------------------------------------------
+          # Firefox + boot path. The current profile explicitly used Linux
+          # sandbox level 1, which is a known bad combination on some arm64
+          # environments. Do not force that sandbox inside Vessel's already
+          # isolated guest, and make cursor theme/size explicit for Wayland/XWayland.
+          # Healthy persistent machines now skip dpkg recovery and heavyweight
+          # package validation using a verified readiness marker.
+          # ------------------------------------------------------------------
+          runtime = 'app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt'
+          rep(runtime, 'const val REVISION = "v57-one-final-tty-rpc-r1"', 'const val REVISION = "v58-smooth-pageflip-input-browser-r1"')
+          rep(runtime, 'const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahb-async-surface-v6"', 'const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahb-pageflip-ring-v7"')
+          rep(runtime, '            user_pref("security.sandbox.content.level", 1);', '            user_pref("security.sandbox.content.level", 0);')
+          rep(runtime,
+              '''            export MOZ_ENABLE_WAYLAND=1
+            export MOZ_WEBRENDER=1
+            export MOZ_ACCELERATED=1
+            unset MOZ_X11_EGL
+''',
+              '''            export MOZ_ENABLE_WAYLAND=1
+            export MOZ_WEBRENDER=1
+            export MOZ_ACCELERATED=1
+            export MOZ_DISABLE_CONTENT_SANDBOX=1
+            export XCURSOR_THEME=Breeze
+            export XCURSOR_SIZE=24
+            unset MOZ_X11_EGL
+''', 1)
+          rep(runtime,
+              '''            export MOZ_ENABLE_WAYLAND=1 MOZ_WEBRENDER=1 MOZ_ACCELERATED=1
+            unset DISPLAY MOZ_X11_EGL
+''',
+              '''            export MOZ_ENABLE_WAYLAND=1 MOZ_WEBRENDER=1 MOZ_ACCELERATED=1 MOZ_DISABLE_CONTENT_SANDBOX=1
+            export XCURSOR_THEME=Breeze XCURSOR_SIZE=24
+            unset DISPLAY MOZ_X11_EGL
+''', 1)
+
+          old_plasma_start = '''    private fun ensurePlasma() {
+        recoverPackageState()
+        progress("plasma", 55, "Checking KDE Plasma Wayland workstation")
+        if (guestBlocking(plasmaReadyCommand(), 20).first == 0) {
+            append("[plasma] complete KDE Plasma Wayland/Xwayland workstation already ready\\n")
+            return
+        }
+        progress("plasma_install", 56, "Installing native Wayland Plasma workstation")
+'''
+          new_plasma_start = '''    private fun ensurePlasma() {
+        val readyMarker = "/var/cache/vessel/plasma-ready-v58"
+        progress("plasma", 53, "Checking persistent Plasma workstation")
+        val fastReady = guestBlocking(
+            "test -f $readyMarker && command -v kwin_wayland >/dev/null 2>&1 && command -v startplasma-wayland >/dev/null 2>&1 && test -c /dev/dri/card0",
+            5,
+        )
+        if (fastReady.first == 0) {
+            append("[plasma] fast-path marker valid; skipped dpkg/APT validation\\n")
+            return
+        }
+        if (guestBlocking(plasmaReadyCommand(), 15).first == 0) {
+            guestBlocking("install -d -m 755 /var/cache/vessel; touch $readyMarker", 5)
+            append("[plasma] existing workstation validated; wrote fast-path marker\\n")
+            return
+        }
+        // Only touch dpkg recovery when validation actually failed. Running
+        // dpkg --configure -a on every healthy boot made a persistent PC feel
+        // like an installer.
+        recoverPackageState()
+        if (guestBlocking(plasmaReadyCommand(), 20).first == 0) {
+            guestBlocking("install -d -m 755 /var/cache/vessel; touch $readyMarker", 5)
+            append("[plasma] package recovery restored workstation without reinstall\\n")
+            return
+        }
+        progress("plasma_install", 56, "Installing missing Plasma components")
+'''
+          rep(runtime, old_plasma_start, new_plasma_start)
+          rep(runtime,
+              '''        val metadataRefresh = guestBlocking(
+            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update >/tmp/vessel-apt-icons.log 2>&1; appstreamcli refresh-cache --force >/tmp/vessel-appstream-refresh.log 2>&1 || true",
+            300,
+        )
+''',
+              '''        val metadataRefresh = guestBlocking(
+            "appstreamcli refresh-cache --force >/tmp/vessel-appstream-refresh.log 2>&1 || true",
+            120,
+        )
+''')
+          rep(runtime,
+              '''        val verify = guestBlocking(plasmaReadyCommand(), 30)
+        if (verify.first != 0) { append("[plasma] validation failed ${verify.second.takeLast(6000)}\\n"); error("Plasma Wayland runtime validation failed") }
+        progress("plasma_ready", 72, "KDE Plasma Wayland workstation ready")
+''',
+              '''        val verify = guestBlocking(plasmaReadyCommand(), 30)
+        if (verify.first != 0) { append("[plasma] validation failed ${verify.second.takeLast(6000)}\\n"); error("Plasma Wayland runtime validation failed") }
+        guestBlocking("install -d -m 755 /var/cache/vessel; touch $readyMarker", 5)
+        progress("plasma_ready", 72, "KDE Plasma Wayland workstation ready")
+''')
+
+          # ------------------------------------------------------------------
+          # AppStream icon coverage: Bookworm/other AppStream layouts may place
+          # cached icons under /var/lib as well as /var/cache. Keep the helper
+          # cache versioned so existing machines rebuild once.
+          # ------------------------------------------------------------------
+          discovery = 'app/src/main/assets/vessel/app_discovery_v3.py'
+          rep(discovery, 'CACHE_VERSION = 3', 'CACHE_VERSION = 4')
+          rep(discovery, 'CACHE_PATH = "/var/cache/vessel/app-catalog-v3.json"', 'CACHE_PATH = "/var/cache/vessel/app-catalog-v4.json"')
+          rep(discovery,
+              '''        "/var/cache/app-info/icons/*/64x64/{name}", "/var/cache/app-info/icons/*/128x128/{name}",
+        "/var/cache/app-info/icons/*/128x128@2/{name}", "/var/cache/swcatalog/icons/*/64x64/{name}",
+        "/var/cache/swcatalog/icons/*/128x128/{name}", "/var/cache/swcatalog/icons/*/128x128@2/{name}",
+''',
+              '''        "/var/cache/app-info/icons/*/64x64/{name}", "/var/cache/app-info/icons/*/128x128/{name}",
+        "/var/cache/app-info/icons/*/128x128@2/{name}", "/var/lib/app-info/icons/*/64x64/{name}",
+        "/var/lib/app-info/icons/*/128x128/{name}", "/var/lib/app-info/icons/*/128x128@2/{name}",
+        "/var/cache/swcatalog/icons/*/64x64/{name}", "/var/cache/swcatalog/icons/*/128x128/{name}",
+        "/var/cache/swcatalog/icons/*/128x128@2/{name}", "/var/lib/swcatalog/icons/*/64x64/{name}",
+        "/var/lib/swcatalog/icons/*/128x128/{name}", "/var/lib/swcatalog/icons/*/128x128@2/{name}",
+''')
+
+          # ------------------------------------------------------------------
+          # App Store progress + System Info launcher + fast post-boot profile.
+          # ------------------------------------------------------------------
+          service = 'app/src/main/java/com/example/dreamlinux/VmSessionService.kt'
+          rep(service,
+              '''    val loading: Boolean = false,
+    val busyPackage: String = "",
+    val error: String = "",
+''',
+              '''    val loading: Boolean = false,
+    val busyPackage: String = "",
+    val operationProgress: Int = 0,
+    val operationDetail: String = "",
+    val error: String = "",
+''')
+          rep(service, 'runtimeRevision = "v57-one-final-tty-rpc-r1"', 'runtimeRevision = "v58-smooth-pageflip-input-browser-r1"', 2)
+          rep(service, 'displayTransport = "vhost-user-gpu-ahb-async-surface-v6"', 'displayTransport = "vhost-user-gpu-ahb-pageflip-ring-v7"', 2)
+          rep(service,
+              '''            printf '%s\\n' 'unset MOZ_X11_EGL' 'export MOZ_ENABLE_WAYLAND=1' 'export MOZ_WEBRENDER=1' 'export GDK_BACKEND=wayland' 'export QT_QPA_PLATFORM=wayland' >/etc/profile.d/vessel-gpu.sh
+''',
+              '''            printf '%s\\n' 'unset MOZ_X11_EGL' 'export MOZ_ENABLE_WAYLAND=1' 'export MOZ_WEBRENDER=1' 'export MOZ_DISABLE_CONTENT_SANDBOX=1' 'export XCURSOR_THEME=Breeze' 'export XCURSOR_SIZE=24' 'export GDK_BACKEND=wayland' 'export QT_QPA_PLATFORM=wayland' >/etc/profile.d/vessel-gpu.sh
+''')
+          rep(service,
+              '''            su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" >/tmp/vessel-sycoca.log 2>&1
+            ready=0
+''',
+              '''            if [ ! -f "${'$'}marker" ]; then
+              su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" >/tmp/vessel-sycoca.log 2>&1
+            fi
+            ready=0
+''')
+
+          # Add a workstation fast marker before doing expensive icon/menu cache work next boot.
+          rep(service,
+              '''    private suspend fun ensureWorkstation(op: Long) {
+        if (op != operationGeneration) return
+        state.value = state.value.copy(
+''',
+              '''    private suspend fun ensureWorkstation(op: Long) {
+        if (op != operationGeneration) return
+        val fastMarker = runtime.guest(
+            "test -f /var/cache/vessel/workstation-v58 && test -f /etc/xdg/menus/kf5-applications.menu && test -d /usr/share/icons/breeze",
+            5,
+        )
+        if (fastMarker.optBoolean("ok")) return
+        state.value = state.value.copy(
+''')
+          rep(service,
+              '''            echo VESSEL_WORKSTATION_READY
+''',
+              '''            touch /var/cache/vessel/workstation-v58
+            echo VESSEL_WORKSTATION_READY
+''', 1)
+          rep(service, 'marker=/home/vessel/.config/.vessel-workstation-2.1-alpha3', 'marker=/home/vessel/.config/.vessel-workstation-v58')
+
+          # Replace the blocking opaque app operation with explicit phases. APT
+          # itself still owns package correctness; the UI now shows a real active
+          # progress indicator instead of a mystery ellipsis, and apt metadata is
+          # refreshed only when stale.
+          sub(service,
+              r'''    private fun changeApp\(packageName: String, install: Boolean\) \{.*?\n    private fun decodeField''',
+              '''    private fun changeApp(packageName: String, install: Boolean) {
+        if (!PACKAGE_RE.matches(packageName) || !state.value.running || !state.value.guestReady) return
+        appStore.value = appStore.value.copy(
+            busyPackage = packageName,
+            operationProgress = 8,
+            operationDetail = "Checking Debian package state",
+            error = "",
+        )
+        scope.launch(Dispatchers.IO) {
+            try {
+                val policy = "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; mkdir -p /usr/sbin /var/cache/vessel; " +
+                    "printf '#!/bin/sh\\\\nexit 101\\\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; "
+                if (install) {
+                    val freshLists = runtime.guest(
+                        "find /var/lib/apt/lists -type f -mmin -360 -print -quit 2>/dev/null | grep -q .",
+                        10,
+                    ).optBoolean("ok")
+                    if (!freshLists) {
+                        appStore.value = appStore.value.copy(
+                            operationProgress = -1,
+                            operationDetail = "Refreshing Debian package metadata",
+                        )
+                        val update = runtime.guest(
+                            policy + "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update",
+                            600,
+                        )
+                        check(update.optBoolean("ok")) { "APT update returned rc=${update.optInt("rc", -1)}" }
+                    }
+                    appStore.value = appStore.value.copy(
+                        operationProgress = -1,
+                        operationDetail = "Downloading and installing $packageName",
+                    )
+                } else {
+                    appStore.value = appStore.value.copy(
+                        operationProgress = -1,
+                        operationDetail = "Removing $packageName",
+                    )
+                }
+                val action = if (install) {
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y ${shellQuote(packageName)}"
+                } else {
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 remove -y ${shellQuote(packageName)}"
+                }
+                val result = runtime.guest(policy + action, 1800)
+                check(result.optBoolean("ok")) { "APT returned rc=${result.optInt("rc", -1)}: ${result.optString("output").takeLast(1800)}" }
+                appStore.value = appStore.value.copy(
+                    operationProgress = 92,
+                    operationDetail = "Refreshing desktop and AppStream caches",
+                )
+                runtime.guest(
+                    "update-desktop-database /usr/share/applications 2>/dev/null || true; " +
+                        "appstreamcli refresh-cache --force >/dev/null 2>&1 || true; " +
+                        "rm -f /var/cache/vessel/app-catalog-v3.json /var/cache/vessel/app-catalog-v4.json; " +
+                        "su -l vessel -c 'kbuildsycoca5 --noincremental' 2>/dev/null || true",
+                    120,
+                )
+                refreshApps(appStore.value.query, appStore.value.sort, appStore.value.category)
+                refreshSystemStats(silent = true)
+            } catch (t: Throwable) {
+                appStore.value = appStore.value.copy(error = t.message ?: "APT operation failed")
+            } finally {
+                appStore.value = appStore.value.copy(
+                    busyPackage = "",
+                    operationProgress = 0,
+                    operationDetail = "",
+                )
+            }
+        }
+    }
+
+    fun launchSystemInfo() {
+        if (!state.value.running || !state.value.guestReady) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                var available = runtime.guest("command -v kinfocenter >/dev/null 2>&1", 10).optBoolean("ok")
+                if (!available) {
+                    state.value = state.value.copy(message = "Installing KDE Info Center once")
+                    val result = runtime.guest(
+                        "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
+                            "find /var/lib/apt/lists -type f -mmin -360 -print -quit 2>/dev/null | grep -q . || apt-get -o Dpkg::Use-Pty=0 update >/dev/null; " +
+                            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y kinfocenter",
+                        900,
+                    )
+                    available = result.optBoolean("ok")
+                    check(available) { "Could not install kinfocenter: ${result.optString("output").takeLast(1600)}" }
+                }
+                val launched = runtime.guest(
+                    """
+                    set -e
+                    pid=${'$'}(pgrep -u vessel -x plasmashell | head -1)
+                    test -n "${'$'}pid"
+                    envfile=/proc/${'$'}pid/environ
+                    xdg=${'$'}(tr '\\0' '\\n' <"${'$'}envfile" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -1)
+                    way=${'$'}(tr '\\0' '\\n' <"${'$'}envfile" | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)
+                    bus=${'$'}(tr '\\0' '\\n' <"${'$'}envfile" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
+                    test -n "${'$'}xdg"; test -n "${'$'}way"; test -n "${'$'}bus"
+                    su -l vessel -c "XDG_RUNTIME_DIR='${'$'}xdg' WAYLAND_DISPLAY='${'$'}way' DBUS_SESSION_BUS_ADDRESS='${'$'}bus' QT_QPA_PLATFORM=wayland XCURSOR_THEME=Breeze XCURSOR_SIZE=24 setsid -f kinfocenter >/tmp/vessel-kinfocenter.log 2>&1"
+                    echo VESSEL_KINFOCENTER_STARTED
+                    """.trimIndent(),
+                    30,
+                )
+                check(launched.optBoolean("ok")) { "KInfoCenter launch failed: ${launched.optString("output").takeLast(1600)}" }
+                state.value = state.value.copy(message = "KDE Info Center opened")
+            } catch (t: Throwable) {
+                state.value = state.value.copy(lastError = t.message ?: "Could not open KDE Info Center")
+            }
+        }
+    }
+
+    private fun decodeField''',
+              flags=re.S)
+
+          # ------------------------------------------------------------------
+          # UI: show per-app operation progress and expose Linux specs directly.
+          # ------------------------------------------------------------------
+          activity = 'app/src/main/java/com/example/dreamlinux/VesselActivity.kt'
+          rep(activity, 'items(store.apps, key = { it.packageName }) { app -> AppCard(app, store.busyPackage) }',
+                        'items(store.apps, key = { it.packageName }) { app -> AppCard(app, store) }')
+          sub(activity,
+              r'''    @Composable\n    private fun AppCard\(app: GuestApp, busyPackage: String\) \{.*?\n    @Composable\n    private fun TerminalPage''',
+              '''    @Composable
+    private fun AppCard(app: GuestApp, store: AppStoreState) {
+        val image = remember(app.iconBase64) {
+            runCatching {
+                if (app.iconBase64.isBlank()) null else {
+                    val bytes = Base64.decode(app.iconBase64, Base64.DEFAULT)
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                }
+            }.getOrNull()
+        }
+        val busy = store.busyPackage == app.packageName
+        ElevatedCard(shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.fillMaxWidth().padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+                    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.size(56.dp)) {
+                        if (image != null) {
+                            Image(image, app.name, Modifier.fillMaxSize().padding(7.dp), contentScale = ContentScale.Fit)
+                        } else {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Laptop, null, tint = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            Text(app.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (app.installed) StatusPill("INSTALLED", true)
+                        }
+                        Text(app.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            buildString {
+                                append(app.category)
+                                append(" · ")
+                                append(app.packageName)
+                                if (app.installedSizeKb > 0) append(" · ${formatMb(app.installedSizeKb)} installed size")
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (app.installed) {
+                        OutlinedButton(onClick = { VmSessionService.active?.removeApp(app.packageName) }, enabled = store.busyPackage.isBlank()) {
+                            Text(if (busy) "Removing" else "Remove")
+                        }
+                    } else {
+                        Button(onClick = { VmSessionService.active?.installApp(app.packageName) }, enabled = store.busyPackage.isBlank()) {
+                            Text(if (busy) "Installing" else "Install")
+                        }
+                    }
+                }
+                if (busy) {
+                    if (store.operationProgress < 0) {
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { store.operationProgress.coerceIn(0, 100) / 100f },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    Text(
+                        store.operationDetail.ifBlank { "Working…" },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun TerminalPage''',
+              flags=re.S)
+          rep(activity,
+              '''                    Metric(Icons.Default.DesktopWindows, "Display", "${state.guestDisplayWidth} × ${state.guestDisplayHeight} stable landscape · up to 120 Hz")
+                    Metric(Icons.Default.Bolt, "Graphics", state.graphics)
+''',
+              '''                    Metric(Icons.Default.DesktopWindows, "Display", "${state.guestDisplayWidth} × ${state.guestDisplayHeight} stable landscape · up to 120 Hz")
+                    Metric(Icons.Default.Bolt, "Graphics", state.graphics)
+                    OutlinedButton(
+                        onClick = { VmSessionService.active?.launchSystemInfo() },
+                        enabled = state.guestReady && !state.busy,
+                    ) {
+                        Icon(Icons.Default.Memory, null)
+                        Spacer(Modifier.width(7.dp))
+                        Text("Linux specs")
+                    }
+                    Text("Opens KDE Info Center inside the running Linux desktop.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+''', 1)
+
+          # CI assertions should guard the new architecture rather than the
+          # predictor/churn we intentionally removed.
+          workflow = '.github/workflows/vessel-self-contained.yml'
+          rep(workflow, "          grep -F 'predictedCursorX' app/src/main/java/com/example/dreamlinux/LinuxDesktopView.kt\n",
+                        "          ! grep -Fq 'predictedCursorX' app/src/main/java/com/example/dreamlinux/LinuxDesktopView.kt\n")
+          rep(workflow,
+              "          grep -F 'partialCopies=' tools/vessel_native/vessel_ahb_bridge.cpp\n",
+              "          grep -F 'partialCopies=' tools/vessel_native/vessel_ahb_bridge.cpp\n          grep -F 'FRAME_SLOTS = 3' tools/vessel_native/vessel_ahb_bridge.cpp\n          grep -F 'resource_changed' tools/vessel_native/vessel_ahb_bridge.cpp\n          grep -F 'security.sandbox.content.level\\\", 0' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt\n")
+
+          # The one-shot workflow deletes itself in the same commit as the fix.
+          Path('.github/workflows/vessel-fix-runtime-regressions-once.yml').unlink()
+
+          # Sanity checks before committing.
+          assert 'predictedCursorX' not in read(desktop_view)
+          assert 'FRAME_SLOTS = 3' in read(bridge)
+          assert 'geometry_changed || resource_changed' not in read(bridge)
+          assert 'security.sandbox.content.level", 0' in read(runtime)
+          assert 'launchSystemInfo' in read(service)
+          assert 'operationProgress' in read(activity)
+          PY
+
+          git diff --check
+          git status --short
+
+      - name: Kotlin compile check
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest --no-daemon --build-cache
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "fix(vessel): smooth pageflips input apps and browser"
+          git push origin HEAD:arch/vessel-self-contained
