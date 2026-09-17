@@ -96,6 +96,7 @@ struct BufferSlot {
 
 struct ScanoutState {
     std::array<BufferSlot, FRAME_SLOTS> slots{};
+    uint32_t resource_id = 0;
     uint32_t x = 0;
     uint32_t y = 0;
     uint32_t width = 0;
@@ -574,15 +575,20 @@ int send_frame(uint32_t scanout_id, uint32_t slot_index, ScanoutState& state, in
 int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint32_t y,
                     uint32_t width, uint32_t height, const DamageRect& incoming_damage) {
     auto& state = g_scanouts[scanout_id];
-    if (state.width != width || state.height != height) {
+    const bool geometry_changed = state.width != width || state.height != height || state.x != x || state.y != y;
+    const bool resource_changed = state.resource_id != 0 && state.resource_id != resource_id;
+    if (geometry_changed || resource_changed) {
         if (!wait_scanout_idle(state)) return RC_SOCKET;
         destroy_scanout(state);
+        state.resource_id = resource_id;
         state.width = width;
         state.height = height;
         state.x = x;
         state.y = y;
-        logi("scanout resized to stable frame " + std::to_string(width) + "x" + std::to_string(height));
+        logi(std::string(resource_changed ? "scanout resource changed; full refresh " : "scanout geometry changed; full refresh ") +
+             std::to_string(width) + "x" + std::to_string(height));
     } else {
+        state.resource_id = resource_id;
         state.x = x;
         state.y = y;
     }
@@ -657,6 +663,16 @@ extern "C" int vessel_ahb_wait_context(uint32_t ctx_id) {
 extern "C" int vessel_ahb_set_scanout(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> guard(g_lock);
     if (scanout_id >= MAX_SCANOUTS || !width || !height) return EINVAL;
+    auto& state = g_scanouts[scanout_id];
+    if (state.resource_id == resource_id && state.x == x && state.y == y &&
+        state.width == width && state.height == height) {
+        // KWin/virtio-gpu may repeat SET_SCANOUT without changing the
+        // scanout. Re-copying the entire frame here destroys damage
+        // tracking and was the reason runtime logs showed only
+        // fullCopies. FLUSH_RESOURCE owns content updates after the
+        // first scanout bind.
+        return 0;
+    }
     const DamageRect full = full_damage(width, height);
     const int rc = submit_resource(resource_id, scanout_id, x, y, width, height, full);
     if (rc) loge("SET_SCANOUT failed resource=" + std::to_string(resource_id) + " rc=" + std::to_string(rc));
