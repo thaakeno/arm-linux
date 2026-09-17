@@ -52,7 +52,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.github.luben.zstd.ZstdInputStream
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONObject
-import java.io.DigestInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -60,6 +59,7 @@ import java.io.RandomAccessFile
 import java.io.SequenceInputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
