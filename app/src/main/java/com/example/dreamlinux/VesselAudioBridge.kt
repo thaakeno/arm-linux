@@ -34,10 +34,10 @@ object VesselAudioBridge {
     @Volatile private var lastError = ""
     @Volatile private var spatialStatus = "spatializer unavailable"
 
-    fun start(context: Context, bindAddress: String = "127.0.0.1") {
+    fun start(context: Context) {
         appContext = context.applicationContext
         if (!started.compareAndSet(false, true)) return
-        val srv = ServerSocket(0, 4, InetAddress.getByName(bindAddress))
+        val srv = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"))
         server = srv
         refreshSpatialStatus(null, null)
         Thread({ acceptLoop(srv) }, "vessel-audio-accept").apply {
