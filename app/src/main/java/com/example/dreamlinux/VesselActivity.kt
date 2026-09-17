@@ -17,11 +17,12 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -30,6 +31,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -72,7 +74,6 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -89,7 +90,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -273,7 +276,7 @@ class VesselActivity : ComponentActivity() {
                         StatusPill(when { stopping -> "STOPPING"; state.running -> "LIVE"; state.busy -> "STARTING"; else -> "OFF" }, canStop)
                     }
                     if (state.lastError.isNotBlank()) ErrorStrip(state.lastError)
-                    if (!state.storageReady) ErrorStrip("Vessel needs file access once so the persistent Linux disk can live in Download/LinuxPC.")
+                    if (!state.storageReady) ErrorStrip("Vessel cannot access its private Linux storage yet.")
                     if (state.busy || state.running) ProgressBlock(state)
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
@@ -287,7 +290,7 @@ class VesselActivity : ComponentActivity() {
                                 stopping -> "Stopping…"
                                 state.busy && !state.running -> "Cancel startup"
                                 state.running -> "Stop Linux"
-                                !state.storageReady -> "Grant storage"
+                                !state.storageReady -> "Storage unavailable"
                                 else -> "Start Linux"
                             })
                         }
@@ -306,7 +309,7 @@ class VesselActivity : ComponentActivity() {
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                     Metric(Icons.Default.DesktopWindows, "Android Surface", state.presenterStatus)
                     Metric(Icons.Default.Wifi, "Network", state.internetStage)
-                    Metric(Icons.Default.Storage, "Disk", "Persistent sparse ext4 · safe auto-grow")
+                    Metric(Icons.Default.Storage, "Disk", "Private persistent sparse ext4 · safe auto-grow")
                 }
             }
             LogCard(state)
@@ -316,7 +319,6 @@ class VesselActivity : ComponentActivity() {
     @Composable
     private fun DesktopPage(state: SessionState, fullscreen: () -> Unit) {
         var mode by remember { mutableStateOf(LinuxDesktopView.PointerMode.DIRECT) }
-        var displayScale by remember { mutableStateOf(1f) }
         Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -338,15 +340,43 @@ class VesselActivity : ComponentActivity() {
             }
             if (state.running || state.busy) {
                 DesktopControls(mode, { newMode -> mode = newMode; LinuxDesktopView.active?.setPointerMode(newMode) }, fullscreen)
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    val aspect = (state.guestDisplayWidth.coerceAtLeast(1).toFloat() / state.guestDisplayHeight.coerceAtLeast(1).toFloat()).coerceIn(1.2f, 3.0f)
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(displayScale).aspectRatio(aspect).align(Alignment.Center),
-                        color = Color.Black,
-                        shape = RoundedCornerShape(20.dp),
-                        tonalElevation = 6.dp,
+                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                    val maxAreaDp = maxHeight.value.coerceAtLeast(220f)
+                    val minTotalDp = minOf(220f, maxAreaDp)
+                    var topDp by remember { mutableStateOf<Float?>(null) }
+                    var totalHeightDp by remember { mutableStateOf<Float?>(null) }
+                    val defaultTop = maxAreaDp * 0.06f
+                    val defaultTotal = (maxAreaDp * 0.88f).coerceAtLeast(minTotalDp).coerceAtMost(maxAreaDp - defaultTop)
+                    val resolvedTop = (topDp ?: defaultTop).coerceIn(0f, (maxAreaDp - minTotalDp).coerceAtLeast(0f))
+                    val resolvedTotal = (totalHeightDp ?: defaultTotal).coerceIn(minTotalDp, (maxAreaDp - resolvedTop).coerceAtLeast(minTotalDp))
+
+                    LaunchedEffect(maxAreaDp) {
+                        if (topDp == null || totalHeightDp == null) {
+                            topDp = defaultTop
+                            totalHeightDp = defaultTotal
+                        } else {
+                            val newTop = topDp!!.coerceIn(0f, (maxAreaDp - minTotalDp).coerceAtLeast(0f))
+                            topDp = newTop
+                            totalHeightDp = totalHeightDp!!.coerceIn(minTotalDp, (maxAreaDp - newTop).coerceAtLeast(minTotalDp))
+                        }
+                    }
+
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .offset(y = resolvedTop.dp)
+                            .height(resolvedTotal.dp),
                     ) {
-                        Box(Modifier.fillMaxSize()) {
+                        DisplayResizeHandle { deltaDp ->
+                            val oldTop = topDp ?: resolvedTop
+                            val oldHeight = totalHeightDp ?: resolvedTotal
+                            val maxTop = (oldTop + oldHeight - minTotalDp).coerceAtLeast(0f)
+                            val newTop = (oldTop + deltaDp).coerceIn(0f, minOf(maxTop, maxAreaDp - minTotalDp))
+                            val applied = newTop - oldTop
+                            topDp = newTop
+                            totalHeightDp = (oldHeight - applied).coerceIn(minTotalDp, maxAreaDp - newTop)
+                        }
+                        Box(Modifier.weight(1f).fillMaxWidth().background(Color.Black)) {
                             AndroidView(
                                 modifier = Modifier.fillMaxSize(),
                                 factory = { context -> LinuxDesktopView(context).apply { setPointerMode(mode); requestFocus() } },
@@ -362,11 +392,12 @@ class VesselActivity : ComponentActivity() {
                                 }
                             }
                         }
+                        DisplayResizeHandle { deltaDp ->
+                            val currentTop = topDp ?: resolvedTop
+                            val currentHeight = totalHeightDp ?: resolvedTotal
+                            totalHeightDp = (currentHeight + deltaDp).coerceIn(minTotalDp, maxAreaDp - currentTop)
+                        }
                     }
-                }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Display size", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Slider(value = displayScale, onValueChange = { displayScale = it.coerceIn(0.68f, 1f) }, valueRange = 0.68f..1f, modifier = Modifier.weight(1f))
                 }
                 ExtraKeys()
             } else {
@@ -376,11 +407,33 @@ class VesselActivity : ComponentActivity() {
                             Icon(Icons.Default.DesktopWindows, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary)
                             Text("Linux is stopped")
                             if (state.lastError.isNotBlank()) ErrorStrip(state.lastError)
-                            Button(onClick = { startLinux() }, enabled = !state.busy) { Text(if (state.storageReady) "Start Linux" else "Grant storage") }
+                            Button(onClick = { startLinux() }, enabled = !state.busy) { Text(if (state.storageReady) "Start Linux" else "Storage unavailable") }
                         }
                     }
                 }
             }
+        }
+    }
+
+    @Composable
+    private fun DisplayResizeHandle(onDragDp: (Float) -> Unit) {
+        val density = LocalDensity.current.density
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(14.dp)
+                .pointerInput(density) {
+                    detectVerticalDragGestures { _, dragAmount ->
+                        onDragDp(dragAmount / density)
+                    }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Surface(
+                modifier = Modifier.width(52.dp).height(3.dp),
+                shape = RoundedCornerShape(999.dp),
+                color = MaterialTheme.colorScheme.outline,
+            ) {}
         }
     }
 
@@ -405,29 +458,16 @@ class VesselActivity : ComponentActivity() {
                 controlsVisible = false
             }
         }
-        Box(
-            Modifier.fillMaxSize()
-                .background(Color(0xff030504))
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(8.dp),
-        ) {
-            val aspect = (state.guestDisplayWidth.coerceAtLeast(1).toFloat() / state.guestDisplayHeight.coerceAtLeast(1).toFloat()).coerceIn(1.2f, 3.0f)
-            Surface(
-                modifier = Modifier.fillMaxWidth().aspectRatio(aspect).align(Alignment.Center),
-                color = Color.Black,
-                shape = RoundedCornerShape(12.dp),
-                tonalElevation = 4.dp,
-            ) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { context -> LinuxDesktopView(context).apply { setPointerMode(mode); requestFocus() } },
-                    update = { view -> view.setPointerMode(mode); if (!view.hasFocus()) view.requestFocus() },
-                )
-            }
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { context -> LinuxDesktopView(context).apply { setPointerMode(mode); requestFocus() } },
+                update = { view -> view.setPointerMode(mode); if (!view.hasFocus()) view.requestFocus() },
+            )
 
             if (controlsVisible) {
                 Surface(
-                    modifier = Modifier.align(Alignment.TopCenter),
+                    modifier = Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.safeDrawing).padding(top = 8.dp),
                     shape = RoundedCornerShape(22.dp),
                     color = Color(0xF4F3F7F4),
                     shadowElevation = 10.dp,
@@ -449,7 +489,7 @@ class VesselActivity : ComponentActivity() {
                 }
             } else {
                 Surface(
-                    modifier = Modifier.align(Alignment.TopCenter).clickable { controlsVisible = true; controlsEpoch++ },
+                    modifier = Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.safeDrawing).padding(top = 8.dp).clickable { controlsVisible = true; controlsEpoch++ },
                     shape = RoundedCornerShape(999.dp),
                     color = Color(0xF2F3F7F4),
                     shadowElevation = 8.dp,
@@ -806,22 +846,8 @@ class VesselActivity : ComponentActivity() {
             }
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Crash diagnostics", fontWeight = FontWeight.SemiBold)
-                            Text("Host memory, UML exit state, Wayland/GPU, PulseAudio and Firefox crash artifacts", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        OutlinedButton(onClick = { copyText("Vessel diagnostics", diagnostics) }, enabled = diagnostics.isNotBlank()) { Text("Copy") }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { VmSessionService.active?.collectCrashDiagnostics() }) { Text("Collect") }
-                        OutlinedButton(onClick = { VmSessionService.active?.runGpuDiagnostics() }, enabled = state.guestReady) { Text("GPU + input") }
-                    }
-                    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = Color(0xff050706)) {
-                        SelectionContainer {
-                            Text(diagnostics.takeLast(6_000), Modifier.padding(12.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, maxLines = 18, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
+                    Text("Crash diagnostics", fontWeight = FontWeight.SemiBold)
+                    Text("Host memory, UML exit state, Wayland/GPU, PulseAudio and Firefox crash artifacts", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             LogCard(state)
