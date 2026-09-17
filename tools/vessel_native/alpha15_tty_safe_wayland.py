@@ -17,51 +17,44 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-# ---------------------------------------------------------------------------
 # v57 physical-device recovery.
 #
-# 1a0d1ec was the only physically proven full Wayland boot. Its crucial
-# property was not a particular timeout value: after Plasma package validation,
-# Android sent ONE final authoritative tty0 RPC containing desktop prep,
-# hot-runtime staging, compositor launch and the readiness probe. Once that RPC
-# returned VESSEL_WAYLAND_READY, tty0 was never used again.
+# 1a0d1ec was the only physically proven full Wayland boot. Its important
+# invariant was ONE final tty0 transaction after package validation: prep,
+# runtime staging, KWin/Plasma launch and VESSEL_WAYLAND_READY all happened in
+# that same transaction. Once it returned, tty0 was retired.
 #
-# Alpha13 accidentally left guest audio/control preparation as a separate tty
-# RPC immediately before launchDesktop(), and the old Alpha15 tried to work
-# around the resulting 72% stall by sending four *more* asset-staging RPCs.
-# Physical logs now prove the first of those follow-up RPCs itself hangs after
-# __VESSEL_7__:0. Stop trying to make follow-up tty commands reliable. Fold the
-# service preparation into the same preparedDesktop command that already owns
-# the proven Wayland startup transaction. There is then exactly one tty RPC
-# after ensurePlasma() on the Wayland path.
-# ---------------------------------------------------------------------------
+# Alpha13 later introduced a separate audio/control tty RPC before desktop
+# launch. Old Alpha15 then introduced four more tty RPCs to stage boot files.
+# Physical run 172 proved the first RPC after the service transaction can hang
+# forever even though __VESSEL_7__:0 was returned. Therefore do not try to make
+# follow-up tty commands more patient: remove them. Audio/control preparation is
+# folded into Alpha9/14's already-authoritative preparedDesktop command, leaving
+# exactly one final Wayland tty RPC.
 controller = CONTROLLER.read_text()
 
-# Turn Alpha13's executing helper into a pure command builder. This keeps all
-# dynamic Android-side values (AudioTrack port, control port/token and packaged
-# helper assets), but does not touch tty0 by itself.
+# Alpha13 generated setupGuestServicesBlocking(). Convert it into a pure command
+# builder by replacing everything from its guestBlocking execution through the
+# next method boundary. Use positional anchors instead of escaped log strings so
+# generator changes cannot silently break this finalizer.
 controller = replace_once(
     controller,
     "    private fun setupGuestServicesBlocking() {\n",
     "    private fun guestServicesCommand(): String {\n",
     "service helper becomes command builder",
 )
-
-old_service_tail = '''        val result = guestBlocking(command, 45)
-        check(result.first == 0 && result.second.contains("VESSEL_BOOT_SERVICES_READY")) {
-            "Could not configure guest services: ${result.second.takeLast(7000)}"
-        }
-        append("[audio] guest PulseAudio/ALSA -> Android AudioTrack bridge configured port=$audioPort\\n")
-        append("[control] helper/config prepared port=$controlPort; launch deferred to authoritative Wayland transaction\\n")
+method_start = controller.find("    private fun guestServicesCommand(): String {\n")
+exec_start = controller.find("        val result = guestBlocking(command,", method_start)
+next_method = controller.find("    private fun displayModeCommand(): String {\n", exec_start)
+if method_start < 0 or exec_start < 0 or next_method < 0:
+    raise SystemExit(
+        f"service helper region missing method={method_start} exec={exec_start} next={next_method}"
+    )
+service_tail = '''        return command
     }
 
-'''
-new_service_tail = '''        return command
-    }
-
-    // X11 is an experimental fallback and still has a usable boot tty after
-    // launch. Keep its old service setup behavior without weakening Wayland's
-    // strict one-final-RPC invariant.
+    // X11 is an experimental fallback. It does not use the strict Wayland
+    // one-final-RPC path, so retain a blocking service setup helper for it.
     private fun setupGuestServicesBlocking() {
         val audioPort = VesselAudioBridge.port()
         val controlPort = VesselGuestAgent.port()
@@ -74,17 +67,11 @@ new_service_tail = '''        return command
     }
 
 '''
-controller = replace_once(
-    controller,
-    old_service_tail,
-    new_service_tail,
-    "service helper return instead of tty RPC",
-)
+controller = controller[:exec_start] + service_tail + controller[next_method:]
 
-# Alpha9/14 already build preparedDesktop as the single authoritative Wayland
-# transaction. Put audio/control preparation at the front of that SAME command.
-# The hot-runtime postprep and Alpha13's detached control-agent dispatch remain
-# later in preparedDesktop, so the control helper is configured before dispatch.
+# Alpha9/14 already construct preparedDesktop and append the hot Wayland
+# overrides, authoritative post-prep readiness probe and Alpha13's detached
+# control-agent dispatch. Put guest services at the FRONT of that same command.
 controller = replace_once(
     controller,
     "        var preparedDesktop = prep\n",
@@ -97,16 +84,12 @@ controller = replace_once(
     "fold services into authoritative desktop RPC",
 )
 
-# Wayland must no longer execute service setup as command #7 and desktop as
-# command #8. X11 keeps the legacy separate service command.
+# Wayland must no longer execute a standalone service command before desktop.
+# X11 keeps the compatibility helper above.
 controller = replace_once(
     controller,
-    '''            ensurePlasma()
-            setupGuestServicesBlocking()
-            launchDesktop()
-''',
-    '''            ensurePlasma()
-            if (VesselExperimentConfig.desktopBackend(context) == "x11") {
+    "            setupGuestServicesBlocking()\n            launchDesktop()\n",
+    '''            if (VesselExperimentConfig.desktopBackend(context) == "x11") {
                 setupGuestServicesBlocking()
             }
             launchDesktop()
@@ -114,15 +97,11 @@ controller = replace_once(
     "remove separate pre-Wayland service RPC",
 )
 
-# Keep the user-visible progress moving during the one long, correct transaction
-# instead of looking frozen at 72%. These are observation-only callbacks; they
-# do not create additional guest commands.
-controller = replace_once(
-    controller,
-    '''        append("[desktop] authoritative single-RPC prep + Wayland bootstrap\\n")
-        val prepResult = guestBlocking(preparedDesktop, 120)
-''',
-    '''        append("[desktop] v57 authoritative single-RPC services + prep + Wayland bootstrap\\n")
+# Keep progress alive while the single final command runs. This callback only
+# observes stdout from the existing transaction; it never writes another tty
+# command. 150 s is a watchdog for the whole desktop bootstrap, not a workaround
+# for additional RPCs.
+progress_call = '''        append("[desktop] v57 authoritative ONE final tty RPC: services + prep + Wayland readiness\\n")
         val prepResult = guestBlocking(preparedDesktop, 150) { raw ->
             when {
                 raw.contains("VESSEL_AUDIO_READY") ->
@@ -147,8 +126,12 @@ controller = replace_once(
                     progress("desktop_ready", 88, "Plasma Wayland ready")
             }
         }
-''',
-    "live progress inside authoritative RPC",
+'''
+controller = replace_once(
+    controller,
+    "        val prepResult = guestBlocking(preparedDesktop, 120)\n",
+    progress_call,
+    "observe the one authoritative Wayland RPC",
 )
 
 controller = controller.replace("v55-restored-single-rpc-r1", "v57-one-final-tty-rpc-r1")
@@ -158,8 +141,9 @@ service = SERVICE.read_text()
 service = service.replace("v55-restored-single-rpc-r1", "v57-one-final-tty-rpc-r1")
 SERVICE.write_text(service)
 
-# Restore elapsed setup/running time. uptimeMs remained in runtime state; only
-# its rendering disappeared from the cards during UI polish.
+# Restore elapsed setup/running time. uptimeMs stayed in runtime state; UI polish
+# only stopped rendering it. The old Alpha15 restoration was physically visible
+# in run 172, so keep the exact proven UI change.
 activity = ACTIVITY.read_text()
 activity = replace_once(
     activity,
@@ -181,15 +165,16 @@ activity = replace_once(
 )
 ACTIVITY.write_text(activity)
 
-# Build-time physical-architecture invariants. Fail CI before Gradle if a later
-# patch ever reintroduces the exact ping-pong regression.
+# CI-time architecture invariants. These deliberately fail the native rebuild
+# before Gradle if another patch reintroduces the ping-pong TTY design.
 final_controller = CONTROLLER.read_text()
-required = [
+required = (
+    'private fun guestServicesCommand(): String',
     'preparedDesktop += "\\n" + guestServicesCommand()',
-    'v57 authoritative single-RPC services + prep + Wayland bootstrap',
+    'v57 authoritative ONE final tty RPC',
     'val prepResult = guestBlocking(preparedDesktop, 150)',
     'VESSEL_WAYLAND_READY',
-]
+)
 for needle in required:
     if needle not in final_controller:
         raise SystemExit(f"v57 invariant missing: {needle}")
@@ -199,18 +184,27 @@ for forbidden in (
     "v56 tty-safe Wayland bootstrap",
 ):
     if forbidden in final_controller:
-        raise SystemExit(f"v57 forbidden post-service tty path survived: {forbidden}")
+        raise SystemExit(f"v57 forbidden follow-up tty path survived: {forbidden}")
 
-wayland_sequence = '''            ensurePlasma()
+startup_anchor = '''            ensurePlasma()
             if (VesselExperimentConfig.desktopBackend(context) == "x11") {
                 setupGuestServicesBlocking()
             }
             launchDesktop()
 '''
-if wayland_sequence not in final_controller:
+if startup_anchor not in final_controller:
     raise SystemExit("v57 startup sequence invariant missing")
+
+# There must be no unconditional service RPC in the startup sequence anymore.
+start_idx = final_controller.find("            ensurePlasma()\n")
+launch_idx = final_controller.find("            launchDesktop()\n", start_idx)
+if start_idx < 0 or launch_idx < 0:
+    raise SystemExit("v57 could not locate startup sequence")
+startup_slice = final_controller[start_idx:launch_idx]
+if "setupGuestServicesBlocking()" in startup_slice and 'desktopBackend(context) == "x11"' not in startup_slice:
+    raise SystemExit("v57 Wayland still has a standalone pre-desktop service RPC")
 
 if "VesselGuestAgent.waitUntilConnected(8_000)" not in SERVICE.read_text():
     raise SystemExit("Apps/control transport invariant missing")
 
-print("[alpha15] v57: audio/control + desktop prep + Wayland readiness share ONE final tty RPC; no staging RPCs; live progress/timer preserved")
+print("[alpha15] v57: services + prep + Wayland readiness share ONE final tty RPC; no staging RPCs; Apps handoff + elapsed timer preserved")
