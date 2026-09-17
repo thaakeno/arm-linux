@@ -7,10 +7,9 @@ on:
     paths:
       - 'tools/vessel_workstation/**'
       - '.github/workflows/vessel-workstation-image.yml'
-      - 'app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt'
 
 concurrency:
-  group: vessel-workstation-image-v2-${{ github.ref }}
+  group: vessel-workstation-image-v3-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -19,21 +18,24 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
       - name: Install workstation image tools
         shell: bash
         run: |
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends curl zstd e2fsprogs util-linux jq
+
       - name: Build complete ARM64 Plasma workstation image
         shell: bash
         run: |
           set -euxo pipefail
           chmod +x tools/vessel_workstation/build_prebuilt_workstation.sh
           tools/vessel_workstation/build_prebuilt_workstation.sh build/workstation
+
       - name: Verify workstation assets
         shell: bash
         run: |
@@ -42,33 +44,32 @@ jobs:
           test -s build/workstation/Vessel-Workstation-bookworm-arm64.json
           python3 - <<'PY'
           import json
-          p='build/workstation/Vessel-Workstation-bookworm-arm64.json'
-          x=json.load(open(p))
-          assert x['schema']==1
-          assert x['arch']=='arm64'
-          assert x['compression']=='zstd'
+          p = 'build/workstation/Vessel-Workstation-bookworm-arm64.json'
+          x = json.load(open(p, encoding='utf-8'))
+          assert x['arch'] == 'arm64'
+          assert x['compression'] == 'zstd'
           assert x['recommends'] is True
-          assert x['compressedBytes'] < 2_000_000_000
-          assert len(x['compressedSha256'])==64
-          assert len(x['imageSha256'])==64
+          assert x['compressedBytes'] > 0
+          assert len(x['compressedSha256']) == 64
+          assert len(x['imageSha256']) == 64
           PY
-      - name: Publish image atomically, manifest last
+
+      - name: Publish chunked image atomically
         env:
           GH_TOKEN: ${{ github.token }}
           GH_PROMPT_DISABLED: '1'
         shell: bash
         run: |
           set -euo pipefail
+
           TAG=vessel-workstation-v2-edge
           BASE=build/workstation/Vessel-Workstation-bookworm-arm64
           MANIFEST="$BASE.json"
-          SOURCE_ARCHIVE="$BASE.ext4.zst"
-          ASSET_NAME="Vessel-Workstation-bookworm-arm64-${GITHUB_SHA}.ext4.zst"
-          # Keep the staged archive in the same directory and RENAME it. The old
-          # workflow copied this multi-GB file to /tmp right when the runner was
-          # tightest on disk space, which could kill an otherwise valid build.
-          STAGED_ARCHIVE="build/workstation/$ASSET_NAME"
-          PUBLIC_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET_NAME"
+          ARCHIVE="$BASE.ext4.zst"
+          CHUNK_DIR=build/workstation/release-chunks
+          CHUNK_PREFIX="Vessel-Workstation-bookworm-arm64-${GITHUB_SHA}.part-"
+          CHUNK_BYTES=$((256 * 1024 * 1024))
+          PUBLIC_BASE="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
 
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" \
@@ -78,98 +79,179 @@ jobs:
               --notes 'Atomic rolling prebuilt Debian Bookworm ARM64 + KDE Plasma workstation for Vessel.'
           fi
 
-          mv "$SOURCE_ARCHIVE" "$STAGED_ARCHIVE"
-          EXPECTED_BYTES="$(stat -c '%s' "$STAGED_ARCHIVE")"
-          echo "publishing $ASSET_NAME ($EXPECTED_BYTES bytes)"
-          df -h .
+          rm -rf "$CHUNK_DIR"
+          mkdir -p "$CHUNK_DIR"
+          split \
+            --bytes="$CHUNK_BYTES" \
+            --numeric-suffixes=0 \
+            --suffix-length=3 \
+            "$ARCHIVE" \
+            "$CHUNK_DIR/$CHUNK_PREFIX"
 
-          # A cancelled/failed previous attempt can leave an asset with the same
-          # name in a transient state. Remove it before retrying the upload.
-          delete_asset_if_present() {
-            local id
-            id="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq ".assets[] | select(.name == \"$ASSET_NAME\") | .id" | head -1 || true)"
-            if [ -n "$id" ]; then
-              gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$id" || true
-            fi
-          }
-          delete_asset_if_present
+          mapfile -t PARTS < <(find "$CHUNK_DIR" -maxdepth 1 -type f -name "$CHUNK_PREFIX*" -print | sort)
+          [ "${#PARTS[@]}" -gt 0 ]
+          [ "${#PARTS[@]}" -lt 32 ]
+          echo "workstation archive split into ${#PARTS[@]} chunks"
+          du -h "$ARCHIVE" "${PARTS[@]}"
 
-          UPLOADED=0
-          for attempt in 1 2 3 4 5; do
-            echo "release upload attempt $attempt/5"
-            if gh release upload "$TAG" "$STAGED_ARCHIVE" --repo "$GITHUB_REPOSITORY"; then
-              UPLOADED=1
-              break
-            fi
-            delete_asset_if_present
-            sleep $((attempt * 8))
-          done
-          [ "$UPLOADED" = 1 ]
+          python3 - "$MANIFEST" "$PUBLIC_BASE" "$GITHUB_SHA" "${PARTS[@]}" <<'PY'
+          import hashlib, json, os, sys
 
-          READY=0
-          for i in $(seq 1 180); do
-            ASSET_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
-            STATE="$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .state // empty' <<<"$ASSET_JSON")"
-            SIZE="$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .size // 0' <<<"$ASSET_JSON")"
-            if [ "$STATE" = uploaded ] && [ "$SIZE" = "$EXPECTED_BYTES" ]; then
-              READY=1
-              break
-            fi
-            echo "waiting for GitHub release asset: state=${STATE:-missing} size=${SIZE:-0}/$EXPECTED_BYTES"
-            sleep 5
-          done
-          [ "$READY" = 1 ]
-
-          # The GitHub API is the authoritative readiness check above. Public
-          # download URLs can lag very briefly behind the API, so retry without
-          # rebuilding the image.
-          PUBLIC_READY=0
-          for i in $(seq 1 30); do
-            if curl -fsSIL --connect-timeout 15 --max-time 45 "$PUBLIC_URL" >/dev/null; then
-              PUBLIC_READY=1
-              break
-            fi
-            echo "waiting for public release CDN ($i/30)"
-            sleep 4
-          done
-          [ "$PUBLIC_READY" = 1 ]
-
-          python3 - "$MANIFEST" "$PUBLIC_URL" "$GITHUB_SHA" <<'PY'
-          import json, sys
-          path, url, revision = sys.argv[1:]
-          with open(path, encoding='utf-8') as f:
+          manifest_path, public_base, revision, *parts = sys.argv[1:]
+          with open(manifest_path, encoding='utf-8') as f:
               data = json.load(f)
+
+          chunks = []
+          total = 0
+          for index, path in enumerate(parts):
+              size = os.path.getsize(path)
+              h = hashlib.sha256()
+              with open(path, 'rb') as f:
+                  for block in iter(lambda: f.read(4 * 1024 * 1024), b''):
+                      h.update(block)
+              name = os.path.basename(path)
+              total += size
+              chunks.append({
+                  'index': index,
+                  'name': name,
+                  'url': f'{public_base}/{name}',
+                  'bytes': size,
+                  'sha256': h.hexdigest(),
+              })
+
+          if total != int(data['compressedBytes']):
+              raise SystemExit(f'chunk byte total {total} != archive {data["compressedBytes"]}')
+
+          data['schema'] = 2
           data['revision'] = revision
-          data['url'] = url
-          data['assetName'] = url.rsplit('/', 1)[-1]
-          with open(path, 'w', encoding='utf-8') as f:
+          data['transport'] = 'github-release-chunks-v1'
+          data['chunkBytes'] = 256 * 1024 * 1024
+          data['chunks'] = chunks
+          # Compatibility probe for the APK CI only. Schema-1 clients reject this
+          # manifest before touching this field; schema-2 clients use chunks[].
+          data['url'] = chunks[0]['url']
+          data['assetName'] = None
+
+          with open(manifest_path, 'w', encoding='utf-8') as f:
               json.dump(data, f, indent=2, sort_keys=True)
               f.write('\n')
           PY
 
-          # Publish the tiny pointer only after the large immutable image is
-          # known-good. Clients can therefore never discover a half-uploaded image.
+          delete_asset_if_present() {
+            local name="$1"
+            local id
+            id="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+              --jq ".assets[] | select(.name == \"$name\") | .id" | head -1 || true)"
+            if [ -n "$id" ]; then
+              gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$id" >/dev/null || true
+            fi
+          }
+          export -f delete_asset_if_present
+
+          upload_one() {
+            local path="$1"
+            local name
+            name="$(basename "$path")"
+            delete_asset_if_present "$name"
+            for attempt in 1 2 3; do
+              echo "uploading $name attempt $attempt/3"
+              if gh release upload "$TAG" "$path" --repo "$GITHUB_REPOSITORY"; then
+                return 0
+              fi
+              delete_asset_if_present "$name"
+              sleep $((attempt * 3))
+            done
+            echo "failed to upload $name" >&2
+            return 1
+          }
+          export -f upload_one
+          export TAG GITHUB_REPOSITORY GH_TOKEN GH_PROMPT_DISABLED
+
+          # GitHub release uploads are not resumable. Small independent chunks mean
+          # a transient HTTP 5xx retries at most 256 MiB instead of the whole ~1.6 GiB
+          # image. Three concurrent uploads keep publication quick without hammering it.
+          printf '%s\0' "${PARTS[@]}" | xargs -0 -n1 -P3 bash -c 'upload_one "$1"' _
+
+          RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+          python3 - "$MANIFEST" <<'PY' <<<"$RELEASE_JSON"
+          import json, sys
+          manifest = json.load(open(sys.argv[1], encoding='utf-8'))
+          release = json.load(sys.stdin)
+          assets = {a['name']: a for a in release.get('assets', [])}
+          for chunk in manifest['chunks']:
+              asset = assets.get(chunk['name'])
+              if not asset:
+                  raise SystemExit(f"missing release asset {chunk['name']}")
+              if asset.get('state') != 'uploaded':
+                  raise SystemExit(f"asset {chunk['name']} state={asset.get('state')}")
+              if int(asset.get('size', 0)) != int(chunk['bytes']):
+                  raise SystemExit(f"asset {chunk['name']} size mismatch")
+          PY
+
+          # Confirm the actual public download path, not just API metadata. HEAD only,
+          # so this never downloads the image again on the runner.
+          mapfile -t URLS < <(jq -r '.chunks[].url' "$MANIFEST")
+          for url in "${URLS[@]}"; do
+            curl -fsSIL \
+              --retry 4 \
+              --retry-all-errors \
+              --retry-delay 2 \
+              --connect-timeout 10 \
+              --max-time 30 \
+              "$url" >/dev/null
+          done
+
+          # The manifest is the atomic pointer. Publish it only after every chunk has
+          # passed API size/state validation and a public CDN probe.
           gh release upload "$TAG" "$MANIFEST" --clobber --repo "$GITHUB_REPOSITORY"
 
+          MANIFEST_URL="$PUBLIC_BASE/Vessel-Workstation-bookworm-arm64.json"
           PUBLISHED_OK=0
-          for i in $(seq 1 40); do
-            PUBLISHED="$(curl -fsSL --connect-timeout 15 --max-time 45 \
-              "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Vessel-Workstation-bookworm-arm64.json" 2>/dev/null || true)"
+          for i in $(seq 1 30); do
+            PUBLISHED="$(curl -fsSL \
+              --connect-timeout 10 \
+              --max-time 30 \
+              "${MANIFEST_URL}?revision=${GITHUB_SHA}" 2>/dev/null || true)"
             REV="$(jq -r '.revision // empty' <<<"$PUBLISHED" 2>/dev/null || true)"
-            URL="$(jq -r '.url // empty' <<<"$PUBLISHED" 2>/dev/null || true)"
-            if [ "$REV" = "$GITHUB_SHA" ] && [ "$URL" = "$PUBLIC_URL" ]; then
+            SCHEMA="$(jq -r '.schema // 0' <<<"$PUBLISHED" 2>/dev/null || true)"
+            COUNT="$(jq -r '.chunks | length' <<<"$PUBLISHED" 2>/dev/null || echo 0)"
+            if [ "$REV" = "$GITHUB_SHA" ] && [ "$SCHEMA" = 2 ] && [ "$COUNT" = "${#PARTS[@]}" ]; then
               PUBLISHED_OK=1
               break
             fi
-            echo "waiting for manifest CDN ($i/40) revision=${REV:-missing}"
-            sleep 3
+            echo "waiting for manifest CDN ($i/30) revision=${REV:-missing} schema=$SCHEMA chunks=$COUNT"
+            sleep 2
           done
           [ "$PUBLISHED_OK" = 1 ]
 
-          # Clean old immutable image assets only after the new manifest is live.
+          # Keep the current and immediately previous chunk revision. That protects
+          # clients that fetched the old manifest seconds before this atomic switch,
+          # while preventing hundreds of stale multi-GB assets from accumulating.
           RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
-          jq -r --arg keep "$ASSET_NAME" '.assets[] | select(.name | startswith("Vessel-Workstation-bookworm-arm64-")) | select(.name != $keep) | .id' <<<"$RELEASE_JSON" | while read -r old_id; do
-            [ -n "$old_id" ] && gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$old_id" || true
-          done
+          python3 - "$GITHUB_SHA" <<'PY' <<<"$RELEASE_JSON" >/tmp/vessel-delete-assets.txt
+          import collections, json, re, sys
+          current = sys.argv[1]
+          release = json.load(sys.stdin)
+          pat = re.compile(r'^Vessel-Workstation-bookworm-arm64-([0-9a-f]{40})\.part-\d{3}$')
+          groups = collections.defaultdict(list)
+          newest = {}
+          for asset in release.get('assets', []):
+              m = pat.match(asset['name'])
+              if not m:
+                  continue
+              rev = m.group(1)
+              groups[rev].append(asset)
+              newest[rev] = max(newest.get(rev, ''), asset.get('created_at', ''))
+          ordered = sorted(groups, key=lambda r: newest[r], reverse=True)
+          keep = {current}
+          keep.update(ordered[:2])
+          for rev, assets in groups.items():
+              if rev not in keep:
+                  for asset in assets:
+                      print(asset['id'])
+          PY
+          while read -r old_id; do
+            [ -z "$old_id" ] || gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$old_id" >/dev/null || true
+          done </tmp/vessel-delete-assets.txt
 
-          echo "published workstation revision $GITHUB_SHA"
+          echo "published chunked workstation revision $GITHUB_SHA (${#PARTS[@]} chunks)"
