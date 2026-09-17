@@ -40,7 +40,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     private val touchSlop = viewConfig.scaledTouchSlop.toFloat()
     private val touchSlopSq = touchSlop * touchSlop
     private val longPressMs = ViewConfiguration.getLongPressTimeout().toLong()
-    private val cursorTargetPx = (24f * resources.displayMetrics.density).coerceIn(24f, 52f)
+    private val cursorTargetPx = (18f * resources.displayMetrics.density).coerceIn(18f, 40f)
 
     @Volatile private var pointerMode = PointerMode.TRACKPAD
     private var surfaceAttached = false
@@ -130,9 +130,8 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
             val rawY = VesselWaylandPresenter.cursorY().toFloat()
             val guestY = if (VesselExperimentConfig.invertPointerY(context)) gh.toFloat() - rawY else rawY
 
-            // The old code scaled a 64x64 cursor by the guest/display scale, so
-            // resizing the Android viewport visibly changed cursor size. Position
-            // follows guest coordinates, but cursor size is now stable in Android dp.
+            // Position follows guest coordinates. Cursor size stays stable in Android
+            // density pixels, so resizing the desktop no longer makes it huge.
             val hotspotScale = cursorTargetPx / CURSOR_SOURCE_PX
             val x = ox + cursorX * scale - VesselWaylandPresenter.cursorHotX() * hotspotScale
             val y = oy + guestY * scale - VesselWaylandPresenter.cursorHotY() * hotspotScale
@@ -180,6 +179,12 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
         val refresh = (display?.supportedModes?.maxOfOrNull { it.refreshRate }
             ?: display?.refreshRate ?: 60f)
             .coerceAtMost(VesselExperimentConfig.refreshHz(context).toFloat())
+        VmSessionService.active?.configureDisplay(
+            width,
+            height,
+            resources.displayMetrics.densityDpi,
+            refresh,
+        )
         if (Build.VERSION.SDK_INT >= 30) {
             runCatching { holder.surface.setFrameRate(refresh, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT) }
         }
@@ -236,8 +241,6 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
         val gw = VesselWaylandPresenter.guestWidth().coerceAtLeast(1)
         val gh = VesselWaylandPresenter.guestHeight().coerceAtLeast(1)
         val scale = min(width.toFloat() / gw, height.toFloat() / gh).coerceAtLeast(0.0001f)
-        // Normalize Android finger pixels to guest pixels. Clamp keeps tiny
-        // windows from turning one finger pixel into a ridiculous cursor jump.
         return (1f / scale).coerceIn(0.75f, 2.0f)
     }
 
@@ -329,8 +332,6 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
                 maxPointers = maxOf(maxPointers, e.pointerCount)
                 val remaining = (0 until e.pointerCount).filter { it != e.actionIndex }
                 if (remaining.isNotEmpty()) {
-                    // Rebase instead of applying the pointer-count transition as a
-                    // movement delta. This removes the classic two-finger jump.
                     lastX = e.getX(remaining[0])
                     lastY = e.getY(remaining[0])
                     scrollX = remaining.map { e.getX(it) }.average().toFloat()
