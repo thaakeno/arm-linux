@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.text.InputType
 import android.view.Choreographer
+import android.view.HapticFeedbackConstants
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -32,12 +33,14 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
         private const val LEFT = 0x110
         private const val RIGHT = 0x111
         private const val MIDDLE = 0x112
+        private const val CURSOR_SOURCE_PX = 64f
     }
 
     private val viewConfig = ViewConfiguration.get(context)
     private val touchSlop = viewConfig.scaledTouchSlop.toFloat()
     private val touchSlopSq = touchSlop * touchSlop
     private val longPressMs = ViewConfiguration.getLongPressTimeout().toLong()
+    private val cursorTargetPx = (24f * resources.displayMetrics.density).coerceIn(24f, 52f)
 
     @Volatile private var pointerMode = PointerMode.TRACKPAD
     private var surfaceAttached = false
@@ -51,6 +54,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     private var scrollY = 0f
     private var dragging = false
     private var movedBeyondTap = false
+    private var directMoved = false
 
     private val surfaceView = object : SurfaceView(context) {
         override fun onCheckIsTextEditor() = true
@@ -78,6 +82,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
         isFocusable = true
         isFocusableInTouchMode = true
         keepScreenOn = false
+        isHapticFeedbackEnabled = true
         setOnTouchListener { _, event -> touch(event) }
         setOnGenericMotionListener { _, event -> generic(event) }
         setOnKeyListener { _, _, event -> handleKey(event) }
@@ -103,7 +108,9 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
                 if (serial != lastSerial) {
                     lastSerial = serial
                     val pixels = VesselWaylandPresenter.cursorPixels()
-                    if (pixels.size == 4096) bitmap = Bitmap.createBitmap(pixels, 64, 64, Bitmap.Config.ARGB_8888)
+                    if (pixels.size == 4096) {
+                        bitmap = Bitmap.createBitmap(pixels, 64, 64, Bitmap.Config.ARGB_8888)
+                    }
                 }
             }
             invalidate()
@@ -112,22 +119,29 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            // Direct touch behaves like a real touchscreen: no mouse cursor is drawn.
             if (pointerMode != PointerMode.TRACKPAD || !VesselWaylandPresenter.cursorVisible()) return
             val b = bitmap ?: return
             val gw = VesselWaylandPresenter.guestWidth().coerceAtLeast(1)
             val gh = VesselWaylandPresenter.guestHeight().coerceAtLeast(1)
-            val scale = min(width.toFloat() / gw, height.toFloat() / gh)
+            val scale = min(width.toFloat() / gw, height.toFloat() / gh).coerceAtLeast(0.0001f)
             val ox = (width - gw * scale) / 2f
             val oy = (height - gh * scale) / 2f
-            // KWin/libinput is authoritative. A local predictor cannot reproduce
-            // libinput acceleration and used to snap the cursor backwards/forwards.
             val cursorX = VesselWaylandPresenter.cursorX().toFloat()
             val rawY = VesselWaylandPresenter.cursorY().toFloat()
             val guestY = if (VesselExperimentConfig.invertPointerY(context)) gh.toFloat() - rawY else rawY
-            val x = ox + (cursorX - VesselWaylandPresenter.cursorHotX()) * scale
-            val y = oy + (guestY - VesselWaylandPresenter.cursorHotY()) * scale
-            canvas.drawBitmap(b, null, android.graphics.RectF(x, y, x + 64 * scale, y + 64 * scale), null)
+
+            // The old code scaled a 64x64 cursor by the guest/display scale, so
+            // resizing the Android viewport visibly changed cursor size. Position
+            // follows guest coordinates, but cursor size is now stable in Android dp.
+            val hotspotScale = cursorTargetPx / CURSOR_SOURCE_PX
+            val x = ox + cursorX * scale - VesselWaylandPresenter.cursorHotX() * hotspotScale
+            val y = oy + guestY * scale - VesselWaylandPresenter.cursorHotY() * hotspotScale
+            canvas.drawBitmap(
+                b,
+                null,
+                android.graphics.RectF(x, y, x + cursorTargetPx, y + cursorTargetPx),
+                null,
+            )
         }
     }.apply {
         setBackgroundColor(Color.TRANSPARENT)
@@ -162,8 +176,6 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        // A resize can keep the same ANativeWindow object. Tell native Vulkan the
-        // new extent without detaching the retained AHardwareBuffer frame.
         VesselWaylandPresenter.surfaceChanged(width, height)
         val refresh = (display?.supportedModes?.maxOfOrNull { it.refreshRate }
             ?: display?.refreshRate ?: 60f)
@@ -204,6 +216,10 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
 
     fun tapKey(code: Int) = VesselVirtioInput.tapKey(code)
 
+    private fun hapticClick() {
+        surfaceView.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+    }
+
     private fun mapped(x: Float, y: Float): Pair<Float, Float> {
         val gw = VesselWaylandPresenter.guestWidth().coerceAtLeast(1)
         val gh = VesselWaylandPresenter.guestHeight().coerceAtLeast(1)
@@ -214,6 +230,15 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
         val rawY = ((y - oy) / (gh * scale)).coerceIn(0f, 1f)
         val ny = if (VesselExperimentConfig.invertPointerY(context)) 1f - rawY else rawY
         return nx to ny
+    }
+
+    private fun pointerGain(): Float {
+        val gw = VesselWaylandPresenter.guestWidth().coerceAtLeast(1)
+        val gh = VesselWaylandPresenter.guestHeight().coerceAtLeast(1)
+        val scale = min(width.toFloat() / gw, height.toFloat() / gh).coerceAtLeast(0.0001f)
+        // Normalize Android finger pixels to guest pixels. Clamp keeps tiny
+        // windows from turning one finger pixel into a ridiculous cursor jump.
+        return (1f / scale).coerceIn(0.75f, 2.0f)
     }
 
     private fun displacementSq(x: Float, y: Float): Float {
@@ -231,8 +256,21 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
             releaseDrag()
             val (x, y) = mapped(e.x, e.y)
             when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> VesselVirtioInput.absoluteNormalized(x, y, true)
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> VesselVirtioInput.absoluteNormalized(x, y, false)
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.x
+                    downY = e.y
+                    directMoved = false
+                    VesselVirtioInput.absoluteNormalized(x, y, true)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (displacementSq(e.x, e.y) > touchSlopSq) directMoved = true
+                    VesselVirtioInput.absoluteNormalized(x, y, true)
+                }
+                MotionEvent.ACTION_UP -> {
+                    VesselVirtioInput.absoluteNormalized(x, y, false)
+                    if (!directMoved) hapticClick()
+                }
+                MotionEvent.ACTION_CANCEL -> VesselVirtioInput.absoluteNormalized(x, y, false)
             }
             return true
         }
@@ -275,8 +313,13 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
                     if (!dragging && !movedBeyondTap && SystemClock.uptimeMillis() - downAt >= longPressMs) {
                         VesselVirtioInput.button(LEFT, true)
                         dragging = true
+                        hapticClick()
                     }
-                    VesselVirtioInput.relative(dx, dy * if (VesselExperimentConfig.invertPointerY(context)) -1f else 1f)
+                    val gain = pointerGain()
+                    VesselVirtioInput.relative(
+                        dx * gain,
+                        dy * gain * if (VesselExperimentConfig.invertPointerY(context)) -1f else 1f,
+                    )
                     lastX = e.x
                     lastY = e.y
                 }
@@ -286,8 +329,12 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
                 maxPointers = maxOf(maxPointers, e.pointerCount)
                 val remaining = (0 until e.pointerCount).filter { it != e.actionIndex }
                 if (remaining.isNotEmpty()) {
+                    // Rebase instead of applying the pointer-count transition as a
+                    // movement delta. This removes the classic two-finger jump.
                     lastX = e.getX(remaining[0])
                     lastY = e.getY(remaining[0])
+                    scrollX = remaining.map { e.getX(it) }.average().toFloat()
+                    scrollY = remaining.map { e.getY(it) }.average().toFloat()
                 }
             }
 
@@ -298,6 +345,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
                     val button = if (maxPointers >= 2) RIGHT else LEFT
                     VesselVirtioInput.button(button, true)
                     VesselVirtioInput.button(button, false)
+                    hapticClick()
                 }
             }
 
@@ -323,7 +371,9 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
                         MotionEvent.BUTTON_TERTIARY -> MIDDLE
                         else -> return false
                     }
-                    VesselVirtioInput.button(button, e.actionMasked == MotionEvent.ACTION_BUTTON_PRESS)
+                    val down = e.actionMasked == MotionEvent.ACTION_BUTTON_PRESS
+                    VesselVirtioInput.button(button, down)
+                    if (!down) hapticClick()
                     return true
                 }
                 MotionEvent.ACTION_HOVER_MOVE -> {
