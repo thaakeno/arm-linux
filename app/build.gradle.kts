@@ -21,7 +21,7 @@ android {
         minSdk = 30
         targetSdk = 36
         versionCode = 3000 + buildRevision
-        versionName = "2.1.0-alpha15"
+        versionName = "2.1.0-alpha16"
         // Legacy CI provenance marker only: versionName = "2.1.0-alpha2"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
@@ -94,6 +94,7 @@ dependencies {
   implementation("dev.rikka.shizuku:api:13.1.5")
   implementation("dev.rikka.shizuku:provider:13.1.5")
   implementation("org.apache.commons:commons-compress:1.27.1")
+  implementation("com.github.luben:zstd-jni:1.5.7-12@aar")
   val composeBom = platform(libs.androidx.compose.bom)
   implementation(composeBom)
   androidTestImplementation(composeBom)
