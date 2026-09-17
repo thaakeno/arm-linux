@@ -173,10 +173,11 @@ jobs:
           printf '%s\0' "${PARTS[@]}" | xargs -0 -n1 -P3 bash -c 'upload_one "$1"' _
 
           RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
-          python3 - "$MANIFEST" <<'PY' <<<"$RELEASE_JSON"
+          printf '%s' "$RELEASE_JSON" >/tmp/vessel-release.json
+          python3 - "$MANIFEST" /tmp/vessel-release.json <<'PY'
           import json, sys
           manifest = json.load(open(sys.argv[1], encoding='utf-8'))
-          release = json.load(sys.stdin)
+          release = json.load(open(sys.argv[2], encoding='utf-8'))
           assets = {a['name']: a for a in release.get('assets', [])}
           for chunk in manifest['chunks']:
               asset = assets.get(chunk['name'])
@@ -228,10 +229,11 @@ jobs:
           # clients that fetched the old manifest seconds before this atomic switch,
           # while preventing hundreds of stale multi-GB assets from accumulating.
           RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
-          python3 - "$GITHUB_SHA" <<'PY' <<<"$RELEASE_JSON" >/tmp/vessel-delete-assets.txt
+          printf '%s' "$RELEASE_JSON" >/tmp/vessel-release-cleanup.json
+          python3 - "$GITHUB_SHA" /tmp/vessel-release-cleanup.json <<'PY' >/tmp/vessel-delete-assets.txt
           import collections, json, re, sys
           current = sys.argv[1]
-          release = json.load(sys.stdin)
+          release = json.load(open(sys.argv[2], encoding='utf-8'))
           pat = re.compile(r'^Vessel-Workstation-bookworm-arm64-([0-9a-f]{40})\.part-\d{3}$')
           groups = collections.defaultdict(list)
           newest = {}
