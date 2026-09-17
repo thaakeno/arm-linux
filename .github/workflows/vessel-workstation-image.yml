@@ -68,7 +68,7 @@ jobs:
           ARCHIVE="$BASE.ext4.zst"
           CHUNK_DIR=build/workstation/release-chunks
           CHUNK_PREFIX="Vessel-Workstation-bookworm-arm64-${GITHUB_SHA}.part-"
-          CHUNK_BYTES=$((256 * 1024 * 1024))
+          CHUNK_BYTES=$((64 * 1024 * 1024))
           PUBLIC_BASE="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
 
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -90,6 +90,8 @@ jobs:
 
           mapfile -t PARTS < <(find "$CHUNK_DIR" -maxdepth 1 -type f -name "$CHUNK_PREFIX*" -print | sort)
           [ "${#PARTS[@]}" -gt 0 ]
+          # The Android bootstrap currently accepts up to 32 chunks. A <2 GB archive
+          # at 64 MiB per chunk remains below that ceiling while making retries cheap.
           [ "${#PARTS[@]}" -lt 32 ]
           echo "workstation archive split into ${#PARTS[@]} chunks"
           du -h "$ARCHIVE" "${PARTS[@]}"
@@ -125,7 +127,7 @@ jobs:
           data['schema'] = 2
           data['revision'] = revision
           data['transport'] = 'github-release-chunks-v1'
-          data['chunkBytes'] = 256 * 1024 * 1024
+          data['chunkBytes'] = 64 * 1024 * 1024
           data['chunks'] = chunks
           # Compatibility probe for the APK CI only. Schema-1 clients reject this
           # manifest before touching this field; schema-2 clients use chunks[].
@@ -137,40 +139,77 @@ jobs:
               f.write('\n')
           PY
 
-          delete_asset_if_present() {
+          asset_info() {
             local name="$1"
-            local id
-            id="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
-              --jq ".assets[] | select(.name == \"$name\") | .id" | head -1 || true)"
-            if [ -n "$id" ]; then
-              gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$id" >/dev/null || true
-            fi
+            gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+              --jq ".assets[] | select(.name == \"$name\") | [.id,.state,.size] | @tsv" \
+              | head -1 || true
           }
-          export -f delete_asset_if_present
+
+          delete_asset_id() {
+            local id="$1"
+            [ -z "$id" ] || gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$id" >/dev/null || true
+          }
 
           upload_one() {
             local path="$1"
-            local name
+            local name expected info id state size attempt delay
             name="$(basename "$path")"
-            delete_asset_if_present "$name"
-            for attempt in 1 2 3; do
-              echo "uploading $name attempt $attempt/3"
-              if gh release upload "$TAG" "$path" --repo "$GITHUB_REPOSITORY"; then
+            expected="$(stat -c '%s' "$path")"
+
+            # A previous attempt may have returned HTTP 5xx after GitHub actually
+            # persisted the asset. Reuse a complete asset instead of uploading again.
+            info="$(asset_info "$name")"
+            if [ -n "$info" ]; then
+              IFS=$'\t' read -r id state size <<<"$info"
+              if [ "$state" = "uploaded" ] && [ "$size" = "$expected" ]; then
+                echo "reusing already verified $name"
                 return 0
               fi
-              delete_asset_if_present "$name"
-              sleep $((attempt * 3))
+              echo "removing incomplete asset $name state=$state size=$size expected=$expected"
+              delete_asset_id "$id"
+            fi
+
+            for attempt in $(seq 1 10); do
+              echo "uploading $name attempt $attempt/10"
+              # Do not trust gh's exit status alone. uploads.github.com can return a
+              # transient 5xx even when the asset becomes visible immediately after.
+              gh release upload "$TAG" "$path" --repo "$GITHUB_REPOSITORY" || true
+
+              info="$(asset_info "$name")"
+              if [ -n "$info" ]; then
+                IFS=$'\t' read -r id state size <<<"$info"
+                if [ "$state" = "uploaded" ] && [ "$size" = "$expected" ]; then
+                  echo "verified $name ($size bytes)"
+                  return 0
+                fi
+                echo "asset $name not complete after attempt $attempt: state=$state size=$size"
+                delete_asset_id "$id"
+              else
+                echo "asset $name absent after attempt $attempt"
+              fi
+
+              if [ "$attempt" -lt 10 ]; then
+                if [ "$attempt" -lt 6 ]; then
+                  delay=$((attempt * attempt * 2))
+                else
+                  delay=60
+                fi
+                echo "retrying $name in ${delay}s"
+                sleep "$delay"
+              fi
             done
-            echo "failed to upload $name" >&2
+
+            echo "failed to upload $name after 10 verified attempts" >&2
             return 1
           }
-          export -f upload_one
-          export TAG GITHUB_REPOSITORY GH_TOKEN GH_PROMPT_DISABLED
 
-          # GitHub release uploads are not resumable. Small independent chunks mean
-          # a transient HTTP 5xx retries at most 256 MiB instead of the whole ~1.6 GiB
-          # image. Three concurrent uploads keep publication quick without hammering it.
-          printf '%s\0' "${PARTS[@]}" | xargs -0 -n1 -P3 bash -c 'upload_one "$1"' _
+          # Release uploads are not resumable. Keep them sequential so we do not
+          # hammer uploads.github.com. With 64 MiB chunks a failed request retries
+          # at most 64 MiB, and successful chunks are reused on subsequent attempts.
+          for part in "${PARTS[@]}"; do
+            upload_one "$part"
+          done
 
           RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
           printf '%s' "$RELEASE_JSON" >/tmp/vessel-release.json
