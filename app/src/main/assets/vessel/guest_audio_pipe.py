@@ -4,7 +4,7 @@ import socket
 import sys
 import time
 
-HOST = "10.0.2.2"
+HOST = os.environ.get("VESSEL_AUDIO_HOST", "10.0.2.2")
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 0
 RATE = int(sys.argv[2]) if len(sys.argv) > 2 else 48000
 CHANNELS = int(sys.argv[3]) if len(sys.argv) > 3 else 2
