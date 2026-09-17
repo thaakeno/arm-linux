@@ -1,10 +1,10 @@
 package com.example.dreamlinux
 
+import android.app.ActivityManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.app.ActivityManager
 import android.content.Intent
 import android.hardware.display.DisplayManager
 import android.os.IBinder
@@ -83,13 +83,13 @@ data class SessionState(
     val lastError: String = "",
     val console: String = "",
     val terminalOutput: String = "",
-    val graphics: String = "VirtIO GPU · VirGL · ANGLE · Android Surface · Adreno",
+    val graphics: String = "VirtIO GPU · VirGL · Android Surface · Adreno",
     val presenterStatus: String = "not-started",
     val rendererMode: String = "virgl-opengl",
     val translationLayer: String = "VirGL",
     val displayTransport: String = "vhost-user-gpu-ahb-native-surface-v3",
-    val runtimeRevision: String = "v40-native-surface-egl-virtio-input-r1",
-    val machinePath: String = "Download/LinuxPC/Vessel-Debian",
+    val runtimeRevision: String = "v59-private-rootfs-fast-ui-r1",
+    val machinePath: String = "Vessel private storage",
     val internetStage: String = "UML vector net · passt",
     val uptimeMs: Long = 0L,
     val storageReady: Boolean = false,
@@ -139,7 +139,11 @@ class VmSessionService : Service() {
     private var guestDpi = 120
     private var guestRefresh = 60f
     @Volatile private var operationGeneration = 0L
+    @Volatile private var resizeGeneration = 0L
+    @Volatile private var discoveryHelperInstalled = false
     private var lastStatsAt = 0L
+    private var lastResizeWidth = 0
+    private var lastResizeHeight = 0
 
     private fun nextOperation(): Long = synchronized(this) { ++operationGeneration }
 
@@ -179,11 +183,14 @@ class VmSessionService : Service() {
             while (isActive) {
                 refreshState()
                 val now = android.os.SystemClock.elapsedRealtime()
-                if (state.value.running && state.value.guestReady && !state.value.busy && now - lastStatsAt > 15000) {
+                if (
+                    state.value.running && state.value.guestReady && !state.value.busy &&
+                    VesselGuestAgent.isConnected() && now - lastStatsAt > 30_000
+                ) {
                     lastStatsAt = now
                     refreshSystemStats(silent = true)
                 }
-                delay(if (state.value.running || state.value.busy) 300 else 1500)
+                delay(if (state.value.running || state.value.busy) 400 else 1500)
             }
         }
     }
@@ -237,12 +244,12 @@ class VmSessionService : Service() {
             hostAssetsReady = assets,
             machinePath = runtime.machineDir.absolutePath,
             guestMemoryMb = runtime.guestMemoryMb,
-            runtimeRevision = "v58-smooth-pageflip-input-browser-r1",
-            displayTransport = "vhost-user-gpu-ahb-pageflip-ring-v7",
+            runtimeRevision = VesselRuntimeController.REVISION,
+            displayTransport = VesselRuntimeController.DISPLAY_TRANSPORT,
             guestDisplayWidth = guestWidth,
             guestDisplayHeight = guestHeight,
             message = when {
-                !storage -> "Grant file access for Download/LinuxPC"
+                !storage -> "Private Linux storage is unavailable"
                 !assets -> "Native runtime assets missing from APK"
                 old.running || old.busy -> old.message
                 else -> "Ready to start Vessel"
@@ -269,8 +276,8 @@ class VmSessionService : Service() {
             graphics = if (VesselExperimentConfig.desktopBackend(this) == "wayland") "KDE Plasma/Wayland → Mesa VirGL → virglrenderer → ${VesselExperimentConfig.hostGl(this).uppercase()} EGL → async AHB → SurfaceFlinger" else "KDE Plasma/X11 fallback → Mesa VirGL → virglrenderer → ${VesselExperimentConfig.hostGl(this).uppercase()} EGL → async AHB",
             rendererMode = o.optString("rendererMode", state.value.rendererMode),
             translationLayer = o.optString("translationLayer", state.value.translationLayer),
-            displayTransport = "vhost-user-gpu-ahb-pageflip-ring-v7",
-            runtimeRevision = "v58-smooth-pageflip-input-browser-r1",
+            displayTransport = VesselRuntimeController.DISPLAY_TRANSPORT,
+            runtimeRevision = VesselRuntimeController.REVISION,
             guestMemoryMb = o.optInt("guestMemoryMb", state.value.guestMemoryMb),
             guestDisplayWidth = o.optInt("displayWidth", guestWidth),
             guestDisplayHeight = o.optInt("displayHeight", guestHeight),
@@ -291,9 +298,36 @@ class VmSessionService : Service() {
         runCatching { runtime.status() }.onSuccess(::applyState)
     }
 
-    /** Surface dimensions are presentation-only; the native presenter owns swapchain resizing. */
+    /**
+     * Resize requests come from the real Android viewport, not from a fake UI
+     * scale slider. Debounce them so dragging an edge does not hammer KWin/GPU.
+     */
     fun configureDisplay(width: Int, height: Int, densityDpi: Int, rate: Float) {
         if (width <= 0 || height <= 0 || densityDpi <= 0 || rate <= 0f) return
+        if (width == lastResizeWidth && height == lastResizeHeight) return
+        lastResizeWidth = width
+        lastResizeHeight = height
+        val generation = ++resizeGeneration
+        val resolutionPercent = VesselExperimentConfig.resolutionPercent(this)
+        val targetWidth = (((width.coerceAtMost(1920) * resolutionPercent) / 100).coerceAtLeast(640) / 8) * 8
+        val targetHeight = (((targetWidth.toDouble() * height / width)
+            .roundToInt().coerceIn(480, 2160)) / 2) * 2
+        val targetDpi = densityDpi.coerceIn(96, 180)
+        scope.launch(Dispatchers.IO) {
+            delay(120)
+            if (generation != resizeGeneration) return@launch
+            guestWidth = targetWidth
+            guestHeight = targetHeight
+            guestDpi = targetDpi
+            guestRefresh = rate.coerceIn(30f, VesselExperimentConfig.refreshHz(this@VmSessionService).toFloat())
+            runtime.resizeDesktop(guestWidth, guestHeight, guestDpi, guestRefresh)
+            if (generation == resizeGeneration) {
+                state.value = state.value.copy(
+                    guestDisplayWidth = guestWidth,
+                    guestDisplayHeight = guestHeight,
+                )
+            }
+        }
     }
 
     fun sendInput(type: String, values: Map<String, Any>) = runtime.input(type, values)
@@ -303,6 +337,7 @@ class VmSessionService : Service() {
         refreshAvailability()
         if (!state.value.connected) return
         val op = nextOperation()
+        discoveryHelperInstalled = false
         appStore.value = AppStoreState()
         state.value = state.value.copy(
             busy = true,
@@ -329,7 +364,10 @@ class VmSessionService : Service() {
                     message = "Vessel workstation ready",
                     lastError = "",
                 )
-                refreshSystemStats(silent = true)
+                if (VesselGuestAgent.isConnected()) {
+                    runCatching { installDiscoveryHelper() }
+                    refreshSystemStats(silent = true)
+                }
             } catch (t: Throwable) {
                 if (op != operationGeneration || state.value.stage == "stopping") return@launch
                 runCatching { runtime.status() }.getOrNull()?.let(::applyState)
@@ -391,7 +429,7 @@ class VmSessionService : Service() {
             test -x /usr/bin/systemsettings || test -x /usr/bin/systemsettings5
             install -d -o vessel -g vessel /home/vessel/Desktop /home/vessel/.config
             install -d -m 755 /var/cache/vessel
-            printf '%s\n' 'unset MOZ_X11_EGL' 'export MOZ_ENABLE_WAYLAND=1' 'export MOZ_WEBRENDER=1' 'export MOZ_DISABLE_CONTENT_SANDBOX=1' 'export XCURSOR_THEME=Breeze' 'export XCURSOR_SIZE=24' 'export GDK_BACKEND=wayland' 'export QT_QPA_PLATFORM=wayland' >/etc/profile.d/vessel-gpu.sh
+            printf '%s\n' 'unset MOZ_X11_EGL' 'export MOZ_ENABLE_WAYLAND=1' 'export MOZ_WEBRENDER=1' 'export MOZ_DISABLE_CONTENT_SANDBOX=1' 'export XCURSOR_THEME=Breeze' 'export XCURSOR_SIZE=18' 'export GDK_BACKEND=wayland' 'export QT_QPA_PLATFORM=wayland' >/etc/profile.d/vessel-gpu.sh
             chmod 0644 /etc/profile.d/vessel-gpu.sh
             update-desktop-database /usr/share/applications 2>/dev/null || true
             update-mime-database /usr/share/mime 2>/dev/null || true
@@ -440,7 +478,7 @@ class VmSessionService : Service() {
               sleep .1
             done
             test "${'$'}ready" = 1
-            sleep .5
+            sleep .25
             if grep -Eqi 'FullRepresentation unavailable|NormalPage unavailable|module .* is not installed' /tmp/vessel-plasma.log 2>/dev/null; then
               tail -160 /tmp/vessel-plasma.log
               exit 45
@@ -449,7 +487,7 @@ class VmSessionService : Service() {
             chown vessel:vessel "${'$'}marker"
             echo VESSEL_PROFILE_READY
             """.trimIndent(),
-            60,
+            45,
         )
         if (!profile.optBoolean("ok")) {
             throw IllegalStateException("Plasma profile/QML validation failed: ${profile.optString("output").takeLast(6000)}")
@@ -460,6 +498,7 @@ class VmSessionService : Service() {
         val current = state.value
         if ((!current.running && !current.busy) || current.stage == "stopping") return
         val op = nextOperation()
+        discoveryHelperInstalled = false
         state.value = current.copy(
             busy = true,
             stage = "stopping",
@@ -529,39 +568,38 @@ class VmSessionService : Service() {
     }
 
     private suspend fun installDiscoveryHelper() {
+        if (discoveryHelperInstalled) return
         val bytes = assets.open("vessel/app_discovery_v3.py").use { it.readBytes() }
         val b64 = Base64.getEncoder().encodeToString(bytes)
         val result = runtime.guest(
             "install -d -m 755 /usr/local/lib/vessel /var/cache/vessel; printf '%s' ${shellQuote(b64)} | base64 -d >/usr/local/lib/vessel/app_discovery.py; chmod 755 /usr/local/lib/vessel/app_discovery.py",
-            30,
+            20,
         )
         check(result.optBoolean("ok")) { "Could not install Vessel AppStream helper" }
+        discoveryHelperInstalled = true
     }
 
-    // Legacy CI provenance marker only; App Store is no longer gated by: state.value.stage != "ready"
     fun refreshApps(query: String = appStore.value.query, sort: String = appStore.value.sort, category: String = appStore.value.category) {
         if (!state.value.running || !state.value.guestReady) {
             appStore.value = appStore.value.copy(loading = false, error = "Start Linux to browse Debian apps")
             return
         }
-        // Discovery uses the controller's serialized guest command channel,
-        // so it can safely queue behind post-boot work without disabling the UI.
         val normalizedSort = sort.uppercase().takeIf { it in APP_SORTS } ?: "POPULAR"
         val normalizedCategory = category.takeIf { it in APP_CATEGORIES } ?: "All"
         appStore.value = appStore.value.copy(query = query, sort = normalizedSort, category = normalizedCategory, loading = true, error = "")
         scope.launch(Dispatchers.IO) {
             try {
-                if (!VesselGuestAgent.waitUntilConnected(8_000)) {
+                if (!VesselGuestAgent.waitUntilConnected(1_500)) {
                     appStore.value = appStore.value.copy(
                         loading = false,
-                        error = "Debian app service is still connecting. Tap Search or a filter to retry.",
+                        error = "Debian app service is reconnecting. Try again in a moment.",
                     )
                     return@launch
                 }
                 installDiscoveryHelper()
                 val result = runtime.guest(
                     "/usr/local/lib/vessel/app_discovery.py ${shellQuote(query)} ${shellQuote(normalizedSort)} ${shellQuote(normalizedCategory)}",
-                    60,
+                    30,
                 )
                 check(result.optBoolean("ok")) { "Debian app discovery returned rc=${result.optInt("rc", -1)}" }
                 val apps = parseApps(result.optString("output"))
@@ -626,12 +664,12 @@ class VmSessionService : Service() {
                 check(result.optBoolean("ok")) { "APT returned rc=${result.optInt("rc", -1)}: ${result.optString("output").takeLast(1800)}" }
                 appStore.value = appStore.value.copy(
                     operationProgress = 92,
-                    operationDetail = "Refreshing desktop and AppStream caches",
+                    operationDetail = "Refreshing desktop metadata",
                 )
                 runtime.guest(
                     "update-desktop-database /usr/share/applications 2>/dev/null || true; " +
                         "appstreamcli refresh-cache --force >/dev/null 2>&1 || true; " +
-                        "rm -f /var/cache/vessel/app-catalog-v3.json /var/cache/vessel/app-catalog-v4.json; " +
+                        "rm -f /var/cache/vessel/app-catalog-v3.json /var/cache/vessel/app-catalog-v4.json /var/cache/vessel/app-catalog-v5.json; " +
                         "su -l vessel -c 'kbuildsycoca5 --noincremental' 2>/dev/null || true",
                     120,
                 )
@@ -671,14 +709,11 @@ class VmSessionService : Service() {
                     pid=${'$'}(pgrep -u vessel -x plasmashell | head -1)
                     test -n "${'$'}pid"
                     envfile=/proc/${'$'}pid/environ
-                    xdg=${'$'}(tr ' ' '
-' <"${'$'}envfile" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -1)
-                    way=${'$'}(tr ' ' '
-' <"${'$'}envfile" | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)
-                    bus=${'$'}(tr ' ' '
-' <"${'$'}envfile" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
+                    xdg=${'$'}(tr '\000' '\n' <"${'$'}envfile" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -1)
+                    way=${'$'}(tr '\000' '\n' <"${'$'}envfile" | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)
+                    bus=${'$'}(tr '\000' '\n' <"${'$'}envfile" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
                     test -n "${'$'}xdg"; test -n "${'$'}way"; test -n "${'$'}bus"
-                    su -l vessel -c "XDG_RUNTIME_DIR='${'$'}xdg' WAYLAND_DISPLAY='${'$'}way' DBUS_SESSION_BUS_ADDRESS='${'$'}bus' QT_QPA_PLATFORM=wayland XCURSOR_THEME=Breeze XCURSOR_SIZE=24 setsid -f kinfocenter >/tmp/vessel-kinfocenter.log 2>&1"
+                    su -l vessel -c "XDG_RUNTIME_DIR='${'$'}xdg' WAYLAND_DISPLAY='${'$'}way' DBUS_SESSION_BUS_ADDRESS='${'$'}bus' QT_QPA_PLATFORM=wayland XCURSOR_THEME=Breeze XCURSOR_SIZE=18 setsid -f kinfocenter >/tmp/vessel-kinfocenter.log 2>&1"
                     echo VESSEL_KINFOCENTER_STARTED
                     """.trimIndent(),
                     30,
@@ -718,6 +753,11 @@ class VmSessionService : Service() {
             updateHostOnlyStats()
             return
         }
+        if (!VesselGuestAgent.isConnected()) {
+            updateHostOnlyStats()
+            if (!silent) machineStats.value = machineStats.value.copy(error = "Debian control service is reconnecting")
+            return
+        }
         if (!silent) machineStats.value = machineStats.value.copy(loading = true, error = "")
         scope.launch(Dispatchers.IO) {
             try {
@@ -728,7 +768,7 @@ class VmSessionService : Service() {
                     printf 'VESSEL_PKGS='; dpkg-query -W -f='${'$'}{binary:Package}\n' 2>/dev/null | wc -l
                     awk '{printf "VESSEL_UPTIME=%d\n",${'$'}1}' /proc/uptime
                     """.trimIndent(),
-                    30,
+                    12,
                 )
                 var used = 0L
                 var free = 0L
@@ -768,7 +808,7 @@ class VmSessionService : Service() {
                     diskPhysicalMb = host.second,
                     hostFreeMb = host.third,
                     loading = false,
-                    error = t.message ?: "Could not read guest stats",
+                    error = if (silent) "" else t.message ?: "Could not read guest stats",
                 )
             }
         }
@@ -783,7 +823,6 @@ class VmSessionService : Service() {
             loading = false,
         )
     }
-
 
     fun collectCrashDiagnostics() {
         diagnostics.value = "Collecting host + Debian diagnostics…"
@@ -800,7 +839,7 @@ class VmSessionService : Service() {
                 appendLine("presenter=${VesselWaylandPresenter.status()}")
                 appendLine("vcpus=${runtime.selectedVcpus} guestRamMiB=${runtime.guestMemoryMb}")
             }
-            val guest = if (state.value.running && state.value.guestReady) {
+            val guest = if (state.value.running && state.value.guestReady && VesselGuestAgent.isConnected()) {
                 runCatching {
                     runtime.guest(
                         """
@@ -811,13 +850,13 @@ class VmSessionService : Service() {
                         printf '\\n=== PLASMA ===\\n'; tail -220 /tmp/vessel-plasma.log 2>/dev/null || true
                         printf '\\n=== FIREFOX CRASH ARTIFACTS ===\\n'; find /home/vessel/.mozilla -type f \\( -path '*/minidumps/*' -o -path '*/Crash Reports/*' \\) -printf '%TY-%Tm-%Td %TT %p\\n' 2>/dev/null | sort | tail -80 || true
                         """.trimIndent(),
-                        45,
+                        30,
                     ).optString("output")
                 }.getOrElse { "Guest diagnostics failed: ${it.message}" }
             } else {
-                "Guest is not running."
+                "Guest control service is not connected."
             }
-            diagnostics.value = (host + "\\n" + guest + "\\n\\n=== RUNTIME LOG TAIL ===\\n" + state.value.console.takeLast(18_000)).takeLast(80_000)
+            diagnostics.value = (host + "\n" + guest + "\n\n=== RUNTIME LOG TAIL ===\n" + state.value.console.takeLast(18_000)).takeLast(80_000)
         }
     }
 
