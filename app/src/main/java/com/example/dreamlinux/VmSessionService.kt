@@ -88,7 +88,7 @@ data class SessionState(
     val rendererMode: String = "virgl-opengl",
     val translationLayer: String = "VirGL",
     val displayTransport: String = "vhost-user-gpu-ahb-native-surface-v3",
-    val runtimeRevision: String = "v59-private-rootfs-fast-ui-r1",
+    val runtimeRevision: String = "v60-private-rootfs-fast-storage-r1",
     val machinePath: String = "Vessel private storage",
     val internetStage: String = "UML vector net · passt",
     val uptimeMs: Long = 0L,

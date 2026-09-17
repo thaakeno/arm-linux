@@ -21,7 +21,7 @@ android {
         minSdk = 30
         targetSdk = 36
         versionCode = 3000 + buildRevision
-        versionName = "2.1.0-alpha14"
+        versionName = "2.1.0-alpha15"
         // Legacy CI provenance marker only: versionName = "2.1.0-alpha2"
         buildConfigField("String", "GIT_COMMIT", "\"$displayRevision\"")
         buildConfigField("String", "GIT_BRANCH", "\"$buildBranch\"")
