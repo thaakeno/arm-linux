@@ -30,11 +30,22 @@ jobs:
           from pathlib import Path
           p = Path('tools/vessel_native/integrate_real_source.py')
           s = p.read_text()
-          old = '''old_xy = \'\'\'            val x = ox + (VesselWaylandPresenter.cursorX() - VesselWaylandPresenter.cursorHotX()) * scale\\n            val y = oy + (VesselWaylandPresenter.cursorY() - VesselWaylandPresenter.cursorHotY()) * scale\\n\'\'\'\nnew_xy = \'\'\'            val predictionActive = SystemClock.uptimeMillis() <= cursorPredictionUntil && predictedCursorX.isFinite() && predictedCursorY.isFinite()\\n            val cursorX = if (predictionActive) predictedCursorX else VesselWaylandPresenter.cursorX().toFloat()\\n            val cursorY = if (predictionActive) predictedCursorY else VesselWaylandPresenter.cursorY().toFloat()\\n            val x = ox + (cursorX - VesselWaylandPresenter.cursorHotX()) * scale\\n            val y = oy + (cursorY - VesselWaylandPresenter.cursorHotY()) * scale\\n\'\'\'\nif old_xy not in v:\n    raise SystemExit(\'LinuxDesktopView cursor draw anchor missing\')\nv = v.replace(old_xy, new_xy, 1)\n'''
-          new = '''new_xy = \'\'\'            val predictionActive = SystemClock.uptimeMillis() <= cursorPredictionUntil && predictedCursorX.isFinite() && predictedCursorY.isFinite()\\n            val cursorX = if (predictionActive) predictedCursorX else VesselWaylandPresenter.cursorX().toFloat()\\n            val cursorY = if (predictionActive) predictedCursorY else VesselWaylandPresenter.cursorY().toFloat()\\n            val x = ox + (cursorX - VesselWaylandPresenter.cursorHotX()) * scale\\n            val y = oy + (cursorY - VesselWaylandPresenter.cursorHotY()) * scale\\n\'\'\'\ncursor_pattern = re.compile(r\'            val x = ox \\+ .*VesselWaylandPresenter\\.cursorX\\(\\).*\\n            val y = oy \\+ .*VesselWaylandPresenter\\.cursorY\\(\\).*\\n\')\nmatches = list(cursor_pattern.finditer(v))\nif len(matches) != 1:\n    context = \'\\n\'.join(line for line in v.splitlines() if \'cursorX()\' in line or \'cursorY()\' in line)\n    raise SystemExit(f\'LinuxDesktopView cursor draw anchor ambiguous ({len(matches)}): {context}\')\nv = cursor_pattern.sub(new_xy, v, count=1)\n'''
-          if old not in s:
-              raise SystemExit('integrator cursor block not found')
-          p.write_text(s.replace(old, new, 1))
+          start = s.index("old_xy = '''")
+          end_marker = "v = v.replace(old_xy, new_xy, 1)\n"
+          end = s.index(end_marker, start) + len(end_marker)
+          replacement = r'''old_xy = ''' + "'''" + r'''            val x = ox + (VesselWaylandPresenter.cursorX() - VesselWaylandPresenter.cursorHotX()) * scale\n            val rawY = VesselWaylandPresenter.cursorY()\n            val guestY = if (VesselExperimentConfig.invertPointerY(context)) gh - rawY else rawY\n            val y = oy + (guestY - VesselWaylandPresenter.cursorHotY()) * scale\n''' + "'''" + r'''
+          new_xy = ''' + "'''" + r'''            val predictionActive = SystemClock.uptimeMillis() <= cursorPredictionUntil && predictedCursorX.isFinite() && predictedCursorY.isFinite()\n            val cursorX = if (predictionActive) predictedCursorX else VesselWaylandPresenter.cursorX().toFloat()\n            val rawY = if (predictionActive) predictedCursorY else VesselWaylandPresenter.cursorY().toFloat()\n            val guestY = if (VesselExperimentConfig.invertPointerY(context)) gh.toFloat() - rawY else rawY\n            val x = ox + (cursorX - VesselWaylandPresenter.cursorHotX()) * scale\n            val y = oy + (guestY - VesselWaylandPresenter.cursorHotY()) * scale\n''' + "'''" + r'''
+          if old_xy not in v:
+              raise SystemExit('LinuxDesktopView alpha4 cursor draw anchor missing')
+          v = v.replace(old_xy, new_xy, 1)
+'''
+          s = s[:start] + replacement + s[end:]
+          s = s.replace(
+              "predictedCursorY = (predictedCursorY + (dy * 1.25f) / scale).coerceIn(0f, gh.toFloat())",
+              "predictedCursorY = (predictedCursorY + (dy * 1.25f * if (VesselExperimentConfig.invertPointerY(context)) -1f else 1f) / scale).coerceIn(0f, gh.toFloat())",
+              1,
+          )
+          p.write_text(s)
           PY
 
       - name: Materialize runtime and apply fixes
