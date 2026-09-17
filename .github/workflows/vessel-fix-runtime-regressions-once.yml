@@ -32,10 +32,6 @@ jobs:
           end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == 'PY')
           raw = lines[start + 1:end]
 
-          # The first workflow was invalid YAML because multiline Python string
-          # contents were not given the YAML block's 10-space indentation. To
-          # recover the intended Python exactly, strip the YAML prefix only from
-          # Python-code lines; preserve lines while inside '''...''' literals.
           out = []
           in_triple = False
           for line in raw:
@@ -62,12 +58,20 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest --no-daemon --build-cache
 
-      - name: Commit fixes
+      - name: Commit code fixes
         shell: bash
         run: |
           set -euo pipefail
+          # GITHUB_TOKEN cannot update workflow files. The recovered patch also
+          # adjusts CI assertions and deletes this one-shot workflow, so keep
+          # those two workflow files out of the bot commit. They are finalized
+          # separately after the code push.
+          git checkout -- .github/workflows/vessel-self-contained.yml
+          git checkout -- .github/workflows/vessel-fix-runtime-regressions-once.yml
+          git checkout -- gradlew
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
+          git diff --cached --check
           git commit -m "fix(vessel): smooth pageflips input apps and browser"
           git push origin HEAD:arch/vessel-self-contained
