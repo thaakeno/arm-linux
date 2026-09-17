@@ -190,7 +190,7 @@ class VmSessionService : Service() {
                     lastStatsAt = now
                     refreshSystemStats(silent = true)
                 }
-                delay(if (state.value.running || state.value.busy) 400 else 1500)
+                delay(if (state.value.running || state.value.busy) 1000 else 2000)
             }
         }
     }
@@ -221,6 +221,14 @@ class VmSessionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         refreshAvailability()
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Swiping the UI away must not be interpreted as "Stop Linux".
+        // START_STICKY normally recreates us; explicitly re-arm the foreground service as well
+        // because some OEM task managers are aggressive about removing the task.
+        runCatching { startForegroundService(Intent(this, VmSessionService::class.java)) }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
@@ -299,22 +307,34 @@ class VmSessionService : Service() {
     }
 
     /**
-     * Resize requests come from the real Android viewport, not from a fake UI
-     * scale slider. Debounce them so dragging an edge does not hammer KWin/GPU.
+     * Android SurfaceView geometry is presentation geometry, not the Linux monitor mode.
+     * A portrait tab, IME, split screen, or a temporary Surface recreation must never turn
+     * KWin's monitor into a tall 752x838 output. Landscape surfaces may still request a
+     * matching monitor aspect; portrait surfaces keep the device's stable landscape aspect.
      */
     fun configureDisplay(width: Int, height: Int, densityDpi: Int, rate: Float) {
         if (width <= 0 || height <= 0 || densityDpi <= 0 || rate <= 0f) return
-        if (width == lastResizeWidth && height == lastResizeHeight) return
-        lastResizeWidth = width
-        lastResizeHeight = height
-        val generation = ++resizeGeneration
+
+        val display = getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)
+        val mode = display?.mode
+        val physicalLong = max(mode?.physicalWidth ?: 1920, mode?.physicalHeight ?: 1080)
+        val physicalShort = min(mode?.physicalWidth ?: 1920, mode?.physicalHeight ?: 1080)
+        val stableAspect = physicalLong.toDouble() / physicalShort.coerceAtLeast(1)
+        val viewportAspect = width.toDouble() / height.coerceAtLeast(1)
+        val outputAspect = if (viewportAspect >= 1.15) viewportAspect.coerceIn(1.25, 2.40) else stableAspect.coerceIn(1.25, 2.40)
+
         val resolutionPercent = VesselExperimentConfig.resolutionPercent(this)
-        val targetWidth = (((width.coerceAtMost(1920) * resolutionPercent) / 100).coerceAtLeast(640) / 8) * 8
-        val targetHeight = (((targetWidth.toDouble() * height / width)
-            .roundToInt().coerceIn(480, 2160)) / 2) * 2
+        val landscapePixels = max(width, height).coerceAtMost(1920)
+        val targetWidth = ((((landscapePixels * resolutionPercent) / 100).coerceAtLeast(640)) / 8) * 8
+        val targetHeight = (((targetWidth / outputAspect).roundToInt().coerceIn(480, 2160)) / 2) * 2
+        if (targetWidth == lastResizeWidth && targetHeight == lastResizeHeight) return
+        lastResizeWidth = targetWidth
+        lastResizeHeight = targetHeight
+
         val targetDpi = densityDpi.coerceIn(96, 180)
+        val generation = ++resizeGeneration
         scope.launch(Dispatchers.IO) {
-            delay(120)
+            delay(220)
             if (generation != resizeGeneration) return@launch
             guestWidth = targetWidth
             guestHeight = targetHeight
@@ -429,7 +449,7 @@ class VmSessionService : Service() {
             test -x /usr/bin/systemsettings || test -x /usr/bin/systemsettings5
             install -d -o vessel -g vessel /home/vessel/Desktop /home/vessel/.config
             install -d -m 755 /var/cache/vessel
-            printf '%s\n' 'unset MOZ_X11_EGL' 'export MOZ_ENABLE_WAYLAND=1' 'export MOZ_WEBRENDER=1' 'export MOZ_DISABLE_CONTENT_SANDBOX=1' 'export XCURSOR_THEME=Breeze' 'export XCURSOR_SIZE=18' 'export GDK_BACKEND=wayland' 'export QT_QPA_PLATFORM=wayland' >/etc/profile.d/vessel-gpu.sh
+            printf '%s\n' 'unset MOZ_X11_EGL' 'export MOZ_ENABLE_WAYLAND=1' 'export MOZ_WEBRENDER=1' 'export XCURSOR_THEME=Breeze' 'export XCURSOR_SIZE=18' 'export GDK_BACKEND=wayland' 'export QT_QPA_PLATFORM=wayland' >/etc/profile.d/vessel-gpu.sh
             chmod 0644 /etc/profile.d/vessel-gpu.sh
             update-desktop-database /usr/share/applications 2>/dev/null || true
             update-mime-database /usr/share/mime 2>/dev/null || true
