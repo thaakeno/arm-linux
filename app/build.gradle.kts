@@ -34,6 +34,14 @@ android {
 
     signingConfigs {
         getByName("debug") {
+            // Dedicated public CI/debug key so every Actions APK has the same
+            // Android signing identity and can update in place without wiping
+            // Vessel's private Linux disk. Never use this key for a release build.
+            storeFile = file("signing/vessel-ci-debug.keystore")
+            storePassword = "vessel-ci-debug"
+            keyAlias = "vessel-ci"
+            keyPassword = "vessel-ci-debug"
+            storeType = "PKCS12"
             enableV1Signing = true
             enableV2Signing = true
             enableV3Signing = true
