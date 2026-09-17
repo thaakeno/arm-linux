@@ -11,7 +11,7 @@ on:
 
 concurrency:
   group: vessel-workstation-image-v2-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -52,9 +52,10 @@ jobs:
           assert len(x['compressedSha256'])==64
           assert len(x['imageSha256'])==64
           PY
-      - name: Publish image first, manifest last
+      - name: Publish image atomically, manifest last
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_PROMPT_DISABLED: '1'
         shell: bash
         run: |
           set -euo pipefail
@@ -63,7 +64,10 @@ jobs:
           MANIFEST="$BASE.json"
           SOURCE_ARCHIVE="$BASE.ext4.zst"
           ASSET_NAME="Vessel-Workstation-bookworm-arm64-${GITHUB_SHA}.ext4.zst"
-          STAGED_ARCHIVE="/tmp/$ASSET_NAME"
+          # Keep the staged archive in the same directory and RENAME it. The old
+          # workflow copied this multi-GB file to /tmp right when the runner was
+          # tightest on disk space, which could kill an otherwise valid build.
+          STAGED_ARCHIVE="build/workstation/$ASSET_NAME"
           PUBLIC_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET_NAME"
 
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -74,15 +78,33 @@ jobs:
               --notes 'Atomic rolling prebuilt Debian Bookworm ARM64 + KDE Plasma workstation for Vessel.'
           fi
 
-          cp "$SOURCE_ARCHIVE" "$STAGED_ARCHIVE"
+          mv "$SOURCE_ARCHIVE" "$STAGED_ARCHIVE"
           EXPECTED_BYTES="$(stat -c '%s' "$STAGED_ARCHIVE")"
+          echo "publishing $ASSET_NAME ($EXPECTED_BYTES bytes)"
+          df -h .
 
-          EXISTING_ID="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq ".assets[] | select(.name == \"$ASSET_NAME\") | .id" | head -1 || true)"
-          if [ -n "$EXISTING_ID" ]; then
-            gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$EXISTING_ID"
-          fi
+          # A cancelled/failed previous attempt can leave an asset with the same
+          # name in a transient state. Remove it before retrying the upload.
+          delete_asset_if_present() {
+            local id
+            id="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq ".assets[] | select(.name == \"$ASSET_NAME\") | .id" | head -1 || true)"
+            if [ -n "$id" ]; then
+              gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$id" || true
+            fi
+          }
+          delete_asset_if_present
 
-          gh release upload "$TAG" "$STAGED_ARCHIVE" --repo "$GITHUB_REPOSITORY"
+          UPLOADED=0
+          for attempt in 1 2 3 4 5; do
+            echo "release upload attempt $attempt/5"
+            if gh release upload "$TAG" "$STAGED_ARCHIVE" --repo "$GITHUB_REPOSITORY"; then
+              UPLOADED=1
+              break
+            fi
+            delete_asset_if_present
+            sleep $((attempt * 8))
+          done
+          [ "$UPLOADED" = 1 ]
 
           READY=0
           for i in $(seq 1 180); do
@@ -98,7 +120,19 @@ jobs:
           done
           [ "$READY" = 1 ]
 
-          curl -fsSIL --retry 12 --retry-all-errors --retry-delay 5 "$PUBLIC_URL" >/dev/null
+          # The GitHub API is the authoritative readiness check above. Public
+          # download URLs can lag very briefly behind the API, so retry without
+          # rebuilding the image.
+          PUBLIC_READY=0
+          for i in $(seq 1 30); do
+            if curl -fsSIL --connect-timeout 15 --max-time 45 "$PUBLIC_URL" >/dev/null; then
+              PUBLIC_READY=1
+              break
+            fi
+            echo "waiting for public release CDN ($i/30)"
+            sleep 4
+          done
+          [ "$PUBLIC_READY" = 1 ]
 
           python3 - "$MANIFEST" "$PUBLIC_URL" "$GITHUB_SHA" <<'PY'
           import json, sys
@@ -113,11 +147,29 @@ jobs:
               f.write('\n')
           PY
 
+          # Publish the tiny pointer only after the large immutable image is
+          # known-good. Clients can therefore never discover a half-uploaded image.
           gh release upload "$TAG" "$MANIFEST" --clobber --repo "$GITHUB_REPOSITORY"
 
-          PUBLISHED="$(curl -fsSL --retry 12 --retry-all-errors --retry-delay 3 \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Vessel-Workstation-bookworm-arm64.json")"
-          test "$(jq -r '.revision' <<<"$PUBLISHED")" = "$GITHUB_SHA"
-          test "$(jq -r '.url' <<<"$PUBLISHED")" = "$PUBLIC_URL"
-          curl -fsSIL --retry 6 --retry-all-errors --retry-delay 3 "$(jq -r '.url' <<<"$PUBLISHED")" >/dev/null
+          PUBLISHED_OK=0
+          for i in $(seq 1 40); do
+            PUBLISHED="$(curl -fsSL --connect-timeout 15 --max-time 45 \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Vessel-Workstation-bookworm-arm64.json" 2>/dev/null || true)"
+            REV="$(jq -r '.revision // empty' <<<"$PUBLISHED" 2>/dev/null || true)"
+            URL="$(jq -r '.url // empty' <<<"$PUBLISHED" 2>/dev/null || true)"
+            if [ "$REV" = "$GITHUB_SHA" ] && [ "$URL" = "$PUBLIC_URL" ]; then
+              PUBLISHED_OK=1
+              break
+            fi
+            echo "waiting for manifest CDN ($i/40) revision=${REV:-missing}"
+            sleep 3
+          done
+          [ "$PUBLISHED_OK" = 1 ]
+
+          # Clean old immutable image assets only after the new manifest is live.
+          RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+          jq -r --arg keep "$ASSET_NAME" '.assets[] | select(.name | startswith("Vessel-Workstation-bookworm-arm64-")) | select(.name != $keep) | .id' <<<"$RELEASE_JSON" | while read -r old_id; do
+            [ -n "$old_id" ] && gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$old_id" || true
+          done
+
           echo "published workstation revision $GITHUB_SHA"
