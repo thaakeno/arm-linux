@@ -846,8 +846,22 @@ class VesselActivity : ComponentActivity() {
             }
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Crash diagnostics", fontWeight = FontWeight.SemiBold)
-                    Text("Host memory, UML exit state, Wayland/GPU, PulseAudio and Firefox crash artifacts", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Crash diagnostics", fontWeight = FontWeight.SemiBold)
+                            Text("Host memory, UML exit state, Wayland/GPU, PulseAudio and Firefox crash artifacts", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        OutlinedButton(onClick = { copyText("Vessel diagnostics", diagnostics) }, enabled = diagnostics.isNotBlank()) { Text("Copy") }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { VmSessionService.active?.collectCrashDiagnostics() }) { Text("Collect") }
+                        OutlinedButton(onClick = { VmSessionService.active?.runGpuDiagnostics() }, enabled = state.guestReady) { Text("GPU + input") }
+                    }
+                    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = Color(0xff050706)) {
+                        SelectionContainer {
+                            Text(diagnostics.takeLast(6_000), Modifier.padding(12.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, maxLines = 18, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
                 }
             }
             LogCard(state)
