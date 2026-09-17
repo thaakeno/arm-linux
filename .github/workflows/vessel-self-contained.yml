@@ -106,7 +106,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.1.0-alpha15"' app/build.gradle.kts
+          grep -F 'versionName = "2.1.0-alpha16"' app/build.gradle.kts
+          grep -F 'VesselBootstrapActivity' app/src/main/AndroidManifest.xml
+          grep -F 'Vessel-Workstation-bookworm-arm64.json' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
+          grep -F 'ZstdInputStream' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
           grep -F 'softwareFallback", false' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'selectedVcpus' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'ensureGuestNetworkBlocking' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
@@ -148,6 +151,8 @@ jobs:
           unzip -l "$DEBUG_APK" > /tmp/apk-files.txt
           unzip -l "$RELEASE_APK" > /tmp/release-apk-files.txt
           for f in libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so libvessel_vhost_gpu.so libvessel_vhost_input.so libvessel_virglrenderer.so libvessel_epoxy.so libEGL_angle.so libGLESv2_angle.so libvessel_wayland_presenter.so; do grep -Fq "lib/arm64-v8a/$f" /tmp/apk-files.txt; grep -Fq "lib/arm64-v8a/$f" /tmp/release-apk-files.txt; done
+          grep -Eq 'lib/arm64-v8a/libzstd-jni.*\.so' /tmp/apk-files.txt
+          grep -Eq 'lib/arm64-v8a/libzstd-jni.*\.so' /tmp/release-apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
