@@ -20,7 +20,6 @@ add_library(vessel_wayland_presenter SHARED
     vessel_native_presenter.cpp
     vessel_surface_presenter.cpp
     vessel_virtio_input.cpp
-    vessel_crosvm_input.cpp
 )
 target_compile_features(vessel_wayland_presenter PRIVATE cxx_std_17)
 target_compile_options(vessel_wayland_presenter PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers -Wno-misleading-indentation -Wno-unused-function)
