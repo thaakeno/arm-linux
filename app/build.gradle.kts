@@ -82,12 +82,6 @@ android {
 
 kotlin { jvmToolchain(17) }
 
-val applyVesselV59Patch = tasks.register<Exec>("applyVesselV59Patch") {
-    workingDir(rootProject.projectDir)
-    commandLine("python3", "app/v59_build_patch.py")
-}
-tasks.named("preBuild") { dependsOn(applyVesselV59Patch) }
-
 dependencies {
   implementation("dev.rikka.shizuku:api:13.1.5")
   implementation("dev.rikka.shizuku:provider:13.1.5")
