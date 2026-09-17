@@ -106,7 +106,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.1.0-alpha14"' app/build.gradle.kts
+          grep -F 'versionName = "2.1.0-alpha15"' app/build.gradle.kts
           grep -F 'softwareFallback", false' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'selectedVcpus' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'ensureGuestNetworkBlocking' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
