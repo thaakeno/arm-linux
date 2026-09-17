@@ -17,80 +17,40 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: arch/vessel-self-contained
-          fetch-depth: 3
+          fetch-depth: 5
 
       - name: Recover and apply runtime fixes
         shell: bash
         run: |
           set -euo pipefail
-          git show HEAD^^:.github/workflows/vessel-fix-runtime-regressions-once.yml > /tmp/vessel-old-workflow.yml
+          git show 3f8ff53fa23960d541c8f7c6974fa95a1d7e6b02:.github/workflows/vessel-fix-runtime-regressions-once.yml > /tmp/vessel-old-workflow.yml
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           lines = Path('/tmp/vessel-old-workflow.yml').read_text().splitlines()
           start = next(i for i, line in enumerate(lines) if "python3 - <<'PY'" in line)
           end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == 'PY')
-          body = lines[start + 1:end]
-          body = [line[10:] if line.startswith('          ') else line for line in body]
-          script = '\n'.join(body) + '\n'
+          raw = lines[start + 1:end]
 
-          # The original one-shot YAML could not preserve indentation inside
-          # this multiline C++ literal. Apply that edit with a tolerant regex
-          # here, then remove the brittle replacement from the recovered script.
-          bridge = Path('tools/vessel_native/vessel_ahb_bridge.cpp')
-          source = bridge.read_text()
-          pattern = re.compile(
-              r'    const bool geometry_changed = state\.width != width \|\| state\.height != height \|\| state\.x != x \|\| state\.y != y;\n'
-              r'    const bool resource_changed = state\.resource_id != 0 && state\.resource_id != resource_id;\n'
-              r'    if \(geometry_changed \|\| resource_changed\) \{\n'
-              r'.*?'
-              r'    \} else \{\n'
-              r'        state\.resource_id = resource_id;\n'
-              r'        state\.x = x;\n'
-              r'        state\.y = y;\n'
-              r'    \}\n',
-              re.S,
-          )
-          replacement = (
-              '    const bool geometry_changed = state.width != width || state.height != height || state.x != x || state.y != y;\n'
-              '    const bool resource_changed = state.resource_id != 0 && state.resource_id != resource_id;\n'
-              '    if (geometry_changed) {\n'
-              '        // Only a real scanout geometry change invalidates the Android output ring.\n'
-              '        if (!wait_scanout_idle(state)) return RC_SOCKET;\n'
-              '        destroy_scanout(state);\n'
-              '        state.width = width;\n'
-              '        state.height = height;\n'
-              '        state.x = x;\n'
-              '        state.y = y;\n'
-              '        logi("scanout geometry changed; rebuilding AHB ring " + std::to_string(width) + "x" + std::to_string(height));\n'
-              '    } else if (resource_changed) {\n'
-              '        // SET_SCANOUT is a page flip. Keep the persistent AHB ring.\n'
-              '        const DamageRect full = full_damage(state);\n'
-              '        for (auto& slot : state.slots) {\n'
-              '            if (slot.buffer && slot.content_valid) slot.pending_damage = full;\n'
-              '        }\n'
-              '    }\n'
-              '    state.resource_id = resource_id;\n'
-              '    state.x = x;\n'
-              '    state.y = y;\n'
-          )
-          source2, count = pattern.subn(replacement, source, count=1)
-          if count != 1:
-              raise SystemExit(f'bridge page-flip patch matched {count} blocks')
-          bridge.write_text(source2)
-
-          script2, removed = re.subn(
-              r"rep\(bridge,\n\s+'''    const bool geometry_changed.*?\n'''\)\n",
-              '',
-              script,
-              count=1,
-              flags=re.S,
-          )
-          if removed != 1:
-              raise SystemExit(f'could not remove brittle bridge replacement from recovered script: {removed}')
-          Path('/tmp/vessel-runtime-fix.py').write_text(script2)
+          # The first workflow was invalid YAML because multiline Python string
+          # contents were not given the YAML block's 10-space indentation. To
+          # recover the intended Python exactly, strip the YAML prefix only from
+          # Python-code lines; preserve lines while inside '''...''' literals.
+          out = []
+          in_triple = False
+          for line in raw:
+              if in_triple:
+                  cooked = line
+              else:
+                  cooked = line[10:] if line.startswith('          ') else line
+              out.append(cooked)
+              if cooked.count("'''") % 2 == 1:
+                  in_triple = not in_triple
+          if in_triple:
+              raise SystemExit('recovered patch script ended inside a triple-quoted string')
+          Path('/tmp/vessel-runtime-fix.py').write_text('\n'.join(out) + '\n')
           PY
+          python3 -m py_compile /tmp/vessel-runtime-fix.py
           python3 /tmp/vessel-runtime-fix.py
           git diff --check
           git status --short
