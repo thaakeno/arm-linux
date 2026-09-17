@@ -25,7 +25,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,11 +108,11 @@ jobs:
           set -euxo pipefail
           grep -F 'versionName = "2.1.0-alpha17"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
-          grep -F 'VesselBootstrapActivity' app/src/main/AndroidManifest.xml
-          grep -F 'vessel-workstation-v2-edge' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
-          grep -F 'ZstdInputStream' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
-          grep -F 'Nothing installs automatically' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
-          grep -F 'probeAsset' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivity.kt
+          grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
+          grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
+          grep -F 'Workstation manifest is not the new chunked format yet' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
+          grep -F 'SequenceInputStream' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
+          grep -F 'Nothing installs automatically' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
           grep -F 'softwareFallback", false' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'selectedVcpus' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
           grep -F 'ensureGuestNetworkBlocking' app/src/main/java/com/example/dreamlinux/VesselRuntimeController.kt
@@ -162,25 +162,34 @@ jobs:
           cp "$DEBUG_APK" build/deliverables/Vessel-arm64-debug.apk
           cp "$RELEASE_APK" build/deliverables/Vessel-arm64-release-unsigned.apk
           sha256sum build/deliverables/*.apk > build/deliverables/SHA256SUMS.txt
-      - name: Verify public workstation bootstrap target
+      - name: Verify public chunked workstation bootstrap target
         shell: bash
         run: |
           set -euo pipefail
           MANIFEST_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/vessel-workstation-v2-edge/Vessel-Workstation-bookworm-arm64.json"
           READY=0
-          # The image workflow runs independently on native ARM64. Give it enough
-          # time to finish without turning a valid APK build into a race failure.
-          for i in $(seq 1 360); do
-            JSON="$(curl -fsSL --retry 2 --retry-all-errors --retry-delay 2 "$MANIFEST_URL" 2>/dev/null || true)"
-            ASSET_URL="$(jq -r '.url // empty' <<<"$JSON" 2>/dev/null || true)"
+          # This is only a migration gate. Once schema 2 exists, normal APK-only
+          # changes pass immediately and do not rebuild the workstation image.
+          for i in $(seq 1 200); do
+            JSON="$(curl -fsSL --connect-timeout 10 --max-time 30 "${MANIFEST_URL}?apk=${GITHUB_SHA}" 2>/dev/null || true)"
+            SCHEMA="$(jq -r '.schema // 0' <<<"$JSON" 2>/dev/null || true)"
+            TRANSPORT="$(jq -r '.transport // empty' <<<"$JSON" 2>/dev/null || true)"
             SHA="$(jq -r '.compressedSha256 // empty' <<<"$JSON" 2>/dev/null || true)"
-            if [ -n "$ASSET_URL" ] && [ ${#SHA} -eq 64 ] && curl -fsSIL --connect-timeout 15 --max-time 45 "$ASSET_URL" >/dev/null 2>&1; then
-              READY=1
-              echo "workstation bootstrap asset is publicly readable: $ASSET_URL"
-              break
+            TOTAL="$(jq -r '.compressedBytes // 0' <<<"$JSON" 2>/dev/null || echo 0)"
+            COUNT="$(jq -r '.chunks | length' <<<"$JSON" 2>/dev/null || echo 0)"
+            SUM="$(jq -r '[.chunks[]?.bytes] | add // 0' <<<"$JSON" 2>/dev/null || echo 0)"
+            FIRST="$(jq -r '.chunks[0].url // empty' <<<"$JSON" 2>/dev/null || true)"
+            LAST="$(jq -r '.chunks[-1].url // empty' <<<"$JSON" 2>/dev/null || true)"
+            if [ "$SCHEMA" = 2 ] && [ "$TRANSPORT" = github-release-chunks-v1 ] && [ ${#SHA} -eq 64 ] && [ "$COUNT" -gt 0 ] && [ "$TOTAL" = "$SUM" ]; then
+              if curl -fsSIL --connect-timeout 10 --max-time 30 "$FIRST" >/dev/null 2>&1 && \
+                 curl -fsSIL --connect-timeout 10 --max-time 30 "$LAST" >/dev/null 2>&1; then
+                READY=1
+                echo "chunked workstation bootstrap is publicly readable: $COUNT parts, $TOTAL bytes"
+                break
+              fi
             fi
-            echo "waiting for complete workstation release publication ($i/360)"
-            sleep 5
+            echo "waiting for schema-2 workstation publication ($i/200)"
+            sleep 3
           done
           [ "$READY" = 1 ]
       - name: Upload APKs
