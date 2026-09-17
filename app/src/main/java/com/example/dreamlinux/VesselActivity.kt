@@ -544,7 +544,7 @@ class VesselActivity : ComponentActivity() {
             if (store.error.isNotBlank()) ErrorStrip(store.error)
             if (store.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 8.dp)) {
-                items(store.apps, key = { it.packageName }) { app -> AppCard(app, store.busyPackage) }
+                items(store.apps, key = { it.packageName }) { app -> AppCard(app, store) }
                 if (state.guestReady && !store.loading && store.apps.isEmpty() && store.error.isBlank()) {
                     item { Text("No apps in this view.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
@@ -553,7 +553,7 @@ class VesselActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun AppCard(app: GuestApp, busyPackage: String) {
+    private fun AppCard(app: GuestApp, store: AppStoreState) {
         val image = remember(app.iconBase64) {
             runCatching {
                 if (app.iconBase64.isBlank()) null else {
@@ -562,41 +562,62 @@ class VesselActivity : ComponentActivity() {
                 }
             }.getOrNull()
         }
+        val busy = store.busyPackage == app.packageName
         ElevatedCard(shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
-            Row(Modifier.fillMaxWidth().padding(13.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-                Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.size(56.dp)) {
-                    if (image != null) {
-                        Image(image, app.name, Modifier.fillMaxSize().padding(7.dp), contentScale = ContentScale.Fit)
+            Column(Modifier.fillMaxWidth().padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+                    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.size(56.dp)) {
+                        if (image != null) {
+                            Image(image, app.name, Modifier.fillMaxSize().padding(7.dp), contentScale = ContentScale.Fit)
+                        } else {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Laptop, null, tint = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            Text(app.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (app.installed) StatusPill("INSTALLED", true)
+                        }
+                        Text(app.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            buildString {
+                                append(app.category)
+                                append(" · ")
+                                append(app.packageName)
+                                if (app.installedSizeKb > 0) append(" · ${formatMb(app.installedSizeKb)} installed size")
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (app.installed) {
+                        OutlinedButton(onClick = { VmSessionService.active?.removeApp(app.packageName) }, enabled = store.busyPackage.isBlank()) {
+                            Text(if (busy) "Removing" else "Remove")
+                        }
                     } else {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Default.Laptop, null, tint = MaterialTheme.colorScheme.primary)
+                        Button(onClick = { VmSessionService.active?.installApp(app.packageName) }, enabled = store.busyPackage.isBlank()) {
+                            Text(if (busy) "Installing" else "Install")
                         }
                     }
                 }
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        Text(app.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (app.installed) StatusPill("INSTALLED", true)
+                if (busy) {
+                    if (store.operationProgress < 0) {
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { store.operationProgress.coerceIn(0, 100) / 100f },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
-                    Text(app.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text(
-                        buildString {
-                            append(app.category)
-                            append(" · ")
-                            append(app.packageName)
-                            if (app.installedSizeKb > 0) append(" · ${formatMb(app.installedSizeKb)} installed size")
-                        },
+                        store.operationDetail.ifBlank { "Working…" },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                     )
-                }
-                val busy = busyPackage == app.packageName
-                if (app.installed) {
-                    OutlinedButton(onClick = { VmSessionService.active?.removeApp(app.packageName) }, enabled = busyPackage.isBlank()) { Text(if (busy) "…" else "Remove") }
-                } else {
-                    Button(onClick = { VmSessionService.active?.installApp(app.packageName) }, enabled = busyPackage.isBlank()) { Text(if (busy) "…" else "Install") }
                 }
             }
         }
@@ -672,6 +693,15 @@ class VesselActivity : ComponentActivity() {
                     Metric(Icons.Default.Bolt, "CPU", "${stats.vcpus} UML vCPU")
                     Metric(Icons.Default.DesktopWindows, "Display", "${state.guestDisplayWidth} × ${state.guestDisplayHeight} stable landscape · up to 120 Hz")
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
+                    OutlinedButton(
+                        onClick = { VmSessionService.active?.launchSystemInfo() },
+                        enabled = state.guestReady && !state.busy,
+                    ) {
+                        Icon(Icons.Default.Memory, null)
+                        Spacer(Modifier.width(7.dp))
+                        Text("Linux specs")
+                    }
+                    Text("Opens KDE Info Center inside the running Linux desktop.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {

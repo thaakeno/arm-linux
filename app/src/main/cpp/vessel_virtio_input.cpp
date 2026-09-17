@@ -117,15 +117,9 @@ struct InputSender {
             std::lock_guard<std::mutex> g(queue_lock);
             if (!queue.empty()) {
                 Packet& last = queue.back();
-                if (packet.kind == PacketKind::Relative && last.kind == PacketKind::Relative &&
-                    last.which == packet.which && last.events.size() >= 3 && packet.events.size() >= 3) {
-                    const int32_t dx = signed_value(last.events[0].value) + signed_value(packet.events[0].value);
-                    const int32_t dy = signed_value(last.events[1].value) + signed_value(packet.events[1].value);
-                    last.events[0].value = bits(dx);
-                    last.events[1].value = bits(dy);
-                    cv.notify_one();
-                    return true;
-                }
+                // Do not merge relative pointer packets. libinput acceleration is
+                // velocity/time based, so collapsing several small moves into one large
+                // delta creates the exact teleport/jump behaviour a trackpad must avoid.
                 if (packet.kind == PacketKind::Scroll && last.kind == PacketKind::Scroll &&
                     last.which == packet.which && last.events.size() >= 3 && packet.events.size() >= 3) {
                     const int32_t x = signed_value(last.events[0].value) + signed_value(packet.events[0].value);

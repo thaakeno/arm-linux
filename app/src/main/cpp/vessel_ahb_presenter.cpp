@@ -30,8 +30,8 @@ constexpr uint32_t VERSION = 3;
 constexpr uint32_t MSG_REGISTER_FRAME = 1;
 constexpr uint32_t MSG_FRAME = 2;
 constexpr uint32_t MSG_DISABLE = 3;
-constexpr uint32_t FRAME_SLOTS = 5;
-constexpr uint32_t FRAMES_IN_FLIGHT = 5;
+constexpr uint32_t FRAME_SLOTS = 3;
+constexpr uint32_t FRAMES_IN_FLIGHT = 3;
 constexpr uint8_t FENCE_TAG = 0xF3;
 
 #pragma pack(push, 1)

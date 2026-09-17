@@ -47,6 +47,8 @@ data class AppStoreState(
     val category: String = "All",
     val loading: Boolean = false,
     val busyPackage: String = "",
+    val operationProgress: Int = 0,
+    val operationDetail: String = "",
     val error: String = "",
 )
 
@@ -235,8 +237,8 @@ class VmSessionService : Service() {
             hostAssetsReady = assets,
             machinePath = runtime.machineDir.absolutePath,
             guestMemoryMb = runtime.guestMemoryMb,
-            runtimeRevision = "v57-one-final-tty-rpc-r1",
-            displayTransport = "vhost-user-gpu-ahb-async-surface-v6",
+            runtimeRevision = "v58-smooth-pageflip-input-browser-r1",
+            displayTransport = "vhost-user-gpu-ahb-pageflip-ring-v7",
             guestDisplayWidth = guestWidth,
             guestDisplayHeight = guestHeight,
             message = when {
@@ -267,8 +269,8 @@ class VmSessionService : Service() {
             graphics = if (VesselExperimentConfig.desktopBackend(this) == "wayland") "KDE Plasma/Wayland → Mesa VirGL → virglrenderer → ${VesselExperimentConfig.hostGl(this).uppercase()} EGL → async AHB → SurfaceFlinger" else "KDE Plasma/X11 fallback → Mesa VirGL → virglrenderer → ${VesselExperimentConfig.hostGl(this).uppercase()} EGL → async AHB",
             rendererMode = o.optString("rendererMode", state.value.rendererMode),
             translationLayer = o.optString("translationLayer", state.value.translationLayer),
-            displayTransport = "vhost-user-gpu-ahb-async-surface-v6",
-            runtimeRevision = "v57-one-final-tty-rpc-r1",
+            displayTransport = "vhost-user-gpu-ahb-pageflip-ring-v7",
+            runtimeRevision = "v58-smooth-pageflip-input-browser-r1",
             guestMemoryMb = o.optInt("guestMemoryMb", state.value.guestMemoryMb),
             guestDisplayWidth = o.optInt("displayWidth", guestWidth),
             guestDisplayHeight = o.optInt("displayHeight", guestHeight),
@@ -357,6 +359,11 @@ class VmSessionService : Service() {
 
     private suspend fun ensureWorkstation(op: Long) {
         if (op != operationGeneration) return
+        val fastMarker = runtime.guest(
+            "test -f /var/cache/vessel/workstation-v58 && test -f /etc/xdg/menus/kf5-applications.menu && test -d /usr/share/icons/breeze",
+            5,
+        )
+        if (fastMarker.optBoolean("ok")) return
         state.value = state.value.copy(
             stage = "workstation_validation",
             progressPercent = 97,
@@ -384,7 +391,7 @@ class VmSessionService : Service() {
             test -x /usr/bin/systemsettings || test -x /usr/bin/systemsettings5
             install -d -o vessel -g vessel /home/vessel/Desktop /home/vessel/.config
             install -d -m 755 /var/cache/vessel
-            printf '%s\n' 'unset MOZ_X11_EGL' 'export MOZ_ENABLE_WAYLAND=1' 'export MOZ_WEBRENDER=1' 'export GDK_BACKEND=wayland' 'export QT_QPA_PLATFORM=wayland' >/etc/profile.d/vessel-gpu.sh
+            printf '%s\n' 'unset MOZ_X11_EGL' 'export MOZ_ENABLE_WAYLAND=1' 'export MOZ_WEBRENDER=1' 'export MOZ_DISABLE_CONTENT_SANDBOX=1' 'export XCURSOR_THEME=Breeze' 'export XCURSOR_SIZE=24' 'export GDK_BACKEND=wayland' 'export QT_QPA_PLATFORM=wayland' >/etc/profile.d/vessel-gpu.sh
             chmod 0644 /etc/profile.d/vessel-gpu.sh
             update-desktop-database /usr/share/applications 2>/dev/null || true
             update-mime-database /usr/share/mime 2>/dev/null || true
@@ -397,6 +404,7 @@ class VmSessionService : Service() {
               src=/usr/share/applications/${'$'}f.desktop
               [ -f "${'$'}src" ] && install -m 755 -o vessel -g vessel "${'$'}src" /home/vessel/Desktop/ || true
             done
+            touch /var/cache/vessel/workstation-v58
             echo VESSEL_WORKSTATION_READY
             """.trimIndent(),
             180,
@@ -417,12 +425,14 @@ class VmSessionService : Service() {
         val profile = runtime.guest(
             """
             set -e
-            marker=/home/vessel/.config/.vessel-workstation-2.1-alpha3
+            marker=/home/vessel/.config/.vessel-workstation-v58
             uid=${'$'}(id -u vessel)
             test -f /etc/xdg/menus/kf5-applications.menu
             test -f /usr/share/plasma/plasmoids/org.kde.plasma.kickoff/contents/ui/FullRepresentation.qml
             test -f /usr/share/plasma/plasmoids/org.kde.plasma.kickoff/contents/ui/NormalPage.qml
-            su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" >/tmp/vessel-sycoca.log 2>&1
+            if [ ! -f "${'$'}marker" ]; then
+              su -l vessel -c "XDG_RUNTIME_DIR=/run/user/${'$'}uid kbuildsycoca5 --noincremental" >/tmp/vessel-sycoca.log 2>&1
+            fi
             ready=0
             compositor=${if (VesselExperimentConfig.desktopBackend(this) == "wayland") "kwin_wayland" else "kwin_x11"}
             for i in ${'$'}(seq 1 120); do
@@ -571,27 +581,112 @@ class VmSessionService : Service() {
 
     private fun changeApp(packageName: String, install: Boolean) {
         if (!PACKAGE_RE.matches(packageName) || !state.value.running || !state.value.guestReady) return
-        appStore.value = appStore.value.copy(busyPackage = packageName, error = "")
+        appStore.value = appStore.value.copy(
+            busyPackage = packageName,
+            operationProgress = 8,
+            operationDetail = "Checking Debian package state",
+            error = "",
+        )
         scope.launch(Dispatchers.IO) {
             try {
+                val policy = "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; mkdir -p /usr/sbin /var/cache/vessel; " +
+                    "printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; "
+                if (install) {
+                    val freshLists = runtime.guest(
+                        "find /var/lib/apt/lists -type f -mmin -360 -print -quit 2>/dev/null | grep -q .",
+                        10,
+                    ).optBoolean("ok")
+                    if (!freshLists) {
+                        appStore.value = appStore.value.copy(
+                            operationProgress = -1,
+                            operationDetail = "Refreshing Debian package metadata",
+                        )
+                        val update = runtime.guest(
+                            policy + "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update",
+                            600,
+                        )
+                        check(update.optBoolean("ok")) { "APT update returned rc=${update.optInt("rc", -1)}" }
+                    }
+                    appStore.value = appStore.value.copy(
+                        operationProgress = -1,
+                        operationDetail = "Downloading and installing $packageName",
+                    )
+                } else {
+                    appStore.value = appStore.value.copy(
+                        operationProgress = -1,
+                        operationDetail = "Removing $packageName",
+                    )
+                }
                 val action = if (install) {
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update >/dev/null && apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y ${shellQuote(packageName)}"
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y ${shellQuote(packageName)}"
                 } else {
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 remove -y ${shellQuote(packageName)}"
                 }
-                val result = runtime.guest(
-                    "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; mkdir -p /usr/sbin /var/cache/vessel; printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; chmod 755 /usr/sbin/policy-rc.d; $action; " +
-                        "update-desktop-database /usr/share/applications 2>/dev/null || true; rm -f /var/cache/vessel/app-catalog-v2.json; " +
-                        "su -l vessel -c 'kbuildsycoca5 --noincremental' 2>/dev/null || true",
-                    1800,
+                val result = runtime.guest(policy + action, 1800)
+                check(result.optBoolean("ok")) { "APT returned rc=${result.optInt("rc", -1)}: ${result.optString("output").takeLast(1800)}" }
+                appStore.value = appStore.value.copy(
+                    operationProgress = 92,
+                    operationDetail = "Refreshing desktop and AppStream caches",
                 )
-                check(result.optBoolean("ok")) { "APT returned rc=${result.optInt("rc", -1)}" }
+                runtime.guest(
+                    "update-desktop-database /usr/share/applications 2>/dev/null || true; " +
+                        "appstreamcli refresh-cache --force >/dev/null 2>&1 || true; " +
+                        "rm -f /var/cache/vessel/app-catalog-v3.json /var/cache/vessel/app-catalog-v4.json; " +
+                        "su -l vessel -c 'kbuildsycoca5 --noincremental' 2>/dev/null || true",
+                    120,
+                )
                 refreshApps(appStore.value.query, appStore.value.sort, appStore.value.category)
                 refreshSystemStats(silent = true)
             } catch (t: Throwable) {
                 appStore.value = appStore.value.copy(error = t.message ?: "APT operation failed")
             } finally {
-                appStore.value = appStore.value.copy(busyPackage = "")
+                appStore.value = appStore.value.copy(
+                    busyPackage = "",
+                    operationProgress = 0,
+                    operationDetail = "",
+                )
+            }
+        }
+    }
+
+    fun launchSystemInfo() {
+        if (!state.value.running || !state.value.guestReady) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                var available = runtime.guest("command -v kinfocenter >/dev/null 2>&1", 10).optBoolean("ok")
+                if (!available) {
+                    state.value = state.value.copy(message = "Installing KDE Info Center once")
+                    val result = runtime.guest(
+                        "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
+                            "find /var/lib/apt/lists -type f -mmin -360 -print -quit 2>/dev/null | grep -q . || apt-get -o Dpkg::Use-Pty=0 update >/dev/null; " +
+                            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y kinfocenter",
+                        900,
+                    )
+                    available = result.optBoolean("ok")
+                    check(available) { "Could not install kinfocenter: ${result.optString("output").takeLast(1600)}" }
+                }
+                val launched = runtime.guest(
+                    """
+                    set -e
+                    pid=${'$'}(pgrep -u vessel -x plasmashell | head -1)
+                    test -n "${'$'}pid"
+                    envfile=/proc/${'$'}pid/environ
+                    xdg=${'$'}(tr ' ' '
+' <"${'$'}envfile" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -1)
+                    way=${'$'}(tr ' ' '
+' <"${'$'}envfile" | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)
+                    bus=${'$'}(tr ' ' '
+' <"${'$'}envfile" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
+                    test -n "${'$'}xdg"; test -n "${'$'}way"; test -n "${'$'}bus"
+                    su -l vessel -c "XDG_RUNTIME_DIR='${'$'}xdg' WAYLAND_DISPLAY='${'$'}way' DBUS_SESSION_BUS_ADDRESS='${'$'}bus' QT_QPA_PLATFORM=wayland XCURSOR_THEME=Breeze XCURSOR_SIZE=24 setsid -f kinfocenter >/tmp/vessel-kinfocenter.log 2>&1"
+                    echo VESSEL_KINFOCENTER_STARTED
+                    """.trimIndent(),
+                    30,
+                )
+                check(launched.optBoolean("ok")) { "KInfoCenter launch failed: ${launched.optString("output").takeLast(1600)}" }
+                state.value = state.value.copy(message = "KDE Info Center opened")
+            } catch (t: Throwable) {
+                state.value = state.value.copy(lastError = t.message ?: "Could not open KDE Info Center")
             }
         }
     }

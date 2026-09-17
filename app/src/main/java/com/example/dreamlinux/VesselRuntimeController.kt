@@ -37,8 +37,8 @@ class VesselRuntimeController(
 ) {
     companion object {
         const val PROTOCOL = 40
-        const val REVISION = "v57-one-final-tty-rpc-r1"
-        const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahb-async-surface-v6"
+        const val REVISION = "v58-smooth-pageflip-input-browser-r1"
+        const val DISPLAY_TRANSPORT = "vhost-user-gpu-ahb-pageflip-ring-v7"
         const val INPUT_TRANSPORT = "virtio-input-vhost-user-same-uid-v1"
         const val UML_VCPUS = 6
         private const val ROOTFS_URL = "https://github.com/zalexdev/linux-um-arm64/releases/download/prebuilt-20260816/debian-docker.ext4.gz"
@@ -803,13 +803,31 @@ class VesselRuntimeController(
     }
 
     private fun ensurePlasma() {
-        recoverPackageState()
-        progress("plasma", 55, "Checking KDE Plasma Wayland workstation")
-        if (guestBlocking(plasmaReadyCommand(), 20).first == 0) {
-            append("[plasma] complete KDE Plasma Wayland/Xwayland workstation already ready\n")
+        val readyMarker = "/var/cache/vessel/plasma-ready-v58"
+        progress("plasma", 53, "Checking persistent Plasma workstation")
+        val fastReady = guestBlocking(
+            "test -f $readyMarker && command -v kwin_wayland >/dev/null 2>&1 && command -v startplasma-wayland >/dev/null 2>&1 && test -c /dev/dri/card0",
+            5,
+        )
+        if (fastReady.first == 0) {
+            append("[plasma] fast-path marker valid; skipped dpkg/APT validation\n")
             return
         }
-        progress("plasma_install", 56, "Installing native Wayland Plasma workstation")
+        if (guestBlocking(plasmaReadyCommand(), 15).first == 0) {
+            guestBlocking("install -d -m 755 /var/cache/vessel; touch $readyMarker", 5)
+            append("[plasma] existing workstation validated; wrote fast-path marker\n")
+            return
+        }
+        // Only touch dpkg recovery when validation actually failed. Running
+        // dpkg --configure -a on every healthy boot made a persistent PC feel
+        // like an installer.
+        recoverPackageState()
+        if (guestBlocking(plasmaReadyCommand(), 20).first == 0) {
+            guestBlocking("install -d -m 755 /var/cache/vessel; touch $readyMarker", 5)
+            append("[plasma] package recovery restored workstation without reinstall\n")
+            return
+        }
+        progress("plasma_install", 56, "Installing missing Plasma components")
         val reporter = PackageProgressReporter("plasma_install", 56)
         val cmd = packagePolicyCommand() + "\n" +
             "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
@@ -824,12 +842,13 @@ class VesselRuntimeController(
         val (rc, out) = guestBlocking(cmd, 2400, reporter::onLine)
         if (rc != 0) { append("[plasma] apt failed rc=$rc ${out.takeLast(6000)}\n"); error("Plasma Wayland package installation failed (apt rc=$rc)") }
         val metadataRefresh = guestBlocking(
-            "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update >/tmp/vessel-apt-icons.log 2>&1; appstreamcli refresh-cache --force >/tmp/vessel-appstream-refresh.log 2>&1 || true",
-            300,
+            "appstreamcli refresh-cache --force >/tmp/vessel-appstream-refresh.log 2>&1 || true",
+            120,
         )
         if (metadataRefresh.first != 0) append("[apps] metadata/icon refresh rc=${metadataRefresh.first}: ${metadataRefresh.second.takeLast(2000)}\n")
         val verify = guestBlocking(plasmaReadyCommand(), 30)
         if (verify.first != 0) { append("[plasma] validation failed ${verify.second.takeLast(6000)}\n"); error("Plasma Wayland runtime validation failed") }
+        guestBlocking("install -d -m 755 /var/cache/vessel; touch $readyMarker", 5)
         progress("plasma_ready", 72, "KDE Plasma Wayland workstation ready")
     }
 
@@ -1146,6 +1165,9 @@ class VesselRuntimeController(
             export MOZ_ENABLE_WAYLAND=1
             export MOZ_WEBRENDER=1
             export MOZ_ACCELERATED=1
+            export MOZ_DISABLE_CONTENT_SANDBOX=1
+            export XCURSOR_THEME=Breeze
+            export XCURSOR_SIZE=24
             unset MOZ_X11_EGL
             VENV
             chmod 0644 /etc/profile.d/vessel-gpu.sh
@@ -1166,7 +1188,7 @@ class VesselRuntimeController(
             user_pref("widget.dmabuf-webgl.enabled", $dmabuf);
             user_pref("gfx.x11-egl.force-disabled", true);
             user_pref("gl.require-hardware", true);
-            user_pref("security.sandbox.content.level", 1);
+            user_pref("security.sandbox.content.level", 0);
             FUSER
             chown vessel:vessel /home/vessel/.mozilla /home/vessel/.mozilla/firefox /home/vessel/.mozilla/firefox/vessel.default /home/vessel/.config
             chown vessel:vessel /home/vessel/.mozilla/firefox/profiles.ini /home/vessel/.mozilla/firefox/vessel.default/user.js
@@ -1179,7 +1201,8 @@ class VesselRuntimeController(
             export XDG_SESSION_CLASS=user XDG_SEAT=seat0 XDG_VTNR=1 KDE_FULL_SESSION=true KDE_SESSION_VERSION=5
             export LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl
             export GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland CLUTTER_BACKEND=wayland SDL_VIDEODRIVER=wayland
-            export MOZ_ENABLE_WAYLAND=1 MOZ_WEBRENDER=1 MOZ_ACCELERATED=1
+            export MOZ_ENABLE_WAYLAND=1 MOZ_WEBRENDER=1 MOZ_ACCELERATED=1 MOZ_DISABLE_CONTENT_SANDBOX=1
+            export XCURSOR_THEME=Breeze XCURSOR_SIZE=24
             unset DISPLAY MOZ_X11_EGL
             exec startplasma-wayland
             VSESSION

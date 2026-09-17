@@ -34,7 +34,7 @@ constexpr uint32_t MSG_REGISTER_FRAME = 1;
 constexpr uint32_t MSG_FRAME = 2;
 constexpr uint32_t MSG_DISABLE = 3;
 constexpr size_t MAX_SCANOUTS = 16;
-constexpr size_t FRAME_SLOTS = 5;
+constexpr size_t FRAME_SLOTS = 3;
 constexpr uint8_t FENCE_TAG = 0xF3;
 
 constexpr int RC_EXTENSIONS = 101;
@@ -281,7 +281,7 @@ bool connect_socket() {
         if (connect(fd, reinterpret_cast<sockaddr*>(&addr), len) == 0) {
             g_socket = fd;
             mark_transport_reset();
-            logi("connected presenter side channel name=" + name + " protocol=3 slots=5 syncfd=1 damage=1 resourceSync=1 dropOnBackpressure=1");
+            logi("connected presenter side channel name=" + name + " protocol=3 slots=3 syncfd=1 damage=1 resourceSync=1 dropOnBackpressure=1");
             return true;
         }
         last_errno = errno;
@@ -506,7 +506,7 @@ int copy_resource(uint32_t resource_id, BufferSlot& slot, uint32_t source_x, uin
 
 int find_free_slot(ScanoutState& state) {
     // Never block the vhost-user-gpu dispatch thread waiting for Android. ACKs
-    // are opportunistically retired; if all five source buffers are still in
+    // are opportunistically retired; if every source buffer is still in
     // flight we drop this presentation update and carry its damage forward.
     drain_acks();
     for (size_t n = 0; n < FRAME_SLOTS; ++n) {
@@ -560,7 +560,7 @@ int send_frame(uint32_t scanout_id, uint32_t slot_index, ScanoutState& state, in
     const double elapsed = std::chrono::duration<double>(now - g_rate_started).count();
     if (elapsed >= 2.0) {
         logi("producer=" + std::to_string(static_cast<int>(g_frame_count / elapsed)) +
-             " fps in_flight<=5 syncfd=1 fullCopies=" + std::to_string(g_full_copy_count) +
+             " fps in_flight<=3 syncfd=1 fullCopies=" + std::to_string(g_full_copy_count) +
              " partialCopies=" + std::to_string(g_partial_copy_count) +
              " dropped=" + std::to_string(g_drop_count));
         g_frame_count = 0;
@@ -577,21 +577,32 @@ int submit_resource(uint32_t resource_id, uint32_t scanout_id, uint32_t x, uint3
     auto& state = g_scanouts[scanout_id];
     const bool geometry_changed = state.width != width || state.height != height || state.x != x || state.y != y;
     const bool resource_changed = state.resource_id != 0 && state.resource_id != resource_id;
-    if (geometry_changed || resource_changed) {
+    if (geometry_changed) {
+        // Only a real scanout geometry change invalidates the Android output
+        // ring. KWin page-flips between virtio resources constantly; treating
+        // every new resource id as a new display used to allocate/register AHBs
+        // on practically every frame and stall the vhost-user dispatch thread.
         if (!wait_scanout_idle(state)) return RC_SOCKET;
         destroy_scanout(state);
-        state.resource_id = resource_id;
         state.width = width;
         state.height = height;
         state.x = x;
         state.y = y;
-        logi(std::string(resource_changed ? "scanout resource changed; full refresh " : "scanout geometry changed; full refresh ") +
+        logi("scanout geometry changed; rebuilding AHB ring " +
              std::to_string(width) + "x" + std::to_string(height));
-    } else {
-        state.resource_id = resource_id;
-        state.x = x;
-        state.y = y;
+    } else if (resource_changed) {
+        // SET_SCANOUT is also the virtio-gpu page-flip operation. Keep the
+        // persistent AHB ring and simply make the next copy a full refresh.
+        // Subsequent RESOURCE_FLUSH damage can become partial again instead of
+        // paying AHardwareBuffer allocation/import/registration every frame.
+        const DamageRect full = full_damage(state);
+        for (auto& slot : state.slots) {
+            if (slot.buffer && slot.content_valid) slot.pending_damage = full;
+        }
     }
+    state.resource_id = resource_id;
+    state.x = x;
+    state.y = y;
 
     if (!incoming_damage.valid) return 0;
     for (auto& slot : state.slots) {

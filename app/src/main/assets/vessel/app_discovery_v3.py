@@ -13,8 +13,8 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 
-CACHE_VERSION = 3
-CACHE_PATH = "/var/cache/vessel/app-catalog-v3.json"
+CACHE_VERSION = 4
+CACHE_PATH = "/var/cache/vessel/app-catalog-v4.json"
 ENV = dict(os.environ, LC_ALL="C", LANG="C")
 PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]{0,127}$")
 
@@ -293,8 +293,11 @@ def icon_file(icon):
     names = [name] if name.lower().endswith((".png", ".svg", ".xpm")) else [name, name + ".png", name + ".svg"]
     patterns = (
         "/var/cache/app-info/icons/*/64x64/{name}", "/var/cache/app-info/icons/*/128x128/{name}",
-        "/var/cache/app-info/icons/*/128x128@2/{name}", "/var/cache/swcatalog/icons/*/64x64/{name}",
-        "/var/cache/swcatalog/icons/*/128x128/{name}", "/var/cache/swcatalog/icons/*/128x128@2/{name}",
+        "/var/cache/app-info/icons/*/128x128@2/{name}", "/var/lib/app-info/icons/*/64x64/{name}",
+        "/var/lib/app-info/icons/*/128x128/{name}", "/var/lib/app-info/icons/*/128x128@2/{name}",
+        "/var/cache/swcatalog/icons/*/64x64/{name}", "/var/cache/swcatalog/icons/*/128x128/{name}",
+        "/var/cache/swcatalog/icons/*/128x128@2/{name}", "/var/lib/swcatalog/icons/*/64x64/{name}",
+        "/var/lib/swcatalog/icons/*/128x128/{name}", "/var/lib/swcatalog/icons/*/128x128@2/{name}",
         "/usr/share/pixmaps/{name}", "/usr/share/icons/hicolor/*/apps/{name}",
         "/usr/share/icons/breeze/*/apps/{name}",
     )
