@@ -24,6 +24,7 @@ class VesselUmlRuntimeBackend(
     override val displayTransport: String get() = VesselRuntimeController.DISPLAY_TRANSPORT
     override val machineDir: File get() = controller.machineDir
     override val guestMemoryMb: Int get() = controller.guestMemoryMb
+    override val processorCount: Int get() = controller.selectedVcpus
     override val graphicsSummary: String
         get() = if (VesselExperimentConfig.desktopBackend(context) == "wayland") {
             "KDE Plasma/Wayland → Mesa VirGL → virglrenderer → " +

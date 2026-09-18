@@ -23,6 +23,7 @@ interface VesselRuntimeBackend {
     val displayTransport: String
     val machineDir: File
     val guestMemoryMb: Int
+    val processorCount: Int
     val graphicsSummary: String
     val internetSummary: String
 

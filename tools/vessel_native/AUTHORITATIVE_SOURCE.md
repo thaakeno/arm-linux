@@ -20,3 +20,12 @@ Runtime-backend invariant:
 - `VesselRuntimeController` remains the authoritative UML implementation and is not rewritten by the proroot foundation.
 - The proroot scaffold keeps mutable rootfs/runtime state under app-private storage but requires executable runtime DSOs to come from Android `nativeLibraryDir`.
 - Linux application compatibility belongs in the shared runtime/session layer. Do not add per-application launch patches as the primary compatibility strategy.
+
+Terminal invariants:
+
+- `app/src/main/cpp/third_party/termux/vessel_termux_pty.c` is authoritative PTY source and is compiled directly; CI must not patch or regenerate it.
+- Termux `terminal-view` / `terminal-emulator` stay pinned to 0.118.0 until a deliberate reviewed upgrade.
+- Vessel owns terminal tabs and process lifetime. A tab may be removed only after verified cleanup succeeds.
+- PTY teardown is scoped by captured PID birth identity + kernel session + Android UID; never kill processes by package name or app UID alone.
+- Terminal scrollback belongs to terminal-emulator; do not mirror every output byte into Compose/StateFlow.
+- Linux application compatibility belongs to the shared proroot/runtime layer, never per-terminal app launch hacks.

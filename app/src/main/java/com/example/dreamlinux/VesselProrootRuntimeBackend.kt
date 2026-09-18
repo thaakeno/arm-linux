@@ -19,9 +19,9 @@ import java.security.MessageDigest
 class VesselProrootRuntimeBackend(
     context: Context,
     private val progress: (String, Int, String) -> Unit,
-) : VesselRuntimeBackend {
+) : VesselRuntimeBackend, VesselPtyRuntimeProvider {
     companion object {
-        const val REVISION = "proroot-foundation-v1"
+        const val REVISION = "proroot-terminal-foundation-v2"
         const val DISPLAY_TRANSPORT = "proroot-native-surface-pending"
     }
 
@@ -41,6 +41,7 @@ class VesselProrootRuntimeBackend(
 
     // No fixed guest-RAM allocation exists for a shared-kernel runtime.
     override val guestMemoryMb = 0
+    override val processorCount: Int get() = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
     override val graphicsSummary =
         "proroot foundation · direct Freedreno/Turnip + Vessel Surface activation pending"
     override val internetSummary = "Android shared-kernel networking · activation pending"
@@ -51,6 +52,22 @@ class VesselProrootRuntimeBackend(
         layout.runtimeLibraries().all { it.isFile && it.length() > 0L }
 
     fun rootfsReady(): Boolean = layout.rootfsReady()
+
+    override fun terminalReadiness(verifyIntegrity: Boolean): VesselTerminalRuntimeReadiness {
+        val result = when {
+            !layout.prepareHostLayout() ->
+                VesselTerminalRuntimeReadiness(false, "Vessel cannot prepare its private terminal storage")
+            !hostAssetsReady() ->
+                VesselTerminalRuntimeReadiness(false, "proroot runtime libraries are not packaged yet")
+            !layout.rootfsReady() ->
+                VesselTerminalRuntimeReadiness(false, "proroot directory rootfs is not installed yet")
+            verifyIntegrity && !officialRuntimeHashesMatch() ->
+                VesselTerminalRuntimeReadiness(false, "proroot runtime integrity check failed")
+            else ->
+                VesselTerminalRuntimeReadiness(true, "Native PTY · proroot · bash")
+        }
+        return result
+    }
 
     /**
      * Explicit integrity check for the later packaging phase. This is not called
@@ -81,6 +98,30 @@ class VesselProrootRuntimeBackend(
         )
     }
 
+    /**
+     * Real interactive PTYs use the exact same runtime contract as later
+     * desktop processes. No terminal-only rootfs or application wrappers.
+     */
+    override fun terminalLaunchPlan(
+        includeSharedStorage: Boolean,
+    ): VesselProrootLaunchPlan {
+        check(layout.prepareHostLayout()) { "Could not prepare Vessel proroot storage" }
+        check(hostAssetsReady()) { "Official proroot runtime libraries are not packaged" }
+        check(layout.rootfsReady()) { "Vessel proroot directory rootfs is not installed" }
+        check(officialRuntimeHashesMatch()) { "proroot runtime integrity check failed" }
+        check(layout.prepareGuestMountPointsIfReady()) { "Could not prepare Linux runtime mount points" }
+
+        return VesselProrootContract.build(
+            launcherPath = File(layout.nativeLibraryDir, "libproroot.so").absolutePath,
+            runtimeLibraryDir = layout.nativeLibraryDir.absolutePath,
+            rootfsPath = layout.rootfsDir.absolutePath,
+            prorootTmpPath = layout.prorootTmpDir.absolutePath,
+            hostWorkingDirectory = layout.baseDir.absolutePath,
+            binds = layout.binds(includeSharedStorage),
+            guestArgv = listOf("/bin/bash", "-l"),
+        )
+    }
+
     override fun configureDisplay(width: Int, height: Int, dpi: Int, refresh: Float) {
         displayWidth = width.coerceIn(640, 3840)
         displayHeight = height.coerceIn(480, 2160)
@@ -94,7 +135,7 @@ class VesselProrootRuntimeBackend(
     }
 
     override fun input(type: String, values: Map<String, Any>) {
-        error("proroot input is not active in Phase 1")
+        error("proroot desktop input is gated until the direct GPU phase")
     }
 
     override suspend fun status(): JSONObject = withContext(Dispatchers.IO) {

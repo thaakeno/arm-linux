@@ -70,7 +70,9 @@ android {
     packaging {
       jniLibs {
         useLegacyPackaging = true
+        pickFirsts += setOf("**/libtermux.so")
         keepDebugSymbols += setOf(
+          "**/libtermux.so",
           "**/libvessel_uml.so",
           "**/libvessel_stub.so",
           "**/libvessel_umnet.so",
@@ -95,6 +97,9 @@ dependencies {
   implementation("dev.rikka.shizuku:provider:13.1.5")
   implementation("org.apache.commons:commons-compress:1.27.1")
   implementation("com.github.luben:zstd-jni:1.5.7-12@aar")
+  // Apache-2.0 terminal-view/emulator modules; Vessel supplies its own
+  // directly compiled libtermux.so PTY implementation.
+  implementation("com.termux.termux-app:terminal-view:0.118.0")
   val composeBom = platform(libs.androidx.compose.bom)
   implementation(composeBom)
   androidTestImplementation(composeBom)

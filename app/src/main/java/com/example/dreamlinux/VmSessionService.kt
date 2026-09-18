@@ -152,6 +152,7 @@ class VmSessionService : Service() {
         active = this
         VesselGuestAgent.start()
         VesselAudioBridge.start(this)
+        VesselTerminalManager.initialize(this)
         runtime = VesselRuntimeFactory.createActive(this) { phase, pct, detail ->
             state.value = state.value.copy(
                 stage = phase,
@@ -234,6 +235,7 @@ class VmSessionService : Service() {
     override fun onDestroy() {
         if (active === this) active = null
         scope.cancel()
+        VesselTerminalManager.requestShutdownAll()
         VesselWaylandPresenter.shutdown()
         VesselGuestAgent.stop()
         VesselAudioBridge.stop()
@@ -821,7 +823,7 @@ class VmSessionService : Service() {
                     diskVirtualMb = host.first,
                     diskPhysicalMb = host.second,
                     hostFreeMb = host.third,
-                    vcpus = runtime.selectedVcpus,
+                    vcpus = runtime.processorCount,
                 )
             } catch (t: Throwable) {
                 val host = hostDiskStats()
@@ -859,7 +861,7 @@ class VmSessionService : Service() {
                 appendLine("control=${VesselGuestAgent.status()}")
                 appendLine("audio=${VesselAudioBridge.status()}")
                 appendLine("presenter=${VesselWaylandPresenter.status()}")
-                appendLine("vcpus=${runtime.selectedVcpus} guestRamMiB=${runtime.guestMemoryMb}")
+                appendLine("vcpus=${runtime.processorCount} guestRamMiB=${runtime.guestMemoryMb}")
             }
             val guest = if (state.value.running && state.value.guestReady && VesselGuestAgent.isConnected()) {
                 runCatching {

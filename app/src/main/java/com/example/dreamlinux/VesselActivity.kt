@@ -198,7 +198,7 @@ class VesselActivity : ComponentActivity() {
                             0 -> MachinePage(state) { page = 1 }
                             1 -> DesktopPage(state) { fullscreen = true }
                             2 -> AppsPage(state)
-                            3 -> TerminalPage(state)
+                            3 -> TerminalPage()
                             else -> SystemPage(state)
                         }
                     }
@@ -605,44 +605,8 @@ class VesselActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun TerminalPage(state: SessionState) {
-        val hostState by VesselHostDebug.state.collectAsStateWithLifecycle()
-        var command by remember { mutableStateOf("") }
-        var hostMode by remember { mutableStateOf(false) }
-        val output = if (hostMode) hostState.output else state.terminalOutput
-        val emptyText = if (hostMode) "Android host shell runs as Vessel's app UID. Use it even when Linux cannot start." else "Start Linux, then run Debian commands here."
-        val canRun = if (hostMode) !hostState.busy else state.running && state.guestReady && !state.busy
-
-        Column(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Terminal", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text(if (hostMode) "Android host debug · app sandbox" else "Debian guest shell", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                if (hostMode && hostState.busy) StatusPill("RUNNING", true)
-            }
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                FilterChip(selected = !hostMode, onClick = { hostMode = false; command = "" }, label = { Text("Debian") })
-                FilterChip(selected = hostMode, onClick = { hostMode = true; command = "" }, label = { Text("Host Debug") })
-                OutlinedButton(onClick = { copyText("Terminal output", output) }, enabled = output.isNotBlank()) { Text("Copy") }
-                OutlinedButton(onClick = { if (hostMode) VesselHostDebug.clear() else VesselHostDebug.clearGuestTerminal() }, enabled = output.isNotBlank()) { Text("Clear") }
-                if (hostMode) {
-                    AssistChip(onClick = { VesselHostDebug.runHostInfo() }, label = { Text("Host info") })
-                    AssistChip(onClick = { VesselHostDebug.runGpuLinkerCheck() }, label = { Text("GPU linker") })
-                } else {
-                    AssistChip(onClick = { VmSessionService.active?.runGpuDiagnostics() }, enabled = state.guestReady && !state.busy, label = { Text("GPU diagnostics") })
-                }
-            }
-            Surface(Modifier.weight(1f).fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Color(0xff050706)) {
-                SelectionContainer {
-                    Text(output.ifBlank { emptyText }, Modifier.padding(14.dp).verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState()), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, softWrap = false)
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = command, onValueChange = { command = it }, modifier = Modifier.weight(1f), maxLines = 4, label = { Text(if (hostMode) "Host command" else "Debian command") }, placeholder = { Text(if (hostMode) "echo \$VESSEL_LIBDIR" else "uname -a") })
-                Button(onClick = { if (command.isNotBlank()) { if (hostMode) VesselHostDebug.run(command) else VmSessionService.active?.runGuestCommand(command); command = "" } }, enabled = canRun && command.isNotBlank()) { Icon(Icons.Default.Send, null) }
-            }
-        }
+    private fun TerminalPage() {
+        VesselTerminalPanel()
     }
 
     @Composable

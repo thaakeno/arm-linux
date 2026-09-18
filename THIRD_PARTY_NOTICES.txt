@@ -9,3 +9,11 @@ Copyright Termux:X11 contributors
 GNU General Public License v3.0
 Source: https://github.com/termux/termux-x11
 Pinned source is included as third_party/termux-x11. Its LICENSE and corresponding source are preserved there.
+
+Termux terminal-view / terminal-emulator 0.118.0
+Terminal Emulator for Android code: Apache License 2.0 exception
+Source: https://github.com/termux/termux-app/tree/v0.118.0/terminal-view
+Source: https://github.com/termux/termux-app/tree/v0.118.0/terminal-emulator
+Vessel uses the pinned Java terminal modules and directly compiles its maintained
+PTY JNI implementation derived from the v0.118.0 Apache-licensed PTY source.
+No build-time patching of Termux source is performed.

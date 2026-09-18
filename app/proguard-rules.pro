@@ -11,3 +11,9 @@
 -keep class com.example.dreamlinux.VesselActivity { *; }
 -keep class com.example.dreamlinux.VmSessionService { *; }
 -keep class com.example.dreamlinux.VesselBootReceiver { *; }
+
+# terminal-emulator resolves these methods by the fixed Termux JNI class name.
+-keep class com.termux.terminal.JNI { *; }
+
+# Vessel PTY identity claim is also resolved by a fixed JNI symbol.
+-keep class com.example.dreamlinux.VesselPtyNative { *; }

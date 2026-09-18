@@ -22,6 +22,11 @@ dependencyResolutionManagement {
             }
         }
         mavenCentral()
+        maven("https://jitpack.io") {
+            content {
+                includeGroup("com.termux.termux-app")
+            }
+        }
     }
 }
 

@@ -23,6 +23,40 @@ permissions:
   actions: read
 
 jobs:
+  source-check:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: temurin
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install compile SDK and NDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
+      - name: Compile Kotlin and run host unit tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x gradlew
+          ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest --no-daemon --build-cache
+      - name: Syntax-check authoritative PTY C
+        shell: bash
+        run: |
+          set -euxo pipefail
+          NDK="$ANDROID_HOME/ndk/29.0.14206865"
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang"             --sysroot="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"             -std=c11 -Wall -Wextra -Werror -Os -fsyntax-only             app/src/main/cpp/third_party/termux/vessel_termux_pty.c
+
   # Source-only phase commits intentionally do not assemble APKs. A real APK
   # build is explicit via workflow_dispatch once the implementation phases are
   # ready for device validation.
@@ -136,6 +170,8 @@ jobs:
           grep -F 'VESSEL_ANDROID_AHB_SCANOUT_V3' tools/vessel_native/patch_vhost_gpu_android_ahb.py
           ! find tools/vessel_native -maxdepth 1 -name 'alpha*.py' -print -quit | grep -q .
           ! grep -Eq 'alpha[0-9]+_' tools/vessel_native/rebuild_vhost_gpu_ahb.sh
+          grep -Fq 'VESSEL_TERMUX_PTY_NDK29_DIRECT_SOURCE_V1' app/src/main/cpp/third_party/termux/vessel_termux_pty.c
+          ! find app/src/main/cpp/third_party/termux -type f -name '*patch*' -print -quit | grep -q .
           grep -F 'CONFIG_VIRTIO_INPUT=y' tools/vessel_native/kernel/build_uml_smp_android.sh
           grep -F 'damage_updates=enabled' app/src/main/assets/vessel/runtime-build.txt
           grep -F 'AHardwareBuffer_sendHandleToUnixSocket' tools/vessel_native/vessel_ahb_bridge.cpp
@@ -159,7 +195,11 @@ jobs:
           test -s "$DEBUG_APK"; test -s "$RELEASE_APK"
           unzip -l "$DEBUG_APK" > /tmp/apk-files.txt
           unzip -l "$RELEASE_APK" > /tmp/release-apk-files.txt
-          for f in libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so libvessel_vhost_gpu.so libvessel_vhost_input.so libvessel_virglrenderer.so libvessel_epoxy.so libEGL_angle.so libGLESv2_angle.so libvessel_wayland_presenter.so; do grep -Fq "lib/arm64-v8a/$f" /tmp/apk-files.txt; grep -Fq "lib/arm64-v8a/$f" /tmp/release-apk-files.txt; done
+          for f in libtermux.so libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so libvessel_vhost_gpu.so libvessel_vhost_input.so libvessel_virglrenderer.so libvessel_epoxy.so libEGL_angle.so libGLESv2_angle.so libvessel_wayland_presenter.so; do grep -Fq "lib/arm64-v8a/$f" /tmp/apk-files.txt; grep -Fq "lib/arm64-v8a/$f" /tmp/release-apk-files.txt; done
+          unzip -p "$DEBUG_APK" lib/arm64-v8a/libtermux.so > /tmp/libtermux-debug.so
+          unzip -p "$RELEASE_APK" lib/arm64-v8a/libtermux.so > /tmp/libtermux-release.so
+          strings /tmp/libtermux-debug.so | grep -Fq 'VESSEL_TERMUX_PTY_NDK29_DIRECT_SOURCE_V1'
+          strings /tmp/libtermux-release.so | grep -Fq 'VESSEL_TERMUX_PTY_NDK29_DIRECT_SOURCE_V1'
           grep -Eq 'lib/arm64-v8a/libzstd-jni.*\.so' /tmp/apk-files.txt
           grep -Eq 'lib/arm64-v8a/libzstd-jni.*\.so' /tmp/release-apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt

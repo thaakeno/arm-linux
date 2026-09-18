@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(vessel_linux_native)
 
+# Real PTY backend for terminal-emulator. This is maintained source, not a
+# generated/monkey-patched Termux file. It exports the exact JNI ABI expected
+# by terminal-emulator 0.118.0 plus Vessel's identity-claim entry point.
+add_library(termux SHARED third_party/termux/vessel_termux_pty.c)
+target_compile_features(termux PRIVATE c_std_11)
+target_compile_options(termux PRIVATE -Wall -Wextra -Werror -Os)
+target_link_options(termux PRIVATE "-Wl,-z,max-page-size=16384")
+
 add_library(dream_transport SHARED transport.cpp)
 target_compile_features(dream_transport PRIVATE cxx_std_17)
 target_compile_options(dream_transport PRIVATE -Wall -Wextra -Werror)
