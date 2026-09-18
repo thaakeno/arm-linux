@@ -186,7 +186,7 @@ jobs:
   # build is explicit via workflow_dispatch once the implementation phases are
   # ready for device validation.
   build:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[manual-apk]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
