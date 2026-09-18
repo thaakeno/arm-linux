@@ -27,8 +27,8 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-desktop-compat-v4"
-        const val DISPLAY_TRANSPORT = "proroot-kgsl-dmabuf-fence-ahb-v1"
+        const val REVISION = "proroot-performance-v5"
+        const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
     private val appContext = context.applicationContext
@@ -60,7 +60,8 @@ class VesselProrootRuntimeBackend(
     override val processorCount: Int get() =
         Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
     override val graphicsSummary =
-        "Wayland/KWin → Freedreno/Turnip KGSL → DMA-BUF/native fence → Vessel AHB Surface"
+        "Wayland/KWin → Freedreno/Turnip KGSL → DMA-BUF/native fence → " +
+            "SurfaceControl zero-copy (API 36+) / GPU-blit fallback"
     override val internetSummary = "Android shared kernel · direct sockets/DNS"
 
     override fun hasStorageAccess(): Boolean = layout.prepareHostLayout()
@@ -291,6 +292,11 @@ class VesselProrootRuntimeBackend(
             .put("desktopRuntimeReason", desktop.reason)
             .put("displayBridge", bridge)
             .put("presenter", presenter)
+            .put("presentationPath", VesselProrootDisplayBridge.presentationPath())
+            .put("zeroCopyPresentation", VesselProrootDisplayBridge.usesZeroCopyPresentation())
+            .put("effectiveRefreshHz", VesselProrootDisplayBridge.effectiveRefresh().toDouble())
+            .put("framesPresented", VesselProrootDisplayBridge.framesPresented())
+            .put("framesReleased", VesselProrootDisplayBridge.framesReleased())
             .put("audioTransport", VesselAudioBridge.status())
             .put("logTail", process?.outputTail().orEmpty())
     }
@@ -341,7 +347,7 @@ class VesselProrootRuntimeBackend(
                 "Linux compatibility probe failed: " + probe.output.takeLast(6000)
             }
 
-            progress("proroot_plasma", 86, "Launching normal-user Plasma Wayland session")
+            progress("proroot_plasma", 86, "Launching optimized normal-user Plasma Wayland session")
             val plan = desktopLaunchPlan(listOf(VesselProrootDesktopProfile.STARTER))
             val process = VesselProrootProcessNative.spawn(plan, layout.desktopLog)
             synchronized(lifecycleLock) {
@@ -361,15 +367,20 @@ class VesselProrootRuntimeBackend(
                     )
                 }
                 bridge = VesselProrootDisplayBridge.status()
-                if (bridge == "presenting-proroot-dmabuf") break
+                if (bridge.startsWith("presenting-proroot-")) break
                 Thread.sleep(50)
             }
-            check(bridge == "presenting-proroot-dmabuf") {
-                "KWin did not connect to Vessel's DMA-BUF display bridge: " + bridge
+            check(bridge.startsWith("presenting-proroot-")) {
+                "KWin did not reach Vessel's native presentation path: " + bridge
             }
 
             desktopReady = true
-            progress("proroot_ready", 100, "Plasma Wayland is using direct KGSL + native Android presentation")
+            progress(
+                "proroot_ready",
+                100,
+                "Plasma Wayland is using direct KGSL + " +
+                    VesselProrootDisplayBridge.presentationPath(),
+            )
             status()
         } catch (error: Throwable) {
             lastError = error.message ?: error.javaClass.simpleName
@@ -519,12 +530,14 @@ class VesselProrootRuntimeBackend(
     private fun baseState(ok: Boolean): JSONObject {
         val presenter = VesselWaylandPresenter.status()
         val bridge = VesselProrootDisplayBridge.status()
-        val frameReady = presenter.startsWith("presenting-native-surface") ||
-            presenter.startsWith("presenting-retained")
+        val frameReady =
+            bridge.startsWith("presenting-proroot-") ||
+                presenter.startsWith("presenting-native-surface") ||
+                presenter.startsWith("presenting-retained")
         return JSONObject()
             .put("ok", ok)
             .put("backend", "PROROOT")
-            .put("protocolVersion", 4)
+            .put("protocolVersion", 5)
             .put("runtimeRevision", revision)
             .put("displayTransport", displayTransport)
             .put("rendererMode", "freedreno-turnip-kgsl-direct")
@@ -535,7 +548,7 @@ class VesselProrootRuntimeBackend(
             .put("guestReady", hostAssetsReady() && layout.rootfsReady())
             .put("desktopReady", desktopReady)
             .put("frameContentValidated", frameReady)
-            .put("inputConnected", bridge == "presenting-proroot-dmabuf")
+            .put("inputConnected", bridge.startsWith("presenting-proroot-"))
             .put("machineDir", machineDir.absolutePath)
             .put("guestMemoryMb", 0)
             .put("processorCount", processorCount)
@@ -543,6 +556,7 @@ class VesselProrootRuntimeBackend(
             .put("displayHeight", displayHeight)
             .put("displayDpi", displayDpi)
             .put("displayRefresh", displayRefresh.toDouble())
+            .put("effectiveDisplayRefresh", VesselProrootDisplayBridge.effectiveRefresh().toDouble())
             .put("uptimeMs", if (running) SystemClock.elapsedRealtime() - startedAt else 0L)
             .put("lastError", lastError)
     }

@@ -53,3 +53,15 @@ Phase-4 proroot desktop/session invariants:
 - `/proc` overlays are limited to global files Android may hide. Per-process `/proc/<pid>` entries stay backed by the real Android kernel.
 - System D-Bus is a runtime service; the user session bus is created by `dbus-run-session`. Do not require systemd/logind for the basic desktop session.
 - Non-PTY background sessions use the native isolated-session launcher and the same PID birth-identity/session cleanup rules as terminal tabs.
+
+Phase-5 performance/battery invariants:
+
+- On API 36+ proroot presentation is direct AHardwareBuffer + native acquire fence -> public NDK SurfaceControl -> SurfaceFlinger. Do not reinsert an EGL/GL blit or CPU framebuffer copy into that fast path.
+- `ASurfaceTransaction_setBufferWithRelease` is dynamically resolved so the shared library remains loadable on Android 30-35. The old GPU-only AHB presenter is compatibility fallback, not the API-36 default.
+- Direct presentation buffers include `GPU_FRAMEBUFFER`, `GPU_SAMPLED_IMAGE` and `COMPOSER_OVERLAY`; they must not request CPU read/write usage.
+- A buffer is reusable only after the SurfaceControl release callback and, when present, its release fence. Late callbacks are scoped by a connection generation.
+- KWin and Android receive the same adaptive frame-rate target. Interactive state uses the configured ceiling; idle state caps at 60 Hz after 1.8 seconds. Do not implement pacing with a busy loop or per-frame Java timer.
+- When the Android display Surface is detached, proroot presentation must disconnect/inhibit rather than rendering unseen frames in the background.
+- The Android Choreographer cursor loop is UML-only. Proroot must not run an extra Android cursor animation loop.
+- Procfs compatibility must shadow only files the Android app UID cannot read. Do not mirror readable host proc files on a periodic Java thread.
+- Phase 5 does not change the active default backend; the proroot default switch belongs to Phase 6.

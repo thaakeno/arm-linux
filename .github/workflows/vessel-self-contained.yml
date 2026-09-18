@@ -77,7 +77,7 @@ jobs:
           NDK="$ANDROID_HOME/ndk/29.0.14206865"
           CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang++"
           SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          for src in             app/src/main/cpp/vessel_proroot_display_bridge.cpp             app/src/main/cpp/vessel_proroot_process.cpp             app/src/main/cpp/vessel_surface_presenter.cpp
+          for src in             app/src/main/cpp/vessel_proroot_display_bridge.cpp             app/src/main/cpp/vessel_proroot_surfacecontrol.cpp             app/src/main/cpp/vessel_proroot_process.cpp             app/src/main/cpp/vessel_surface_presenter.cpp
           do
             "$CXX" --sysroot="$SYSROOT"               -std=c++17 -Wall -Wextra -Werror               -Wno-unused-parameter -Wno-missing-field-initializers -Wno-misleading-indentation -Wno-unused-function               -fsyntax-only "$src"
           done
@@ -92,7 +92,7 @@ jobs:
           bash -n tools/vessel_proroot/rootfs/usr/local/libexec/vessel-compat-probe
           bash -n tools/vessel_proroot/rootfs/usr/local/lib/vessel/kwin-wrapper/kwin_wayland
           bash -n tools/vessel_proroot/rootfs/usr/local/lib/vessel/kwin-wrapper/kwin_wayland_wrapper
-          grep -F 'proroot-kgsl-dmabuf-fence-ahb-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'proroot-kgsl-' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'VesselProrootIdentity(' app/src/main/java/com/example/dreamlinux/VesselProrootLaunchPlan.kt
           grep -F 'fakeRoot = false' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibility.kt
           grep -F 'dbus-run-session' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
@@ -100,6 +100,32 @@ jobs:
           grep -F 'os.memfd_create' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-compat-probe
           ! grep -R -E -- '--no-sandbox|MOZ_DISABLE_CONTENT_SANDBOX|security\.sandbox\.content\.level'             app/src/main/java/com/example/dreamlinux/VesselProroot*.kt             tools/vessel_proroot/rootfs
           ! grep -R -F 'LIBGL_ALWAYS_SOFTWARE=1'             app/src/main/java/com/example/dreamlinux/VesselProroot*.kt             tools/vessel_proroot/rootfs
+
+      - name: Validate Phase 5 zero-copy and battery contract
+        shell: bash
+        run: |
+          set -euxo pipefail
+          grep -F 'proroot-kgsl-surfacecontrol-ahb-fence-v2' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'ASurfaceTransaction_setBufferWithRelease' app/src/main/cpp/vessel_proroot_surfacecontrol.cpp
+          grep -F 'ASurfaceTransaction_setEnableBackPressure' app/src/main/cpp/vessel_proroot_surfacecontrol.cpp
+          grep -F 'AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY' app/src/main/cpp/vessel_proroot_display_bridge.cpp
+          ! grep -Fq 'AHARDWAREBUFFER_USAGE_CPU_READ' app/src/main/cpp/vessel_proroot_display_bridge.cpp
+          ! grep -E 'gl(ReadPixels|BlitFramebuffer)|AHardwareBuffer_lock'             app/src/main/cpp/vessel_proroot_display_bridge.cpp             app/src/main/cpp/vessel_proroot_surfacecontrol.cpp
+          grep -F 'const val IDLE_MAX_HZ = 60f' app/src/main/java/com/example/dreamlinux/VesselPerformancePolicy.kt
+          grep -F 'const val IDLE_DELAY_MS = 1800L' app/src/main/java/com/example/dreamlinux/VesselPerformancePolicy.kt
+          grep -F 'surface.setFrameRate(' app/src/main/java/com/example/dreamlinux/LinuxDesktopView.kt
+          grep -F '0f,' app/src/main/java/com/example/dreamlinux/LinuxDesktopView.kt
+          grep -F 'usesGuestCursorOverlay()' app/src/main/java/com/example/dreamlinux/LinuxDesktopView.kt
+          grep -F 'activeBinds.keys.none(::isDynamic)' app/src/main/java/com/example/dreamlinux/VesselProcCompat.kt
+
+          # Compile an API-30 object and prove the API-36 release function is
+          # resolved at runtime rather than becoming a hard loader dependency.
+          NDK="$ANDROID_HOME/ndk/29.0.14206865"
+          CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang++"
+          NM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          "$CXX" --sysroot="$SYSROOT" -std=c++17 -Wall -Wextra -Werror             -fPIC -c app/src/main/cpp/vessel_proroot_surfacecontrol.cpp             -o /tmp/vessel-proroot-surfacecontrol.o
+          ! "$NM" -u /tmp/vessel-proroot-surfacecontrol.o | grep -F 'ASurfaceTransaction_setBufferWithRelease'
 
   # Source-only phase commits intentionally do not assemble APKs. A real APK
   # build is explicit via workflow_dispatch once the implementation phases are

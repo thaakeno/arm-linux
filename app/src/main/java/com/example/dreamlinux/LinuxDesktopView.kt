@@ -55,6 +55,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     private var dragging = false
     private var movedBeyondTap = false
     private var directMoved = false
+    private var cursorLoopRunning = false
 
     private val surfaceView = object : SurfaceView(context) {
         override fun onCheckIsTextEditor() = true
@@ -94,27 +95,34 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
 
         override fun onAttachedToWindow() {
             super.onAttachedToWindow()
-            Choreographer.getInstance().postFrameCallback(this)
+            this@LinuxDesktopView.refreshCursorLoop()
         }
 
         override fun onDetachedFromWindow() {
             Choreographer.getInstance().removeFrameCallback(this)
+            cursorLoopRunning = false
             super.onDetachedFromWindow()
         }
 
         override fun doFrame(frameTimeNanos: Long) {
-            if (pointerMode == PointerMode.TRACKPAD && VesselVirtioInput.usesGuestCursorOverlay()) {
-                val serial = VesselWaylandPresenter.cursorSerial()
-                if (serial != lastSerial) {
-                    lastSerial = serial
-                    val pixels = VesselWaylandPresenter.cursorPixels()
-                    if (pixels.size == 4096) {
-                        bitmap = Bitmap.createBitmap(pixels, 64, 64, Bitmap.Config.ARGB_8888)
-                    }
+            cursorLoopRunning = false
+            if (pointerMode != PointerMode.TRACKPAD ||
+                !VesselVirtioInput.usesGuestCursorOverlay()
+            ) {
+                invalidate()
+                return
+            }
+
+            val serial = VesselWaylandPresenter.cursorSerial()
+            if (serial != lastSerial) {
+                lastSerial = serial
+                val pixels = VesselWaylandPresenter.cursorPixels()
+                if (pixels.size == 4096) {
+                    bitmap = Bitmap.createBitmap(pixels, 64, 64, Bitmap.Config.ARGB_8888)
                 }
             }
             invalidate()
-            Choreographer.getInstance().postFrameCallback(this)
+            this@LinuxDesktopView.refreshCursorLoop()
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -160,6 +168,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         active = this
+        refreshCursorLoop()
     }
 
     override fun onDetachedFromWindow() {
@@ -172,13 +181,20 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     override fun surfaceCreated(holder: SurfaceHolder) {
         surfaceView.requestFocus()
         if (!surfaceAttached) {
-            VesselWaylandPresenter.attach(holder.surface)
+            if (VesselProrootDisplayBridge.attachSurface(holder.surface)) {
+                clearParentFrameRateHint(holder.surface)
+            } else {
+                VesselWaylandPresenter.attach(holder.surface)
+            }
             surfaceAttached = true
         }
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        VesselWaylandPresenter.surfaceChanged(width, height)
+        val directProroot = VesselProrootDisplayBridge.usesZeroCopyPresentation()
+        if (!directProroot) {
+            VesselWaylandPresenter.surfaceChanged(width, height)
+        }
         val refresh = (display?.supportedModes?.maxOfOrNull { it.refreshRate }
             ?: display?.refreshRate ?: 60f)
             .coerceAtMost(VesselExperimentConfig.refreshHz(context).toFloat())
@@ -188,8 +204,13 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
             resources.displayMetrics.densityDpi,
             refresh,
         )
-        if (Build.VERSION.SDK_INT >= 30) {
-            runCatching { holder.surface.setFrameRate(refresh, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT) }
+        if (Build.VERSION.SDK_INT >= 30 && !directProroot) {
+            runCatching {
+                holder.surface.setFrameRate(
+                    refresh,
+                    Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                )
+            }
         }
     }
 
@@ -201,22 +222,86 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     private fun detachSurfaceOnce() {
         if (surfaceAttached) {
             surfaceAttached = false
-            VesselWaylandPresenter.detach()
+            if (!VesselProrootDisplayBridge.detachSurface()) {
+                VesselWaylandPresenter.detach()
+            }
         }
     }
 
     /**
-     * A proroot presenter may start after this Surface was already created.
+     * A runtime presenter may start after this Surface was already created.
      * Re-attach without waiting for an Android lifecycle round-trip.
      */
     fun reattachPresenter() {
         post {
             val surface = surfaceView.holder.surface
             if (surfaceAttached && surface.isValid) {
-                VesselWaylandPresenter.attach(surface)
-                if (surfaceView.width > 0 && surfaceView.height > 0) {
-                    VesselWaylandPresenter.surfaceChanged(surfaceView.width, surfaceView.height)
+                if (VesselProrootDisplayBridge.attachSurface(surface)) {
+                    clearParentFrameRateHint(surface)
+                } else {
+                    VesselWaylandPresenter.attach(surface)
+                    if (surfaceView.width > 0 && surfaceView.height > 0) {
+                        VesselWaylandPresenter.surfaceChanged(
+                            surfaceView.width,
+                            surfaceView.height,
+                        )
+                    }
                 }
+            }
+        }
+    }
+
+    fun setProrootFallbackFrameRate(refresh: Float) {
+        if (Build.VERSION.SDK_INT < 30) return
+        post {
+            if (!surfaceAttached ||
+                VesselProrootDisplayBridge.usesZeroCopyPresentation()
+            ) return@post
+            val surface = surfaceView.holder.surface
+            if (!surface.isValid) return@post
+            runCatching {
+                surface.setFrameRate(
+                    refresh.coerceIn(30f, 240f),
+                    Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                )
+            }
+        }
+    }
+
+    private fun clearParentFrameRateHint(surface: Surface) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            runCatching {
+                // The API-36 child SurfaceControl owns the adaptive 120↔60 hint.
+                // Clear any earlier SurfaceView preference so the parent cannot
+                // pin the display at the old high rate.
+                surface.setFrameRate(
+                    0f,
+                    Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                )
+            }
+        }
+    }
+
+    /**
+     * UML needs an Android cursor overlay because its cursor travels over the
+     * vhost metadata channel. Proroot/KWin draws its cursor in the composed
+     * buffer, so running Choreographer every display VSYNC would be pure waste.
+     */
+    fun refreshCursorLoop() {
+        val shouldRun =
+            isAttachedToWindow &&
+                pointerMode == PointerMode.TRACKPAD &&
+                VesselVirtioInput.usesGuestCursorOverlay()
+        val choreographer = Choreographer.getInstance()
+        when {
+            shouldRun && !cursorLoopRunning -> {
+                cursorLoopRunning = true
+                choreographer.postFrameCallback(cursorView)
+            }
+            !shouldRun && cursorLoopRunning -> {
+                choreographer.removeFrameCallback(cursorView)
+                cursorLoopRunning = false
+                cursorView.invalidate()
             }
         }
     }
@@ -227,6 +312,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
             VesselVirtioInput.resetFractions()
             pointerMode = mode
             cursorView.invalidate()
+            refreshCursorLoop()
         }
     }
 

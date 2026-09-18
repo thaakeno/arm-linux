@@ -9,11 +9,9 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Small procfs compatibility overlay for global files Android may hide from an
- * untrusted app. Dynamic per-process proc entries remain the real host /proc.
- *
- * Real host data wins whenever Android exposes it. Fallback data describes the
- * actual Android device where a trustworthy platform API exists.
+ * Compatibility overlay only for global procfs files Android actually hides
+ * from Vessel's app UID. Readable files stay on the real host /proc and incur
+ * zero Java refresh work.
  */
 class VesselProcCompat(
     context: Context,
@@ -23,24 +21,45 @@ class VesselProcCompat(
     private val running = AtomicBoolean(false)
     private var worker: Thread? = null
 
+    private val candidates = linkedMapOf(
+        "/proc/stat" to File(directory, "stat"),
+        "/proc/meminfo" to File(directory, "meminfo"),
+        "/proc/uptime" to File(directory, "uptime"),
+        "/proc/loadavg" to File(directory, "loadavg"),
+        "/proc/cpuinfo" to File(directory, "cpuinfo"),
+    )
+
+    @Volatile
+    private var activeBinds: Map<String, File> = emptyMap()
+
     val binds: Map<String, File>
-        get() = linkedMapOf(
-            "/proc/stat" to File(directory, "stat"),
-            "/proc/meminfo" to File(directory, "meminfo"),
-            "/proc/uptime" to File(directory, "uptime"),
-            "/proc/loadavg" to File(directory, "loadavg"),
-            "/proc/cpuinfo" to File(directory, "cpuinfo"),
-        )
+        get() = activeBinds
 
     fun prepare(): Boolean {
         if (!directory.isDirectory && !directory.mkdirs()) return false
-        refreshAll()
-        binds.values.forEach { runCatching { Os.chmod(it.absolutePath, 0x1A4) } } // 0644
-        return binds.values.all { it.isFile && it.length() > 0L }
+
+        val hidden = LinkedHashMap<String, File>()
+        candidates.forEach { (guestPath, target) ->
+            if (!hostProcReadable(guestPath)) {
+                hidden[guestPath] = target
+                writeFallback(guestPath, target)
+                runCatching { Os.chmod(target.absolutePath, 0x1A4) } // 0644
+            }
+        }
+        activeBinds = hidden.toMap()
+        return activeBinds.values.all { it.isFile && it.length() > 0L }
     }
 
     fun start() {
         if (!prepare() || !running.compareAndSet(false, true)) return
+
+        // cpuinfo is static for the lifetime of the session. If it is the only
+        // hidden global file, no refresher thread is needed at all.
+        if (activeBinds.keys.none(::isDynamic)) {
+            running.set(false)
+            return
+        }
+
         worker = Thread({
             while (running.get()) {
                 refreshDynamic()
@@ -62,22 +81,32 @@ class VesselProcCompat(
         worker = null
     }
 
-    private fun refreshAll() {
-        mirrorOr("/proc/cpuinfo", binds.getValue("/proc/cpuinfo")) { syntheticCpuInfo() }
-        refreshDynamic()
-    }
+    private fun hostProcReadable(path: String): Boolean =
+        runCatching {
+            File(path).inputStream().buffered().use { input ->
+                val buffer = ByteArray(256)
+                input.read(buffer) > 0
+            }
+        }.getOrDefault(false)
+
+    private fun isDynamic(path: String): Boolean =
+        path != "/proc/cpuinfo"
 
     private fun refreshDynamic() {
-        mirrorOr("/proc/stat", binds.getValue("/proc/stat")) { syntheticStat() }
-        mirrorOr("/proc/meminfo", binds.getValue("/proc/meminfo")) { syntheticMemInfo() }
-        mirrorOr("/proc/uptime", binds.getValue("/proc/uptime")) { syntheticUptime() }
-        mirrorOr("/proc/loadavg", binds.getValue("/proc/loadavg")) { "0.00 0.00 0.00 1/1 1\n" }
+        activeBinds.forEach { (path, target) ->
+            if (isDynamic(path)) writeFallback(path, target)
+        }
     }
 
-    private fun mirrorOr(source: String, target: File, fallback: () -> String) {
-        val value = runCatching {
-            File(source).readText().takeIf { it.isNotBlank() }
-        }.getOrNull() ?: fallback()
+    private fun writeFallback(path: String, target: File) {
+        val value = when (path) {
+            "/proc/stat" -> syntheticStat()
+            "/proc/meminfo" -> syntheticMemInfo()
+            "/proc/uptime" -> syntheticUptime()
+            "/proc/loadavg" -> "0.00 0.00 0.00 1/1 1\n"
+            "/proc/cpuinfo" -> syntheticCpuInfo()
+            else -> return
+        }
         val tmp = File(target.parentFile, target.name + ".tmp")
         runCatching {
             tmp.writeText(value)

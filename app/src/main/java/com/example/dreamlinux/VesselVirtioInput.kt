@@ -32,6 +32,9 @@ object VesselVirtioInput {
     fun setRuntimeKind(kind: VesselRuntimeKind) {
         runtimeKind = kind
         resetFractions()
+        LinuxDesktopView.active?.post {
+            LinuxDesktopView.active?.refreshCursorLoop()
+        }
     }
 
     fun usesGuestCursorOverlay(): Boolean = runtimeKind == VesselRuntimeKind.UML
