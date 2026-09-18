@@ -23,7 +23,11 @@ permissions:
   actions: read
 
 jobs:
+  # Source-only phase commits intentionally do not assemble APKs. A real APK
+  # build is explicit via workflow_dispatch once the implementation phases are
+  # ready for device validation.
   build:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:

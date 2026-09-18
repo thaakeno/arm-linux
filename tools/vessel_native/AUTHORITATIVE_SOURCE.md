@@ -13,3 +13,10 @@ Current latency/correctness invariants:
 - Firefox keeps hardware WebRender enabled without forcibly enabling the WebRender compositor path.
 - Debian networking is explicitly configured and probed because Android app sandboxes do not expose the netlink/user-namespace features passt normally prefers.
 - PackageKit authorization is scoped to the local Vessel desktop user so Discover does not request a nonexistent guest password.
+
+Runtime-backend invariant:
+
+- Android runtime/session code depends on `VesselRuntimeBackend`; the current active factory remains UML until the proroot acceptance phases are complete.
+- `VesselRuntimeController` remains the authoritative UML implementation and is not rewritten by the proroot foundation.
+- The proroot scaffold keeps mutable rootfs/runtime state under app-private storage but requires executable runtime DSOs to come from Android `nativeLibraryDir`.
+- Linux application compatibility belongs in the shared runtime/session layer. Do not add per-application launch patches as the primary compatibility strategy.

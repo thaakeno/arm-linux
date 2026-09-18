@@ -133,7 +133,7 @@ class VmSessionService : Service() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private lateinit var runtime: VesselRuntimeController
+    private lateinit var runtime: VesselRuntimeBackend
     private var guestWidth = 1920
     private var guestHeight = 1080
     private var guestDpi = 120
@@ -152,7 +152,7 @@ class VmSessionService : Service() {
         active = this
         VesselGuestAgent.start()
         VesselAudioBridge.start(this)
-        runtime = VesselRuntimeController(this) { phase, pct, detail ->
+        runtime = VesselRuntimeFactory.createActive(this) { phase, pct, detail ->
             state.value = state.value.copy(
                 stage = phase,
                 progressPercent = pct,
@@ -252,8 +252,10 @@ class VmSessionService : Service() {
             hostAssetsReady = assets,
             machinePath = runtime.machineDir.absolutePath,
             guestMemoryMb = runtime.guestMemoryMb,
-            runtimeRevision = VesselRuntimeController.REVISION,
-            displayTransport = VesselRuntimeController.DISPLAY_TRANSPORT,
+            graphics = runtime.graphicsSummary,
+            internetStage = runtime.internetSummary,
+            runtimeRevision = runtime.revision,
+            displayTransport = runtime.displayTransport,
             guestDisplayWidth = guestWidth,
             guestDisplayHeight = guestHeight,
             message = when {
@@ -281,11 +283,11 @@ class VmSessionService : Service() {
             console = o.optString("logTail", state.value.console),
             lastError = if (stopping) "" else err,
             uptimeMs = o.optLong("uptimeMs"),
-            graphics = if (VesselExperimentConfig.desktopBackend(this) == "wayland") "KDE Plasma/Wayland → Mesa VirGL → virglrenderer → ${VesselExperimentConfig.hostGl(this).uppercase()} EGL → async AHB → SurfaceFlinger" else "KDE Plasma/X11 fallback → Mesa VirGL → virglrenderer → ${VesselExperimentConfig.hostGl(this).uppercase()} EGL → async AHB",
+            graphics = runtime.graphicsSummary,
             rendererMode = o.optString("rendererMode", state.value.rendererMode),
             translationLayer = o.optString("translationLayer", state.value.translationLayer),
-            displayTransport = VesselRuntimeController.DISPLAY_TRANSPORT,
-            runtimeRevision = VesselRuntimeController.REVISION,
+            displayTransport = runtime.displayTransport,
+            runtimeRevision = runtime.revision,
             guestMemoryMb = o.optInt("guestMemoryMb", state.value.guestMemoryMb),
             guestDisplayWidth = o.optInt("displayWidth", guestWidth),
             guestDisplayHeight = o.optInt("displayHeight", guestHeight),
