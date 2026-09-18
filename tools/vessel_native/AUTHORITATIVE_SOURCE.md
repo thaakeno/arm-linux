@@ -29,3 +29,14 @@ Terminal invariants:
 - PTY teardown is scoped by captured PID birth identity + kernel session + Android UID; never kill processes by package name or app UID alone.
 - Terminal scrollback belongs to terminal-emulator; do not mirror every output byte into Compose/StateFlow.
 - Linux application compatibility belongs to the shared proroot/runtime layer, never per-terminal app launch hacks.
+
+Direct-GPU invariants:
+
+- Proroot graphics uses direct Freedreno OpenGL/ES + Turnip Vulkan over Android KGSL; VirGL remains UML-only.
+- `VesselDirectGpuProfile` is the single application-side driver environment. Do not add app-specific Mesa/Vulkan launch wrappers.
+- Production Mesa lives in normal Debian `/usr` paths. Do not revive the temporary `/tmp/mesa-*` + global `LD_LIBRARY_PATH` test setup.
+- Zink is not the default proroot renderer. It may be used only as an explicit diagnostic/fallback experiment.
+- Vulkan is pinned to the Freedreno ICD so Lavapipe cannot silently mask a broken KGSL path.
+- `tools/vessel_proroot/direct_gpu_manifest.json` pins the exact Debian-13 Mesa archive and digest; rootfs assembly must verify it before extraction.
+- Do not globally force `EGL_PLATFORM=surfaceless`; ordinary Wayland applications must be allowed to choose their native window-system platform.
+- Frame pacing, adaptive refresh and idle throttling belong to the performance/battery phase, not benchmark-oriented Mesa environment variables.

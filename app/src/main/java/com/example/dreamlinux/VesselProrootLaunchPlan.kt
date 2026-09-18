@@ -64,6 +64,21 @@ object VesselProrootContract {
         "LD_CONFIG_FILE",
     )
 
+    private val ENV_NAME = Regex("[A-Za-z_][A-Za-z0-9_]*")
+    private val PROTECTED_GUEST_ENV = setOf(
+        "PROROOT_TMP_DIR",
+        "PROROOT_LIB_PATH",
+        "PROROOT_LINKER_PATH",
+        "PROROOT_STUB_LOADER",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "PATH",
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+    )
+
     fun build(
         launcherPath: String,
         runtimeLibraryDir: String,
@@ -74,6 +89,7 @@ object VesselProrootContract {
         binds: List<VesselProrootBind>,
         guestArgv: List<String>,
         diagnosticsLogPath: String? = null,
+        guestEnvironment: Map<String, String> = emptyMap(),
     ): VesselProrootLaunchPlan {
         require(launcherPath.startsWith('/'))
         require(runtimeLibraryDir.startsWith('/'))
@@ -122,6 +138,18 @@ object VesselProrootContract {
             env["PROROOT_LOG_APPEND"] = diagnosticsLogPath
         }
 
+        guestEnvironment.forEach { (key, value) ->
+            require(ENV_NAME.matches(key)) { "Invalid guest environment key: $key" }
+            require('\u0000' !in value) { "Guest environment contains NUL: $key" }
+            require(key !in PROTECTED_GUEST_ENV) {
+                "Guest environment may not override Vessel runtime key: $key"
+            }
+            require(key !in HOST_LINKER_ENV) {
+                "Guest environment may not inject Android linker state: $key"
+            }
+            env[key] = value
+        }
+
         return VesselProrootLaunchPlan(argv, env, hostWorkingDirectory)
     }
 
@@ -134,6 +162,7 @@ object VesselProrootContract {
         binds: List<VesselProrootBind>,
         command: String,
         diagnosticsLogPath: String? = null,
+        guestEnvironment: Map<String, String> = emptyMap(),
     ): VesselProrootLaunchPlan = build(
         launcherPath = launcherPath,
         runtimeLibraryDir = runtimeLibraryDir,
@@ -143,5 +172,6 @@ object VesselProrootContract {
         binds = binds,
         guestArgv = listOf("/bin/bash", "-lc", command),
         diagnosticsLogPath = diagnosticsLogPath,
+        guestEnvironment = guestEnvironment,
     )
 }

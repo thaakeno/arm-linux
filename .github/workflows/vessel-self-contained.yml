@@ -6,6 +6,7 @@ on:
     paths:
       - 'app/**'
       - 'tools/vessel_native/**'
+      - 'tools/vessel_proroot/**'
       - '.github/workflows/vessel-self-contained.yml'
       - 'gradle/**'
       - 'gradlew'
@@ -56,6 +57,18 @@ jobs:
           set -euxo pipefail
           NDK="$ANDROID_HOME/ndk/29.0.14206865"
           "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang"             --sysroot="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"             -std=c11 -Wall -Wextra -Werror -Os -fsyntax-only             app/src/main/cpp/third_party/termux/vessel_termux_pty.c
+      - name: Validate direct-GPU rootfs contract
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m json.tool tools/vessel_proroot/direct_gpu_manifest.json >/dev/null
+          bash -n tools/vessel_proroot/install_direct_gpu_mesa.sh
+          grep -F 'MESA_LOADER_DRIVER_OVERRIDE" to "kgsl"' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
+          grep -F 'GALLIUM_DRIVER" to "freedreno"' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
+          grep -F 'TURNIP_KMD" to "kgsl"' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
+          ! grep -Fq '"MESA_LOADER_DRIVER_OVERRIDE" to "zink"' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
+          ! grep -Fq '"LD_LIBRARY_PATH"' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
+          grep -F 'c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf' tools/vessel_proroot/direct_gpu_manifest.json
 
   # Source-only phase commits intentionally do not assemble APKs. A real APK
   # build is explicit via workflow_dispatch once the implementation phases are

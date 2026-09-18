@@ -17,3 +17,10 @@ Source: https://github.com/termux/termux-app/tree/v0.118.0/terminal-emulator
 Vessel uses the pinned Java terminal modules and directly compiles its maintained
 PTY JNI implementation derived from the v0.118.0 Apache-licensed PTY source.
 No build-time patching of Termux source is performed.
+
+Mesa for Android Container / Mesa 26.3.0-devel-20260824
+Source: https://github.com/lfdevs/mesa-for-android-container
+License: Mesa project permissive/MIT-style licenses; see upstream source notices.
+Vessel pins the Debian 13 ARM64 direct-extraction artifact by SHA-256 for the
+future proroot rootfs. The archive is not stored in the APK or repository in
+Phase 3.

@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "component": "vessel-direct-gpu-mesa",
+  "sourceRepository": "https://github.com/lfdevs/mesa-for-android-container",
+  "releaseTag": "mesa-26.3.0-devel-20260824",
+  "version": "26.3.0-devel-20260824",
+  "distribution": "debian_trixie_arm64",
+  "archive": "mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz",
+  "url": "https://github.com/lfdevs/mesa-for-android-container/releases/download/mesa-26.3.0-devel-20260824/mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz",
+  "sha256": "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf",
+  "hostDevice": "/dev/kgsl-3d0",
+  "requiredGuestPaths": [
+    "/usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so",
+    "/usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so"
+  ],
+  "vulkanIcdCandidates": [
+    "/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json",
+    "/usr/share/vulkan/icd.d/freedreno_icd.json"
+  ],
+  "marker": "/usr/lib/vessel/direct-gpu/mesa.env"
+}

@@ -57,6 +57,42 @@ class VesselProrootLaunchPlanTest {
         assertEquals("/run/user/0", env["XDG_RUNTIME_DIR"])
     }
 
+
+    @Test
+    fun mergesSharedGpuEnvironmentWithoutTouchingRuntimeKeys() {
+        val plan = VesselProrootContract.build(
+            launcherPath = "/native/libproroot.so",
+            runtimeLibraryDir = "/native",
+            rootfsPath = "/data/rootfs",
+            prorootTmpPath = "/data/runtime/proroot-tmp",
+            hostWorkingDirectory = "/data",
+            binds = emptyList(),
+            guestArgv = listOf("/bin/bash", "-l"),
+            guestEnvironment = mapOf(
+                "MESA_LOADER_DRIVER_OVERRIDE" to "kgsl",
+                "TURNIP_KMD" to "kgsl",
+            ),
+        )
+
+        assertEquals("kgsl", plan.environment["MESA_LOADER_DRIVER_OVERRIDE"])
+        assertEquals("kgsl", plan.environment["TURNIP_KMD"])
+        assertEquals("/native/libproroot-runtime.so", plan.environment["PROROOT_LIB_PATH"])
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsGuestLdLibraryPathOverrides() {
+        VesselProrootContract.build(
+            launcherPath = "/native/libproroot.so",
+            runtimeLibraryDir = "/native",
+            rootfsPath = "/data/rootfs",
+            prorootTmpPath = "/data/runtime/proroot-tmp",
+            hostWorkingDirectory = "/data",
+            binds = emptyList(),
+            guestArgv = listOf("/bin/true"),
+            guestEnvironment = mapOf("LD_LIBRARY_PATH" to "/tmp/mesa"),
+        )
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun rejectsRelativeGuestBindPaths() {
         VesselProrootBind("/dev", "dev")

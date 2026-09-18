@@ -19,10 +19,10 @@ import java.security.MessageDigest
 class VesselProrootRuntimeBackend(
     context: Context,
     private val progress: (String, Int, String) -> Unit,
-) : VesselRuntimeBackend, VesselPtyRuntimeProvider {
+) : VesselRuntimeBackend, VesselPtyRuntimeProvider, VesselDirectGpuRuntimeProvider {
     companion object {
-        const val REVISION = "proroot-terminal-foundation-v2"
-        const val DISPLAY_TRANSPORT = "proroot-native-surface-pending"
+        const val REVISION = "proroot-direct-gpu-v3"
+        const val DISPLAY_TRANSPORT = "proroot-direct-kgsl-v1+vessel-native-surface-pending"
     }
 
     private val layout = VesselProrootLayout(context)
@@ -43,7 +43,7 @@ class VesselProrootRuntimeBackend(
     override val guestMemoryMb = 0
     override val processorCount: Int get() = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
     override val graphicsSummary =
-        "proroot foundation · direct Freedreno/Turnip + Vessel Surface activation pending"
+        "Freedreno OpenGL/ES + Turnip Vulkan → direct KGSL · no VirGL/Zink default"
     override val internetSummary = "Android shared-kernel networking · activation pending"
 
     override fun hasStorageAccess(): Boolean = layout.prepareHostLayout()
@@ -52,6 +52,22 @@ class VesselProrootRuntimeBackend(
         layout.runtimeLibraries().all { it.isFile && it.length() > 0L }
 
     fun rootfsReady(): Boolean = layout.rootfsReady()
+
+    override fun directGpuReadiness(): VesselGpuReadiness {
+        val device = File(VesselDirectGpuProfile.DEVICE)
+        return VesselDirectGpuProfile.readiness(
+            rootfs = layout.rootfsDir,
+            deviceExists = device.exists(),
+            deviceReadable = device.canRead(),
+            deviceWritable = device.canWrite(),
+        )
+    }
+
+    private fun directGpuEnvironment(): Map<String, String> {
+        val readiness = directGpuReadiness()
+        check(readiness.ready) { readiness.reason }
+        return VesselDirectGpuProfile.environment(readiness.icdGuestPath)
+    }
 
     override fun terminalReadiness(verifyIntegrity: Boolean): VesselTerminalRuntimeReadiness {
         val result = when {
@@ -63,8 +79,17 @@ class VesselProrootRuntimeBackend(
                 VesselTerminalRuntimeReadiness(false, "proroot directory rootfs is not installed yet")
             verifyIntegrity && !officialRuntimeHashesMatch() ->
                 VesselTerminalRuntimeReadiness(false, "proroot runtime integrity check failed")
-            else ->
-                VesselTerminalRuntimeReadiness(true, "Native PTY · proroot · bash")
+            else -> {
+                val gpu = directGpuReadiness()
+                if (!gpu.ready) {
+                    VesselTerminalRuntimeReadiness(false, gpu.reason)
+                } else {
+                    VesselTerminalRuntimeReadiness(
+                        true,
+                        "Native PTY · direct Freedreno/Turnip KGSL · bash",
+                    )
+                }
+            }
         }
         return result
     }
@@ -95,6 +120,7 @@ class VesselProrootRuntimeBackend(
             binds = layout.binds(includeSharedStorage),
             command = command,
             diagnosticsLogPath = if (diagnostics) layout.diagnosticsLog.absolutePath else null,
+            guestEnvironment = directGpuEnvironment(),
         )
     }
 
@@ -119,6 +145,7 @@ class VesselProrootRuntimeBackend(
             hostWorkingDirectory = layout.baseDir.absolutePath,
             binds = layout.binds(includeSharedStorage),
             guestArgv = listOf("/bin/bash", "-l"),
+            guestEnvironment = directGpuEnvironment(),
         )
     }
 
@@ -146,11 +173,25 @@ class VesselProrootRuntimeBackend(
             .put("prorootVersion", VesselProrootContract.VERSION)
             .put("rootfsDir", layout.rootfsDir.absolutePath)
             .put("prorootTmpDir", layout.prorootTmpDir.absolutePath)
+            .also { state ->
+                val gpu = directGpuReadiness()
+                state.put("directGpuReady", gpu.ready)
+                state.put("directGpuReason", gpu.reason)
+                state.put("gpuDevice", VesselDirectGpuProfile.DEVICE)
+                state.put("mesaVersion", VesselDirectGpuProfile.MESA_VERSION)
+                state.put("vulkanIcd", gpu.icdGuestPath)
+            }
     }
 
     override suspend fun startDesktop(): JSONObject = withContext(Dispatchers.IO) {
-        progress("proroot_foundation", 0, "proroot backend is staged but not activated")
-        error("proroot desktop activation is intentionally gated until the direct GPU phase")
+        val gpu = directGpuReadiness()
+        progress(
+            "proroot_direct_gpu",
+            if (gpu.ready) 100 else 0,
+            if (gpu.ready) "direct KGSL GPU runtime ready; desktop session waits for Phase 4"
+            else gpu.reason,
+        )
+        error("proroot desktop/session activation is intentionally gated until Phase 4")
     }
 
     override suspend fun guest(command: String, timeoutSeconds: Int): JSONObject =
@@ -166,8 +207,8 @@ class VesselProrootRuntimeBackend(
         .put("protocolVersion", 1)
         .put("runtimeRevision", revision)
         .put("displayTransport", displayTransport)
-        .put("rendererMode", "direct-gpu-pending")
-        .put("translationLayer", "none-planned")
+        .put("rendererMode", "freedreno-turnip-kgsl-direct")
+        .put("translationLayer", "none")
         .put("gpuOnly", true)
         .put("softwareFallback", false)
         .put("running", false)
