@@ -1,0 +1,180 @@
+name: Vessel Proroot Rootfs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ arch/vessel-self-contained ]
+    paths:
+      - 'tools/vessel_proroot/**'
+      - '.github/workflows/vessel-proroot-rootfs.yml'
+
+concurrency:
+  group: vessel-proroot-rootfs-v1-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rootfs build tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             debootstrap zstd curl jq unzip dpkg-dev acl
+
+      - name: Build verified Debian 13 proroot workstation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x             tools/vessel_proroot/build_prebuilt_rootfs.sh             tools/vessel_proroot/install_direct_gpu_mesa.sh             tools/vessel_proroot/install_desktop_runtime.sh
+          tools/vessel_proroot/build_prebuilt_rootfs.sh build/proroot-rootfs
+
+      - name: Validate rootfs manifest
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ARCHIVE=build/proroot-rootfs/Vessel-Proroot-trixie-arm64.tar.zst
+          MANIFEST=build/proroot-rootfs/Vessel-Proroot-trixie-arm64.json
+          test -s "$ARCHIVE"
+          test -s "$MANIFEST"
+          python3 - "$MANIFEST" "$ARCHIVE" <<'PY'
+          import hashlib, json, os, sys
+          manifest, archive = sys.argv[1:]
+          x=json.load(open(manifest,encoding='utf-8'))
+          assert x['schema'] == 1
+          assert x['runtime'] == 'proroot'
+          assert x['debian'] == 'trixie'
+          assert x['arch'] == 'arm64'
+          assert x['compression'] == 'zstd'
+          assert x['archiveBytes'] == os.path.getsize(archive)
+          h=hashlib.sha256()
+          with open(archive,'rb') as f:
+              for block in iter(lambda:f.read(4*1024*1024),b''):
+                  h.update(block)
+          assert h.hexdigest() == x['archiveSha256']
+          assert x['entryCount'] > 1000
+          assert x['extractedBytes'] > 0
+          PY
+
+      - name: Publish chunked rootfs atomically
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_PROMPT_DISABLED: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG=vessel-proroot-rootfs-v1-edge
+          BASE=build/proroot-rootfs/Vessel-Proroot-trixie-arm64
+          MANIFEST="$BASE.json"
+          ARCHIVE="$BASE.tar.zst"
+          CHUNK_DIR=build/proroot-rootfs/release-chunks
+          CHUNK_PREFIX="Vessel-Proroot-trixie-arm64-${GITHUB_SHA}.part-"
+          CHUNK_BYTES=$((64 * 1024 * 1024))
+          PUBLIC_BASE="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG"               --repo "$GITHUB_REPOSITORY"               --target "$GITHUB_SHA"               --title 'Vessel Proroot Rootfs v1 Edge'               --notes 'Rolling verified Debian 13 ARM64 directory rootfs for Vessel proroot.'
+          fi
+
+          rm -rf "$CHUNK_DIR"
+          mkdir -p "$CHUNK_DIR"
+          split --bytes="$CHUNK_BYTES" --numeric-suffixes=0 --suffix-length=3             "$ARCHIVE" "$CHUNK_DIR/$CHUNK_PREFIX"
+          mapfile -t PARTS < <(find "$CHUNK_DIR" -type f -name "$CHUNK_PREFIX*" -print | sort)
+          [ "${#PARTS[@]}" -gt 0 ]
+          [ "${#PARTS[@]}" -le 48 ]
+
+          python3 - "$MANIFEST" "$PUBLIC_BASE" "$GITHUB_SHA" "${PARTS[@]}" <<'PY'
+          import hashlib, json, os, sys
+          manifest_path, public_base, revision, *parts = sys.argv[1:]
+          data=json.load(open(manifest_path,encoding='utf-8'))
+          chunks=[]
+          total=0
+          for index,path in enumerate(parts):
+              size=os.path.getsize(path)
+              h=hashlib.sha256()
+              with open(path,'rb') as f:
+                  for block in iter(lambda:f.read(4*1024*1024),b''):
+                      h.update(block)
+              name=os.path.basename(path)
+              total += size
+              chunks.append({
+                  'index': index,
+                  'name': name,
+                  'url': f'{public_base}/{name}',
+                  'bytes': size,
+                  'sha256': h.hexdigest(),
+              })
+          if total != int(data['archiveBytes']):
+              raise SystemExit(f'chunk bytes {total} != archive {data["archiveBytes"]}')
+          data['schema']=2
+          data['revision']=revision
+          data['transport']='github-release-chunks-v1'
+          data['chunkBytes']=64*1024*1024
+          data['chunks']=chunks
+          with open(manifest_path,'w',encoding='utf-8') as f:
+              json.dump(data,f,indent=2,sort_keys=True)
+              f.write('\n')
+          PY
+
+          asset_info() {
+            local name="$1"
+            gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG"               --jq ".assets[] | select(.name == \"$name\") | [.id,.state,.size] | @tsv"               | head -1 || true
+          }
+
+          upload_one() {
+            local path="$1" name expected info id state size attempt
+            name="$(basename "$path")"
+            expected="$(stat -c '%s' "$path")"
+            info="$(asset_info "$name")"
+            if [ -n "$info" ]; then
+              IFS=$'\t' read -r id state size <<<"$info"
+              if [ "$state" = uploaded ] && [ "$size" = "$expected" ]; then
+                return 0
+              fi
+              gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$id" >/dev/null || true
+            fi
+            for attempt in $(seq 1 8); do
+              gh release upload "$TAG" "$path" --repo "$GITHUB_REPOSITORY" || true
+              info="$(asset_info "$name")"
+              if [ -n "$info" ]; then
+                IFS=$'\t' read -r id state size <<<"$info"
+                if [ "$state" = uploaded ] && [ "$size" = "$expected" ]; then
+                  return 0
+                fi
+                gh api -X DELETE "/repos/$GITHUB_REPOSITORY/releases/assets/$id" >/dev/null || true
+              fi
+              sleep $((attempt * 3))
+            done
+            return 1
+          }
+
+          for part in "${PARTS[@]}"; do upload_one "$part"; done
+
+          for url in $(jq -r '.chunks[].url' "$MANIFEST"); do
+            curl -fsSIL --retry 4 --retry-all-errors --connect-timeout 10 --max-time 30 "$url" >/dev/null
+          done
+
+          # Manifest is the atomic pointer and is published last.
+          gh release upload "$TAG" "$MANIFEST" --clobber --repo "$GITHUB_REPOSITORY"
+
+          URL="$PUBLIC_BASE/Vessel-Proroot-trixie-arm64.json"
+          for i in $(seq 1 30); do
+            PUBLISHED="$(curl -fsSL --connect-timeout 10 --max-time 30 "$URL?revision=$GITHUB_SHA" 2>/dev/null || true)"
+            REV="$(jq -r '.revision // empty' <<<"$PUBLISHED" 2>/dev/null || true)"
+            SCHEMA="$(jq -r '.schema // 0' <<<"$PUBLISHED" 2>/dev/null || true)"
+            if [ "$REV" = "$GITHUB_SHA" ] && [ "$SCHEMA" = 2 ]; then
+              echo "published proroot rootfs revision $GITHUB_SHA"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "rootfs manifest did not become public" >&2
+          exit 1

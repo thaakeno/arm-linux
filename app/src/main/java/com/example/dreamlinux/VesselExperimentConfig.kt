@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 object VesselExperimentConfig {
     private const val PREFS = "vessel_experiment_lab_v1"
     private const val STABILITY_MIGRATION = "stable_profile_v50"
+    private const val RUNTIME_CUTOVER_MIGRATION = "runtime_cutover_v6"
 
     private fun prefs(context: Context): SharedPreferences {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -19,7 +20,29 @@ object VesselExperimentConfig {
             if (!p.contains("refresh_hz")) editor.putInt("refresh_hz", 120)
             editor.putBoolean(STABILITY_MIGRATION, true).apply()
         }
+        if (!p.getBoolean(RUNTIME_CUTOVER_MIGRATION, false)) {
+            // Phase 6 production cutover. Existing installs move to proroot once.
+            // UML remains an explicit recovery choice and is never selected by a
+            // silent runtime failure.
+            p.edit()
+                .putString("runtime_backend", VesselRuntimeFactory.ACTIVE_BACKEND_ID)
+                .putBoolean(RUNTIME_CUTOVER_MIGRATION, true)
+                .apply()
+        }
         return p
+    }
+
+    fun runtimeBackend(context: Context): String =
+        prefs(context).getString("runtime_backend", VesselRuntimeFactory.ACTIVE_BACKEND_ID)
+            .let { if (it == VesselRuntimeFactory.RECOVERY_BACKEND_ID) VesselRuntimeFactory.RECOVERY_BACKEND_ID else VesselRuntimeFactory.ACTIVE_BACKEND_ID }
+
+    fun setRuntimeBackend(context: Context, value: String) {
+        val normalized = if (value == VesselRuntimeFactory.RECOVERY_BACKEND_ID) {
+            VesselRuntimeFactory.RECOVERY_BACKEND_ID
+        } else {
+            VesselRuntimeFactory.ACTIVE_BACKEND_ID
+        }
+        prefs(context).edit().putString("runtime_backend", normalized).apply()
     }
 
     fun vcpus(context: Context): Int = prefs(context).getInt("vcpus", 4).let { if (it in listOf(1, 2, 4, 6)) it else 4 }
@@ -51,6 +74,8 @@ object VesselExperimentConfig {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .clear()
             .putBoolean(STABILITY_MIGRATION, true)
+            .putBoolean(RUNTIME_CUTOVER_MIGRATION, true)
+            .putString("runtime_backend", VesselRuntimeFactory.ACTIVE_BACKEND_ID)
             .putInt("vcpus", 4)
             .putInt("refresh_hz", 120)
             .apply()

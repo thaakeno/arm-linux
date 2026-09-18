@@ -1,6 +1,7 @@
 package com.example.dreamlinux
 
 import android.content.Context
+import android.net.ConnectivityManager
 import android.os.Process
 import android.os.SystemClock
 import android.system.Os
@@ -27,7 +28,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-performance-v5"
+        const val REVISION = "proroot-production-v6"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -94,6 +95,12 @@ class VesselProrootRuntimeBackend(
         if (!layout.rootfsReady()) {
             return VesselDesktopReadiness(false, "proroot directory rootfs is not installed yet")
         }
+        if (!File(layout.rootfsDir, "var/cache/vessel/proroot-production-v1").isFile) {
+            return VesselDesktopReadiness(false, "Phase-6 production rootfs marker is missing")
+        }
+        if (!prepareDns()) {
+            return VesselDesktopReadiness(false, "Could not prepare Android network DNS for Linux")
+        }
 
         val gpu = directGpuReadiness()
         if (!gpu.ready) return VesselDesktopReadiness(false, gpu.reason)
@@ -150,6 +157,33 @@ class VesselProrootRuntimeBackend(
             file.isFile && sha256(file).equals(expected, ignoreCase = true)
         }
 
+    private fun prepareDns(): Boolean {
+        if (!layout.prepareHostLayout()) return false
+        val resolver = File(layout.guestRunDir, "resolv.conf")
+        val manager = appContext.getSystemService(ConnectivityManager::class.java)
+        val network = manager?.activeNetwork
+        val link = if (manager != null && network != null) {
+            manager.getLinkProperties(network)
+        } else {
+            null
+        }
+        val dns = link?.dnsServers
+            ?.mapNotNull { it.hostAddress?.substringBefore('%') }
+            ?.distinct()
+            .orEmpty()
+        val servers = if (dns.isNotEmpty()) dns else listOf("8.8.8.8", "1.1.1.1")
+        return runCatching {
+            resolver.writeText(
+                buildString {
+                    servers.forEach { append("nameserver ").append(it).append('\n') }
+                    append("options timeout:2 attempts:2\n")
+                },
+            )
+            Os.chmod(resolver.absolutePath, 0x1A4) // 0644
+            true
+        }.getOrDefault(false)
+    }
+
     private fun directGpuEnvironment(): Map<String, String> {
         val readiness = directGpuReadiness()
         check(readiness.ready) { readiness.reason }
@@ -165,6 +199,7 @@ class VesselProrootRuntimeBackend(
         check(hostAssetsReady()) { "Official proroot runtime libraries are not packaged" }
         check(layout.rootfsReady()) { "Vessel proroot directory rootfs is not installed" }
         check(layout.prepareGuestMountPointsIfReady()) { "Could not prepare Linux runtime mount points" }
+        check(prepareDns()) { "Could not prepare Android network DNS for Linux" }
 
         return VesselProrootContract.shell(
             launcherPath = File(layout.nativeLibraryDir, "libproroot.so").absolutePath,
@@ -185,6 +220,7 @@ class VesselProrootRuntimeBackend(
         check(terminalReadiness(verifyIntegrity = true).ready) {
             terminalReadiness(verifyIntegrity = false).reason
         }
+        check(prepareDns()) { "Could not prepare Android network DNS for Linux" }
         return VesselProrootContract.build(
             launcherPath = File(layout.nativeLibraryDir, "libproroot.so").absolutePath,
             runtimeLibraryDir = layout.nativeLibraryDir.absolutePath,
@@ -205,6 +241,7 @@ class VesselProrootRuntimeBackend(
         val gid = Os.getgid()
         check(layout.prepareDesktopIdentity(uid, gid)) { "Could not prepare desktop user" }
         check(procCompat.prepare()) { "Could not prepare procfs compatibility overlay" }
+        check(prepareDns()) { "Could not prepare Android network DNS for Linux" }
 
         val identity = VesselProrootDesktopProfile.identity(uid)
         val environment = LinkedHashMap<String, String>()
@@ -290,6 +327,10 @@ class VesselProrootRuntimeBackend(
             .put("vulkanIcd", gpu.icdGuestPath)
             .put("desktopRuntimeReady", desktop.ready)
             .put("desktopRuntimeReason", desktop.reason)
+            .put(
+                "productionRootfs",
+                File(layout.rootfsDir, "var/cache/vessel/proroot-production-v1").isFile,
+            )
             .put("displayBridge", bridge)
             .put("presenter", presenter)
             .put("presentationPath", VesselProrootDisplayBridge.presentationPath())

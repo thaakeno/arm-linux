@@ -75,6 +75,7 @@ data class SessionState(
     val inputReady: Boolean = false,
     val frameReachedApp: Boolean = false,
     val name: String = "Vessel Debian",
+    val runtimeBackend: String = VesselRuntimeFactory.ACTIVE_BACKEND_ID,
     val message: String = "Ready",
     val busy: Boolean = false,
     val stage: String = "idle",
@@ -147,12 +148,13 @@ class VmSessionService : Service() {
 
     private fun nextOperation(): Long = synchronized(this) { ++operationGeneration }
 
+    private fun controlReady(): Boolean =
+        runtime.kind == VesselRuntimeKind.PROROOT || VesselGuestAgent.isConnected()
+
     override fun onCreate() {
         super.onCreate()
         active = this
-        VesselGuestAgent.start()
         VesselAudioBridge.start(this)
-        VesselTerminalManager.initialize(this)
         runtime = VesselRuntimeFactory.createActive(this) { phase, pct, detail ->
             state.value = state.value.copy(
                 stage = phase,
@@ -161,6 +163,12 @@ class VmSessionService : Service() {
                 message = detail,
             )
         }
+        if (runtime.kind == VesselRuntimeKind.UML) {
+            VesselGuestAgent.start()
+        } else {
+            VesselGuestAgent.stop()
+        }
+        VesselTerminalManager.initialize(this)
         VesselVirtioInput.setRuntimeKind(runtime.kind)
         configureStableLandscape()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
@@ -187,7 +195,7 @@ class VmSessionService : Service() {
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (
                     state.value.running && state.value.guestReady && !state.value.busy &&
-                    VesselGuestAgent.isConnected() && now - lastStatsAt > 30_000
+                    controlReady() && now - lastStatsAt > 30_000
                 ) {
                     lastStatsAt = now
                     refreshSystemStats(silent = true)
@@ -253,6 +261,7 @@ class VmSessionService : Service() {
             connected = storage && assets,
             storageReady = storage,
             hostAssetsReady = assets,
+            runtimeBackend = runtime.id,
             machinePath = runtime.machineDir.absolutePath,
             guestMemoryMb = runtime.guestMemoryMb,
             graphics = runtime.graphicsSummary,
@@ -271,9 +280,16 @@ class VmSessionService : Service() {
     }
 
     private fun applyState(o: JSONObject) {
-        val presenter = VesselWaylandPresenter.status()
+        val presenter = if (runtime.kind == VesselRuntimeKind.PROROOT) {
+            VesselProrootDisplayBridge.status()
+        } else {
+            VesselWaylandPresenter.status()
+        }
         val err = o.optString("lastError")
-        val presented = presenter.startsWith("presenting-native-surface") || presenter.startsWith("presenting-retained")
+        val presented =
+            presenter.startsWith("presenting-proroot-") ||
+                presenter.startsWith("presenting-native-surface") ||
+                presenter.startsWith("presenting-retained")
         val frame = o.optBoolean("frameContentValidated") || presented
         val stopping = state.value.stage == "stopping"
         state.value = state.value.copy(
@@ -357,6 +373,71 @@ class VmSessionService : Service() {
 
     fun sendInput(type: String, values: Map<String, Any>) = runtime.input(type, values)
 
+    fun switchRuntimeBackend(id: String): Boolean {
+        if (state.value.running || state.value.busy) return false
+        val normalized = if (id == VesselRuntimeFactory.RECOVERY_BACKEND_ID) {
+            VesselRuntimeFactory.RECOVERY_BACKEND_ID
+        } else {
+            VesselRuntimeFactory.ACTIVE_BACKEND_ID
+        }
+        if (runtime.id == normalized) return true
+        if (normalized == VesselRuntimeFactory.RECOVERY_BACKEND_ID &&
+            !VesselRuntimeFactory.umlRecoveryAvailable(this)
+        ) {
+            state.value = state.value.copy(
+                lastError = "No retained UML recovery disk is available",
+            )
+            return false
+        }
+
+        VesselTerminalManager.requestShutdownAll()
+        VesselProrootDisplayBridge.stop()
+        VesselWaylandPresenter.shutdown()
+        VesselGuestAgent.stop()
+        VesselExperimentConfig.setRuntimeBackend(this, normalized)
+        VesselUpdateManager.refreshLocalState(this)
+
+        runtime = VesselRuntimeFactory.createActive(this) { phase, pct, detail ->
+            state.value = state.value.copy(
+                stage = phase,
+                progressPercent = pct,
+                progressDetail = detail,
+                message = detail,
+            )
+        }
+        if (runtime.kind == VesselRuntimeKind.UML) {
+            VesselGuestAgent.start()
+        }
+        VesselVirtioInput.setRuntimeKind(runtime.kind)
+        discoveryHelperInstalled = false
+        configureStableLandscape()
+        refreshAvailability()
+        state.value = state.value.copy(
+            running = false,
+            guestReady = false,
+            displayReady = false,
+            inputReady = false,
+            frameReachedApp = false,
+            presenterStatus = "not-started",
+            rendererMode = if (runtime.kind == VesselRuntimeKind.PROROOT) {
+                "freedreno-turnip-kgsl-direct"
+            } else {
+                "virgl-opengl"
+            },
+            translationLayer = if (runtime.kind == VesselRuntimeKind.PROROOT) "none" else "VirGL",
+            lastError = "",
+            stage = "idle",
+            progressPercent = 0,
+            progressDetail = "Runtime stopped",
+            message = if (runtime.kind == VesselRuntimeKind.PROROOT) {
+                "Proroot production backend selected"
+            } else {
+                "UML recovery backend selected"
+            },
+        )
+        return true
+    }
+
     fun startVm() {
         if (state.value.busy) return
         refreshAvailability()
@@ -389,7 +470,7 @@ class VmSessionService : Service() {
                     message = "Vessel workstation ready",
                     lastError = "",
                 )
-                if (VesselGuestAgent.isConnected()) {
+                if (controlReady()) {
                     runCatching { installDiscoveryHelper() }
                     refreshSystemStats(silent = true)
                 }
@@ -422,6 +503,20 @@ class VmSessionService : Service() {
 
     private suspend fun ensureWorkstation(op: Long) {
         if (op != operationGeneration) return
+        if (runtime.kind == VesselRuntimeKind.PROROOT) {
+            val production = runtime.guest(
+                "test -f /var/cache/vessel/proroot-production-v1 && " +
+                    "test -x /usr/local/libexec/vessel-start-plasma && " +
+                    "test -x /usr/local/libexec/vessel-compat-probe && " +
+                    "test -s /usr/lib/vessel/direct-gpu/mesa.env && " +
+                    "test -s /usr/lib/vessel/desktop/session.env",
+                10,
+            )
+            check(production.optBoolean("ok")) {
+                "Phase-6 production rootfs marker is missing"
+            }
+            return
+        }
         val fastMarker = runtime.guest(
             "test -f /var/cache/vessel/workstation-v58 && test -f /etc/xdg/menus/kf5-applications.menu && test -d /usr/share/icons/breeze",
             5,
@@ -479,6 +574,13 @@ class VmSessionService : Service() {
 
     private suspend fun ensureDesktopProfile(op: Long) {
         if (op != operationGeneration) return
+        if (runtime.kind == VesselRuntimeKind.PROROOT) {
+            val current = runtime.status()
+            check(current.optBoolean("desktopReady")) {
+                "Proroot Plasma session did not remain ready"
+            }
+            return
+        }
         state.value = state.value.copy(
             stage = "desktop_profile",
             progressPercent = 99,
@@ -550,7 +652,11 @@ class VmSessionService : Service() {
                 stage = "idle",
                 progressPercent = 0,
                 progressDetail = "Runtime stopped",
-                message = "Linux stopped; disk retained",
+                message = if (runtime.kind == VesselRuntimeKind.PROROOT) {
+                    "Linux stopped; rootfs retained"
+                } else {
+                    "Linux stopped; disk retained"
+                },
                 lastError = "",
             )
         }
@@ -581,15 +687,22 @@ class VmSessionService : Service() {
     }
 
     fun runGpuDiagnostics() {
-        runGuestCommand(
+        val command = if (runtime.kind == VesselRuntimeKind.PROROOT) {
+            "printf '=== DIRECT KGSL ===\\n'; ls -l /dev/kgsl-3d0 2>&1; " +
+                "printf '\\n=== MESA ===\\n'; cat /usr/lib/vessel/direct-gpu/mesa.env 2>&1; " +
+                "printf '\\n=== VULKAN ICD ===\\n'; ls -l /usr/share/vulkan/icd.d/*freedreno* 2>&1; " +
+                "printf '\\n=== PLASMA ===\\n'; ps -ef | grep -E 'kwin_wayland|plasmashell|Xwayland' | grep -v grep 2>&1; " +
+                "printf '\\n=== MEMORY ===\\n'; free -m 2>&1; " +
+                "printf '\\n=== PROC ===\\n'; head -8 /proc/stat; head -8 /proc/meminfo"
+        } else {
             "export DISPLAY=:0; printf '=== GL ===\\n'; LIBGL_ALWAYS_SOFTWARE=0 GALLIUM_DRIVER=virgl glxinfo -B 2>&1; " +
                 "printf '\\n=== DRM ===\\n'; ls -l /dev/dri 2>&1; " +
                 "printf '\\n=== INPUT ===\\n'; grep -E 'Name=\"Vessel (Trackpad|Touchscreen|Keyboard)\"' /proc/bus/input/devices 2>&1; " +
                 "printf '\\n=== XINPUT ===\\n'; xinput list 2>&1; " +
                 "printf '\\n=== PLASMA ===\\n'; ps -ef | grep -E 'kwin|plasmashell|Xorg' | grep -v grep 2>&1; " +
-                "printf '\\n=== MEMORY ===\\n'; free -m 2>&1; " +
-                "printf '\\n=== TIMER/RCU ===\\n'; dmesg 2>&1 | grep -Ei 'rcu.*stall|timer handling|starved' | tail -40",
-        )
+                "printf '\\n=== MEMORY ===\\n'; free -m 2>&1"
+        }
+        runGuestCommand(command)
     }
 
     private suspend fun installDiscoveryHelper() {
@@ -614,7 +727,9 @@ class VmSessionService : Service() {
         appStore.value = appStore.value.copy(query = query, sort = normalizedSort, category = normalizedCategory, loading = true, error = "")
         scope.launch(Dispatchers.IO) {
             try {
-                if (!VesselGuestAgent.waitUntilConnected(1_500)) {
+                if (runtime.kind == VesselRuntimeKind.UML &&
+                    !VesselGuestAgent.waitUntilConnected(1_500)
+                ) {
                     appStore.value = appStore.value.copy(
                         loading = false,
                         error = "Debian app service is reconnecting. Try again in a moment.",
@@ -778,7 +893,7 @@ class VmSessionService : Service() {
             updateHostOnlyStats()
             return
         }
-        if (!VesselGuestAgent.isConnected()) {
+        if (!controlReady()) {
             updateHostOnlyStats()
             if (!silent) machineStats.value = machineStats.value.copy(error = "Debian control service is reconnecting")
             return
@@ -859,12 +974,18 @@ class VmSessionService : Service() {
                 appendLine("app=${BuildConfig.VERSION_NAME} commit=${BuildConfig.GIT_COMMIT}")
                 appendLine("device=${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} sdk=${android.os.Build.VERSION.SDK_INT}")
                 appendLine("hostAvailMiB=${memory.availMem / (1024 * 1024)} lowMemory=${memory.lowMemory} thresholdMiB=${memory.threshold / (1024 * 1024)}")
-                appendLine("control=${VesselGuestAgent.status()}")
+                appendLine(
+                    "control=" + if (runtime.kind == VesselRuntimeKind.PROROOT) {
+                        "direct-proroot"
+                    } else {
+                        VesselGuestAgent.status()
+                    },
+                )
                 appendLine("audio=${VesselAudioBridge.status()}")
                 appendLine("presenter=${VesselWaylandPresenter.status()}")
                 appendLine("vcpus=${runtime.processorCount} guestRamMiB=${runtime.guestMemoryMb}")
             }
-            val guest = if (state.value.running && state.value.guestReady && VesselGuestAgent.isConnected()) {
+            val guest = if (state.value.running && state.value.guestReady && controlReady()) {
                 runCatching {
                     runtime.guest(
                         """
@@ -886,14 +1007,29 @@ class VmSessionService : Service() {
     }
 
     private fun hostDiskStats(): Triple<Long, Long, Long> {
+        val freeMb = runtime.machineDir.usableSpace / (1024L * 1024L)
+        if (runtime.kind == VesselRuntimeKind.PROROOT) {
+            return Triple(0L, 0L, freeMb)
+        }
         val disk = File(runtime.machineDir, "debian-docker.ext4")
         val virtualMb = if (disk.isFile) disk.length() / (1024L * 1024L) else 0L
-        val physicalMb = if (disk.isFile) runCatching { Os.stat(disk.absolutePath).st_blocks * 512L / (1024L * 1024L) }.getOrDefault(virtualMb) else 0L
-        val freeMb = runtime.machineDir.usableSpace / (1024L * 1024L)
+        val physicalMb = if (disk.isFile) {
+            runCatching {
+                Os.stat(disk.absolutePath).st_blocks * 512L / (1024L * 1024L)
+            }.getOrDefault(virtualMb)
+        } else {
+            0L
+        }
         return Triple(virtualMb, physicalMb, freeMb)
     }
 
     fun expandDiskBy2GiB() {
+        if (runtime.kind == VesselRuntimeKind.PROROOT) {
+            machineStats.value = machineStats.value.copy(
+                error = "Proroot uses a directory filesystem and grows automatically",
+            )
+            return
+        }
         if (state.value.running || state.value.busy) {
             machineStats.value = machineStats.value.copy(error = "Stop Linux before expanding the disk")
             return

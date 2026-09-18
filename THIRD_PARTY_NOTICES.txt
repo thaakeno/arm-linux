@@ -34,3 +34,16 @@ Vessel Phase 4 does not copy the Anland Android consumer implementation. The
 rootfs installer downloads the published Debian ARM64 compositor/XWayland
 packages by pinned SHA-256. Vessel independently implements the Android-side
 socket/DMA-BUF/native-fence interoperability layer.
+
+proroot v1.2.8
+Copyright (c) 2026 coderred
+Source/release: https://github.com/coderredlab/proroot/releases/tag/v1.2.8
+License: proprietary binary license in the upstream repository LICENSE file.
+Vessel packages the five official unmodified arm64-v8a release binaries:
+libproroot.so, libproroot-runtime.so, libproroot-bridge.so,
+libproroot-linker.so and libproroot-stub-loader.so. The build fetches them only
+from the official v1.2.8 release, verifies the upstream SHA-256 digests, and
+keeps them unstripped so the APK payload bytes remain identical to upstream.
+Upstream permits free project use and redistribution of unmodified binaries as
+part of a complete APK/AAB; redistribution of modified binaries is not
+permitted. This notice provides the attribution required by that license.

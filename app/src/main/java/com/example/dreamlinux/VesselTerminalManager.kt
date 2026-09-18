@@ -49,7 +49,7 @@ object VesselTerminalManager {
         synchronized(lock) {
             if (appContext == null) {
                 appContext = context.applicationContext
-                backend = VesselRuntimeFactory.createProrootScaffold(context.applicationContext) { _, _, _ -> }
+                backend = VesselRuntimeFactory.createProroot(context.applicationContext) { _, _, _ -> }
             }
             refreshAvailabilityLocked(verifyHashes = false)
             publishLocked()

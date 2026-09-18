@@ -1,3 +1,8 @@
+import java.net.URI
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.compose.compiler)
@@ -73,6 +78,11 @@ android {
         pickFirsts += setOf("**/libtermux.so")
         keepDebugSymbols += setOf(
           "**/libtermux.so",
+          "**/libproroot.so",
+          "**/libproroot-runtime.so",
+          "**/libproroot-bridge.so",
+          "**/libproroot-linker.so",
+          "**/libproroot-stub-loader.so",
           "**/libvessel_uml.so",
           "**/libvessel_stub.so",
           "**/libvessel_umnet.so",
@@ -91,6 +101,83 @@ android {
 }
 
 kotlin { jvmToolchain(17) }
+
+val officialProrootNames = listOf(
+    "libproroot.so",
+    "libproroot-runtime.so",
+    "libproroot-bridge.so",
+    "libproroot-linker.so",
+    "libproroot-stub-loader.so",
+)
+val prepareOfficialProrootRuntime by tasks.registering {
+    group = "vessel"
+    description = "Fetch hash-verified unmodified proroot v1.2.8 runtime libraries"
+    outputs.files(
+        officialProrootNames.map { name ->
+            layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/" + name)
+        },
+    )
+    doLast {
+        val expected = linkedMapOf(
+            "libproroot.so" to "a4e74d75b66cdc02b080adfe863dbf9951c3b30610d77beddc95488d5fe5de01",
+            "libproroot-runtime.so" to "8c47a0a7db32d84c179ebb5bf3640f655a3181860ece5886ae44d92858730c34",
+            "libproroot-bridge.so" to "1c5bc9537a270e8bf8b1c70222813f57b60b828bfb5503ddf8fe37685092de2f",
+            "libproroot-linker.so" to "51a0ec5bfed00e572a0de09e22d9057e2befc386b78e426613d3e0ab03f4ecee",
+            "libproroot-stub-loader.so" to "06c6624db3bdc45b9ced151cd781df439a37b47731d244b93e9d6a58cd48cde0",
+        )
+        val outputFiles = outputs.files.files.associateBy { it.name }
+        val destination = outputFiles.values.first().parentFile
+        destination.mkdirs()
+
+        fun sha256(file: File): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().buffered(128 * 1024).use { input ->
+                val buffer = ByteArray(128 * 1024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        }
+
+        expected.forEach { (name, digest) ->
+            val target = outputFiles.getValue(name)
+            if (!target.isFile || sha256(target) != digest) {
+                val temp = destination.resolve(name + ".tmp")
+                temp.delete()
+                val url = URI(
+                    "https://github.com/coderredlab/proroot/releases/download/v1.2.8/" + name,
+                ).toURL()
+                url.openConnection().apply {
+                    connectTimeout = 15_000
+                    readTimeout = 30_000
+                }.getInputStream().use { input ->
+                    temp.outputStream().buffered(128 * 1024).use { output ->
+                        input.copyTo(output, 128 * 1024)
+                    }
+                }
+                check(sha256(temp) == digest) {
+                    "Official proroot SHA-256 mismatch for " + name
+                }
+                Files.move(
+                    temp.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
+            check(sha256(target) == digest) {
+                "Official proroot runtime integrity failed for " + name
+            }
+            target.setExecutable(true, false)
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(prepareOfficialProrootRuntime)
+}
 
 dependencies {
   implementation("dev.rikka.shizuku:api:13.1.5")
