@@ -1,0 +1,55 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+: "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}"
+: "${VESSEL_DISPLAY_SOCKET:?VESSEL_DISPLAY_SOCKET is required}"
+
+uid_now="$(id -u)"
+if [[ "$uid_now" == 0 ]]; then
+  echo "Vessel desktop refuses to run as guest uid 0" >&2
+  exit 71
+fi
+
+install -d -m 0700 "$XDG_RUNTIME_DIR"
+install -d -m 0700 "$XDG_RUNTIME_DIR/vessel"
+install -d -m 01777 /tmp/.X11-unix
+rm -f "$XDG_RUNTIME_DIR"/wayland-* "$XDG_RUNTIME_DIR"/plasma-* 2>/dev/null || true
+
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=KDE
+export XDG_SESSION_DESKTOP=KDE
+export DESKTOP_SESSION=plasma
+export QT_QPA_PLATFORM=wayland
+export GDK_BACKEND=wayland,x11
+export ANLAND_SOCKET="$VESSEL_DISPLAY_SOCKET"
+export ANLAND=1
+export ANLAND_NO_DRM_DEVICE=1
+unset DISPLAY
+# Never leak a surfaceless EGL default into normal Linux applications. The
+# KWin wrapper scopes EGL_PLATFORM=surfaceless to the compositor process only.
+unset EGL_PLATFORM
+
+# startplasma resolves KWin from PATH. Shadow only the compositor executables so
+# surfaceless/Anland settings do not leak into normal applications.
+export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"
+
+if [[ ! -s /etc/machine-id ]] && command -v dbus-uuidgen >/dev/null 2>&1; then
+  dbus-uuidgen --ensure=/etc/machine-id
+fi
+
+if ! command -v dbus-run-session >/dev/null 2>&1; then
+  echo "dbus-run-session is missing" >&2
+  exit 72
+fi
+if ! command -v startplasma-wayland >/dev/null 2>&1; then
+  echo "startplasma-wayland is missing" >&2
+  exit 73
+fi
+
+exec dbus-run-session -- /bin/sh -c '
+  if command -v pulseaudio >/dev/null 2>&1; then
+    pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+  fi
+  exec startplasma-wayland
+'

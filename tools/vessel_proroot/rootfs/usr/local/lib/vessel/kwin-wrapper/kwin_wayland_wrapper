@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+: "${VESSEL_DISPLAY_SOCKET:?VESSEL_DISPLAY_SOCKET is required}"
+export ANLAND=1
+export ANLAND_SOCKET="$VESSEL_DISPLAY_SOCKET"
+export ANLAND_NO_DRM_DEVICE=1
+export EGL_PLATFORM=surfaceless
+if [ -x /usr/bin/kwin_wayland_wrapper ]; then
+  exec /usr/bin/kwin_wayland_wrapper "$@"
+fi
+exec /usr/bin/kwin_wayland "$@"

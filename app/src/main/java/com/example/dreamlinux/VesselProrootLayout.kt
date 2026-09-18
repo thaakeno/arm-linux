@@ -7,10 +7,9 @@ import java.io.File
 /**
  * App-private directory layout for a directory-based glibc rootfs.
  *
- * Do not reuse Vessel's UML ext4 image here. proroot translates paths against a
- * mutable directory tree and Android 10+ forbids executing the launcher from
- * writable app data, so only data lives here; executable runtime DSOs stay in
- * nativeLibraryDir.
+ * Mutable Linux data stays under filesDir. Executable proroot DSOs stay in
+ * nativeLibraryDir because modern Android does not allow arbitrary app-data
+ * executables.
  */
 class VesselProrootLayout(context: Context) {
     val baseDir = File(context.filesDir, "vessel-proroot")
@@ -22,8 +21,11 @@ class VesselProrootLayout(context: Context) {
     val guestTmpDir = File(volatileDir, "tmp")
     val guestRunDir = File(volatileDir, "run")
     val guestShmDir = File(volatileDir, "shm")
+    val identityDir = File(volatileDir, "identity")
+    val procCompatDir = File(volatileDir, "proc-compat")
     val diagnosticsDir = File(baseDir, "diagnostics")
     val diagnosticsLog = File(diagnosticsDir, "proroot.log")
+    val desktopLog = File(diagnosticsDir, "desktop.log")
     val nativeLibraryDir = File(context.applicationInfo.nativeLibraryDir)
 
     fun prepareHostLayout(): Boolean {
@@ -36,6 +38,8 @@ class VesselProrootLayout(context: Context) {
             guestTmpDir,
             guestRunDir,
             guestShmDir,
+            identityDir,
+            procCompatDir,
             diagnosticsDir,
             File(guestRunDir, "user"),
             File(guestRunDir, "user/0"),
@@ -44,6 +48,8 @@ class VesselProrootLayout(context: Context) {
 
         chmod(prorootTmpDir, 0x1C0) // 0700
         chmod(diagnosticsDir, 0x1C0) // 0700
+        chmod(identityDir, 0x1C0) // 0700
+        chmod(procCompatDir, 0x1C0) // 0700
         chmod(guestTmpDir, 0x3FF) // 01777
         chmod(guestShmDir, 0x3FF) // 01777
         chmod(guestRunDir, 0x1ED) // 0755
@@ -57,11 +63,6 @@ class VesselProrootLayout(context: Context) {
         return File(rootfsDir, "bin/sh").isFile || File(rootfsDir, "usr/bin/sh").isFile
     }
 
-    /**
-     * Bind targets should already look like a normal Linux filesystem before a
-     * process starts. This avoids fixing individual applications that assume
-     * /tmp, /run or /dev/shm exists.
-     */
     fun prepareGuestMountPointsIfReady(): Boolean {
         if (!rootfsReady()) return false
         val targets = listOf(
@@ -77,6 +78,8 @@ class VesselProrootLayout(context: Context) {
             "storage",
             "storage/emulated",
             "storage/emulated/0",
+            "home",
+            "home/vessel",
         )
         if (!targets.all { path ->
                 val dir = File(rootfsDir, path)
@@ -87,17 +90,65 @@ class VesselProrootLayout(context: Context) {
         chmod(File(rootfsDir, "tmp"), 0x3FF)
         chmod(File(rootfsDir, "dev/shm"), 0x3FF)
         chmod(File(rootfsDir, "run"), 0x1ED)
+        chmod(File(rootfsDir, "home/vessel"), 0x1C0)
         return true
     }
+
+    fun prepareDesktopIdentity(uid: Int, gid: Int): Boolean {
+        if (!prepareHostLayout() || !prepareGuestMountPointsIfReady()) return false
+        val runtimeUser = File(guestRunDir, "user/" + uid)
+        val vesselRuntime = File(runtimeUser, "vessel")
+        if ((!runtimeUser.isDirectory && !runtimeUser.mkdirs()) ||
+            (!vesselRuntime.isDirectory && !vesselRuntime.mkdirs())
+        ) return false
+        chmod(runtimeUser, 0x1C0)
+        chmod(vesselRuntime, 0x1C0)
+
+        val originalPasswd = File(rootfsDir, "etc/passwd")
+            .takeIf { it.isFile }
+            ?.readLines()
+            .orEmpty()
+            .filterNot { it.startsWith("vessel:") }
+        val originalGroup = File(rootfsDir, "etc/group")
+            .takeIf { it.isFile }
+            ?.readLines()
+            .orEmpty()
+            .filterNot { it.startsWith("vessel:") }
+
+        val passwd = File(identityDir, "passwd")
+        val group = File(identityDir, "group")
+        passwd.writeText(
+            (originalPasswd + "vessel:x:$uid:$gid:Vessel:/home/vessel:/bin/bash")
+                .joinToString("\n", postfix = "\n"),
+        )
+        group.writeText(
+            (originalGroup + "vessel:x:$gid:")
+                .joinToString("\n", postfix = "\n"),
+        )
+        chmod(passwd, 0x1A4) // 0644
+        chmod(group, 0x1A4)
+        return true
+    }
+
+    fun desktopHostSocket(uid: Int): File =
+        File(guestRunDir, "user/" + uid + "/vessel/display.sock")
+
+    fun desktopGuestSocket(uid: Int): String =
+        "/run/user/" + uid + "/vessel/display.sock"
 
     fun runtimeLibraries(): List<File> =
         VesselProrootContract.REQUIRED_LIBRARIES.map { File(nativeLibraryDir, it) }
 
     /**
-     * Shared baseline from upstream proroot and DSHA, followed by Vessel-owned
-     * volatile mounts. /tmp, /run and /dev/shm are deliberately app-private.
+     * Shared baseline from upstream proroot/DSHA followed by Vessel-owned
+     * volatile mounts. Later binds intentionally override earlier broad /proc
+     * and /dev mounts.
      */
-    fun binds(includeSharedStorage: Boolean = true): List<VesselProrootBind> {
+    fun binds(
+        includeSharedStorage: Boolean = true,
+        identityOverlay: Boolean = false,
+        procCompat: Map<String, File> = emptyMap(),
+    ): List<VesselProrootBind> {
         check(prepareHostLayout()) { "Could not prepare Vessel proroot directories" }
         val result = ArrayList<VesselProrootBind>()
 
@@ -116,10 +167,24 @@ class VesselProrootLayout(context: Context) {
         addExisting("/apex")
         addExisting("/proc/self/fd", "/dev/fd")
 
-        // These come after /dev so the private shm mount wins over Android /dev.
         result += VesselProrootBind(guestTmpDir.absolutePath, "/tmp")
         result += VesselProrootBind(guestRunDir.absolutePath, "/run")
         result += VesselProrootBind(guestShmDir.absolutePath, "/dev/shm")
+
+        if (identityOverlay) {
+            val passwd = File(identityDir, "passwd")
+            val group = File(identityDir, "group")
+            check(passwd.isFile && group.isFile) { "Desktop identity overlay is not prepared" }
+            result += VesselProrootBind(passwd.absolutePath, "/etc/passwd")
+            result += VesselProrootBind(group.absolutePath, "/etc/group")
+        }
+
+        procCompat.forEach { (guest, host) ->
+            check(guest.startsWith("/proc/") && host.isFile) {
+                "Invalid proc compatibility bind: $guest -> $host"
+            }
+            result += VesselProrootBind(host.absolutePath, guest)
+        }
 
         if (includeSharedStorage) {
             val shared = File("/storage/emulated/0")

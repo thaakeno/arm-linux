@@ -70,6 +70,37 @@ jobs:
           ! grep -Fq '"LD_LIBRARY_PATH"' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
           grep -F 'c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf' tools/vessel_proroot/direct_gpu_manifest.json
 
+      - name: Syntax-check Phase 4 native runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          NDK="$ANDROID_HOME/ndk/29.0.14206865"
+          CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang++"
+          SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          for src in             app/src/main/cpp/vessel_proroot_display_bridge.cpp             app/src/main/cpp/vessel_proroot_process.cpp             app/src/main/cpp/vessel_surface_presenter.cpp
+          do
+            "$CXX" --sysroot="$SYSROOT"               -std=c++17 -Wall -Wextra -Werror               -Wno-unused-parameter -Wno-missing-field-initializers -Wno-misleading-indentation -Wno-unused-function               -fsyntax-only "$src"
+          done
+
+      - name: Validate Phase 4 desktop compatibility contract
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m json.tool tools/vessel_proroot/desktop_manifest.json >/dev/null
+          bash -n tools/vessel_proroot/install_desktop_runtime.sh
+          bash -n tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
+          bash -n tools/vessel_proroot/rootfs/usr/local/libexec/vessel-compat-probe
+          bash -n tools/vessel_proroot/rootfs/usr/local/lib/vessel/kwin-wrapper/kwin_wayland
+          bash -n tools/vessel_proroot/rootfs/usr/local/lib/vessel/kwin-wrapper/kwin_wayland_wrapper
+          grep -F 'proroot-kgsl-dmabuf-fence-ahb-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'VesselProrootIdentity(' app/src/main/java/com/example/dreamlinux/VesselProrootLaunchPlan.kt
+          grep -F 'fakeRoot = false' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibility.kt
+          grep -F 'dbus-run-session' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
+          grep -F 'SCM_CREDENTIALS' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-compat-probe
+          grep -F 'os.memfd_create' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-compat-probe
+          ! grep -R -E -- '--no-sandbox|MOZ_DISABLE_CONTENT_SANDBOX|security\.sandbox\.content\.level'             app/src/main/java/com/example/dreamlinux/VesselProroot*.kt             tools/vessel_proroot/rootfs
+          ! grep -R -F 'LIBGL_ALWAYS_SOFTWARE=1'             app/src/main/java/com/example/dreamlinux/VesselProroot*.kt             tools/vessel_proroot/rootfs
+
   # Source-only phase commits intentionally do not assemble APKs. A real APK
   # build is explicit via workflow_dispatch once the implementation phases are
   # ready for device validation.

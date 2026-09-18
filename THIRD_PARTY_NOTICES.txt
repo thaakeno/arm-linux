@@ -24,3 +24,13 @@ License: Mesa project permissive/MIT-style licenses; see upstream source notices
 Vessel pins the Debian 13 ARM64 direct-extraction artifact by SHA-256 for the
 future proroot rootfs. The archive is not stored in the APK or repository in
 Phase 3.
+
+Anland-compatible KWin / XWayland packages 5.13.3
+Copyright Anland contributors and KDE/KWin/X.Org contributors
+KWin licensing: GPL-2.0-or-later and other upstream KDE component licenses
+XWayland licensing: MIT/X11 family licenses; see upstream package notices
+Source/release: https://github.com/lfdevs/anland-termux/releases/tag/5.13.3
+Vessel Phase 4 does not copy the Anland Android consumer implementation. The
+rootfs installer downloads the published Debian ARM64 compositor/XWayland
+packages by pinned SHA-256. Vessel independently implements the Android-side
+socket/DMA-BUF/native-fence interoperability layer.

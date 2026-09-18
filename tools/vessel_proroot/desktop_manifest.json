@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "component": "vessel-proroot-desktop",
+  "release": "5.13.3",
+  "sourceRepository": "https://github.com/lfdevs/anland-termux",
+  "debian": "13",
+  "kwin": {
+    "archive": "kwin_anland-5.13-debian-4_6.3.6-95.zip",
+    "url": "https://github.com/lfdevs/anland-termux/releases/download/5.13.3/kwin_anland-5.13-debian-4_6.3.6-95.zip",
+    "sha256": "56ce1da27b640c977bad5ca0b7b13196e609b5fc419703429e51805ec05e4ee4"
+  },
+  "xwayland": {
+    "archive": "xwayland_24.1.6-91_arm64.deb",
+    "url": "https://github.com/lfdevs/anland-termux/releases/download/5.13.3/xwayland_24.1.6-91_arm64.deb",
+    "sha256": "59f9c7486d6a10ad50a13622bf1d1bbf5accd015d630e4b2b0152a80577dcc64"
+  },
+  "marker": "/usr/lib/vessel/desktop/session.env",
+  "starter": "/usr/local/libexec/vessel-start-plasma",
+  "probe": "/usr/local/libexec/vessel-compat-probe"
+}

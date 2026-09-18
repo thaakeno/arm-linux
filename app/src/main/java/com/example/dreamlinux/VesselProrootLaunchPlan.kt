@@ -15,6 +15,26 @@ data class VesselProrootBind(
     fun argument(): String = "$hostPath:$guestPath"
 }
 
+data class VesselProrootIdentity(
+    val fakeRoot: Boolean,
+    val user: String,
+    val logName: String,
+    val home: String,
+    val workingDirectory: String,
+    val runtimeDirectory: String,
+) {
+    companion object {
+        val ROOT = VesselProrootIdentity(
+            fakeRoot = true,
+            user = "root",
+            logName = "root",
+            home = "/root",
+            workingDirectory = "/root",
+            runtimeDirectory = "/run/user/0",
+        )
+    }
+}
+
 data class VesselProrootLaunchPlan(
     val argv: List<String>,
     val environment: Map<String, String>,
@@ -86,6 +106,7 @@ object VesselProrootContract {
         prorootTmpPath: String,
         hostWorkingDirectory: String,
         guestWorkingDirectory: String = "/root",
+        identity: VesselProrootIdentity = VesselProrootIdentity.ROOT,
         binds: List<VesselProrootBind>,
         guestArgv: List<String>,
         diagnosticsLogPath: String? = null,
@@ -103,7 +124,7 @@ object VesselProrootContract {
             add(launcherPath)
             add("-r")
             add(rootfsPath)
-            add("-0")
+            if (identity.fakeRoot) add("-0")
             // This is documented by upstream for Android and is also the DSHA
             // proroot path. It avoids hard-link failures without per-package hacks.
             add("--link2symlink")
@@ -121,13 +142,13 @@ object VesselProrootContract {
             "PROROOT_LIB_PATH" to "$runtimeLibraryDir/libproroot-runtime.so",
             "PROROOT_LINKER_PATH" to "$runtimeLibraryDir/libproroot-linker.so",
             "PROROOT_STUB_LOADER" to "$runtimeLibraryDir/libproroot-stub-loader.so",
-            "HOME" to "/root",
-            "USER" to "root",
-            "LOGNAME" to "root",
+            "HOME" to identity.home,
+            "USER" to identity.user,
+            "LOGNAME" to identity.logName,
             "SHELL" to "/bin/bash",
             "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "TMPDIR" to "/tmp",
-            "XDG_RUNTIME_DIR" to "/run/user/0",
+            "XDG_RUNTIME_DIR" to identity.runtimeDirectory,
             "LANG" to "C.UTF-8",
             "LC_ALL" to "C.UTF-8",
             "TERM" to "xterm-256color",

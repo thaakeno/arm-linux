@@ -24,7 +24,7 @@ internal data class VesselProcessIdentity(
             stat.startedAtTicks == other.stat.startedAtTicks &&
             stat.session == other.stat.session
 
-    fun ownsPtySession(appPid: Int): Boolean =
+    fun ownsIsolatedSession(appPid: Int): Boolean =
         uid == Process.myUid() &&
             stat.parent == appPid &&
             stat.processGroup == pid &&
@@ -32,23 +32,28 @@ internal data class VesselProcessIdentity(
 }
 
 /**
- * Reaps exactly one PTY session.
+ * Reaps exactly one Vessel-created isolated process session.
  *
- * The Vessel PTY child calls setsid() before exec and sends its own stat record
+ * The Vessel native launcher calls setsid() before exec and sends its own stat record
  * to the parent before it is allowed to exec. Every later signal revalidates
  * UID, session and /proc starttime so PID reuse cannot redirect cleanup.
  */
-internal object VesselTerminalProcessCloser {
+internal object VesselSessionProcessCloser {
     fun captureLeader(pid: Int, birthStat: String): VesselProcessIdentity {
         val stat = VesselProcStatParser.parse(birthStat, pid)
-            ?: throw IOException("PTY child returned an invalid birth identity")
+            ?: throw IOException("Vessel child returned an invalid birth identity")
         val identity = VesselProcessIdentity(stat, Process.myUid())
-        check(identity.ownsPtySession(Process.myPid())) {
-            "PTY launcher did not own an isolated session: pid=" + pid +
+        check(identity.ownsIsolatedSession(Process.myPid())) {
+            "Vessel launcher did not own an isolated session: pid=" + pid +
                 " ppid=" + stat.parent + " pgrp=" + stat.processGroup + " sid=" + stat.session
         }
-        val live = read(pid) ?: throw IOException("PTY process disappeared during startup")
-        check(identity.sameProcess(live)) { "PTY identity changed before startup completed" }
+        val live = read(pid)
+        if (live != null) {
+            check(identity.sameProcess(live)) { "Vessel process identity changed before startup completed" }
+        }
+        // A short-lived command may exit after the native pre-exec handshake but
+        // before Kotlin observes /proc. The birth identity is still trustworthy:
+        // native code validated pid/ppid/pgrp/session before releasing exec.
         return identity
     }
 
@@ -67,7 +72,7 @@ internal object VesselTerminalProcessCloser {
             current.stat.processGroup != expected.pid ||
             current.session != expected.pid
         ) {
-            throw IOException("PTY leader identity changed; refusing to signal pid=" + expected.pid)
+            throw IOException("Vessel leader identity changed; refusing to signal pid=" + expected.pid)
         }
 
         try {
@@ -80,7 +85,7 @@ internal object VesselTerminalProcessCloser {
                 for (member in members) signalMember(member, OsConstants.SIGKILL)
                 if (members.isEmpty()) break
                 if (SystemClock.elapsedRealtime() >= deadline) {
-                    throw IOException("PTY session " + expected.session + " still has live child processes")
+                    throw IOException("Vessel session " + expected.session + " still has live child processes")
                 }
                 Thread.sleep(20)
             }
@@ -106,7 +111,7 @@ internal object VesselTerminalProcessCloser {
     fun requireSessionEmpty(sessionId: Int) {
         val active = sessionMembers(sessionId).firstOrNull { !it.exited }
         if (active != null) {
-            throw IOException("PTY session " + sessionId + " still owns pid=" + active.pid)
+            throw IOException("Vessel session " + sessionId + " still owns pid=" + active.pid)
         }
     }
 
@@ -146,7 +151,7 @@ internal object VesselTerminalProcessCloser {
 
     private fun signalLeader(expected: VesselProcessIdentity, signal: Int) {
         val current = read(expected.pid) ?: return
-        if (!expected.sameProcess(current)) throw IOException("PTY leader PID was reused; no signal sent")
+        if (!expected.sameProcess(current)) throw IOException("Vessel leader PID was reused; no signal sent")
         signalPid(expected.pid, signal)
     }
 

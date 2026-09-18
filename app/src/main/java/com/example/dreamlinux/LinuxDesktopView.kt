@@ -103,7 +103,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
         }
 
         override fun doFrame(frameTimeNanos: Long) {
-            if (pointerMode == PointerMode.TRACKPAD) {
+            if (pointerMode == PointerMode.TRACKPAD && VesselVirtioInput.usesGuestCursorOverlay()) {
                 val serial = VesselWaylandPresenter.cursorSerial()
                 if (serial != lastSerial) {
                     lastSerial = serial
@@ -119,7 +119,10 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            if (pointerMode != PointerMode.TRACKPAD || !VesselWaylandPresenter.cursorVisible()) return
+            if (pointerMode != PointerMode.TRACKPAD ||
+                !VesselVirtioInput.usesGuestCursorOverlay() ||
+                !VesselWaylandPresenter.cursorVisible()
+            ) return
             val b = bitmap ?: return
             val gw = VesselWaylandPresenter.guestWidth().coerceAtLeast(1)
             val gh = VesselWaylandPresenter.guestHeight().coerceAtLeast(1)
@@ -199,6 +202,22 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
         if (surfaceAttached) {
             surfaceAttached = false
             VesselWaylandPresenter.detach()
+        }
+    }
+
+    /**
+     * A proroot presenter may start after this Surface was already created.
+     * Re-attach without waiting for an Android lifecycle round-trip.
+     */
+    fun reattachPresenter() {
+        post {
+            val surface = surfaceView.holder.surface
+            if (surfaceAttached && surface.isValid) {
+                VesselWaylandPresenter.attach(surface)
+                if (surfaceView.width > 0 && surfaceView.height > 0) {
+                    VesselWaylandPresenter.surfaceChanged(surfaceView.width, surfaceView.height)
+                }
+            }
         }
     }
 

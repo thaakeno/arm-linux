@@ -17,3 +17,7 @@
 
 # Vessel PTY identity claim is also resolved by a fixed JNI symbol.
 -keep class com.example.dreamlinux.VesselPtyNative { *; }
+
+# Phase 4 proroot JNI bridges have fixed native symbol names.
+-keep class com.example.dreamlinux.VesselProrootDisplayBridge { *; }
+-keep class com.example.dreamlinux.VesselProrootProcessNative { *; }

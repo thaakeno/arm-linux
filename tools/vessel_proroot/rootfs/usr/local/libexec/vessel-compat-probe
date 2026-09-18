@@ -1,0 +1,96 @@
+#!/bin/bash
+set -euo pipefail
+
+fail() { echo "VESSEL_COMPAT_FAIL=$1" >&2; exit 1; }
+ok() { echo "VESSEL_COMPAT_OK=$1"; }
+
+[[ "$(id -u)" != 0 ]] || fail "desktop-running-as-root"
+[[ -d "${XDG_RUNTIME_DIR:-}" ]] || fail "xdg-runtime-dir"
+[[ "$(stat -c %a "$XDG_RUNTIME_DIR")" == 700 ]] || fail "xdg-runtime-mode"
+[[ -r /proc/stat ]] || fail "proc-stat"
+[[ -r /proc/self/exe ]] || fail "proc-self-exe"
+readlink /proc/self/exe >/dev/null || fail "proc-self-exe-readlink"
+[[ -d /dev/shm && -w /dev/shm ]] || fail "dev-shm"
+
+python3 - <<'PY' || exit 1
+import array, fcntl, mmap, os, socket, struct, subprocess, sys, tempfile
+
+def fail(name, exc=None):
+    print("VESSEL_COMPAT_FAIL=" + name + ((":" + str(exc)) if exc else ""), file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    fd=os.memfd_create("vessel-compat", os.MFD_CLOEXEC | getattr(os, "MFD_ALLOW_SEALING", 0))
+    os.write(fd, b"vessel")
+    if hasattr(fcntl, "F_ADD_SEALS") and hasattr(fcntl, "F_SEAL_GROW"):
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_GROW)
+    os.close(fd)
+except Exception as exc:
+    fail("memfd", exc)
+
+try:
+    with tempfile.TemporaryFile(dir="/dev/shm") as f:
+        f.truncate(4096)
+        with mmap.mmap(f.fileno(), 4096) as m:
+            m[:6]=b"vessel"
+except Exception as exc:
+    fail("shm-mmap", exc)
+
+try:
+    a,b=socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    r,w=os.pipe()
+    fds=array.array("i",[w])
+    a.sendmsg([b"x"],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,fds)])
+    _,anc,_,_=b.recvmsg(1,socket.CMSG_SPACE(fds.itemsize))
+    got=[]
+    for level,typ,data in anc:
+        if level==socket.SOL_SOCKET and typ==socket.SCM_RIGHTS:
+            got.extend(array.array("i",data[:len(data)-(len(data)%fds.itemsize)]))
+    if not got: fail("scm-rights")
+    for x in got: os.close(x)
+    os.close(r); os.close(w); a.close(); b.close()
+except Exception as exc:
+    fail("scm-rights", exc)
+
+try:
+    a,b=socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+    b.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+    a.send(b"x")
+    _,anc,_,_=b.recvmsg(1, socket.CMSG_SPACE(struct.calcsize("3i")))
+    creds=None
+    for level,typ,data in anc:
+        if level==socket.SOL_SOCKET and typ==socket.SCM_CREDENTIALS:
+            creds=struct.unpack("3i",data[:struct.calcsize("3i")])
+    if not creds or creds[1] != os.getuid(): fail("scm-credentials")
+    a.close(); b.close()
+except Exception as exc:
+    fail("scm-credentials", exc)
+
+try:
+    a,b=socket.socketpair()
+    peer=struct.unpack("3i",a.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
+    if peer[1] != os.getuid(): fail("so-peercred")
+    a.close(); b.close()
+except Exception as exc:
+    fail("so-peercred", exc)
+
+try:
+    subprocess.run(["/bin/true"], check=True)
+except Exception as exc:
+    fail("fork-exec", exc)
+
+print("VESSEL_COMPAT_OK=kernel-ipc")
+PY
+
+dbus-run-session -- sh -c 'test -n "$DBUS_SESSION_BUS_ADDRESS"' || fail "dbus-session"
+ok "dbus-session"
+
+if command -v unshare >/dev/null 2>&1 && unshare -Ur true >/dev/null 2>&1; then
+  echo "VESSEL_COMPAT_CAP=userns"
+else
+  echo "VESSEL_COMPAT_CAP=no-userns"
+fi
+
+command -v kwin_wayland >/dev/null 2>&1 || fail "kwin"
+command -v Xwayland >/dev/null 2>&1 || fail "xwayland"
+ok "desktop-runtime"

@@ -63,7 +63,7 @@ class VesselPtyTerminalSession private constructor(
                 val pid = terminal.pid
                 val birthStat = VesselPtyNative.takeIdentity(pid)
                     ?: throw IOException("PTY identity handshake was not available for pid=" + pid)
-                wrapper.identity = VesselTerminalProcessCloser.captureLeader(pid, birthStat)
+                wrapper.identity = VesselSessionProcessCloser.captureLeader(pid, birthStat)
                 wrapper.title = terminal.title.orEmpty()
                 return wrapper
             } catch (error: Throwable) {
@@ -71,10 +71,10 @@ class VesselPtyTerminalSession private constructor(
                 if (pid > 1) {
                     val birthStat = runCatching { VesselPtyNative.takeIdentity(pid) }.getOrNull()
                     val identity = birthStat?.let {
-                        runCatching { VesselTerminalProcessCloser.captureLeader(pid, it) }.getOrNull()
+                        runCatching { VesselSessionProcessCloser.captureLeader(pid, it) }.getOrNull()
                     }
                     if (identity != null) {
-                        runCatching { VesselTerminalProcessCloser.close(identity, 1500) }
+                        runCatching { VesselSessionProcessCloser.close(identity, 1500) }
                     } else {
                         runCatching { terminal.finishIfRunning() }
                     }
@@ -149,7 +149,7 @@ class VesselPtyTerminalSession private constructor(
     fun closeAndWait(timeoutMs: Long = 5000) {
         val captured = identity
         if (captured != null) {
-            VesselTerminalProcessCloser.close(captured, timeoutMs)
+            VesselSessionProcessCloser.close(captured, timeoutMs)
         } else {
             terminal?.finishIfRunning()
         }
@@ -159,12 +159,12 @@ class VesselPtyTerminalSession private constructor(
             Thread.sleep(20)
         }
         if (terminal?.isRunning == true) throw IOException("PTY launcher has not exited yet")
-        if (captured != null) VesselTerminalProcessCloser.requireSessionEmpty(captured.session)
+        if (captured != null) VesselSessionProcessCloser.requireSessionEmpty(captured.session)
     }
 
     internal fun verifyNoSessionMembers() {
         val captured = identity ?: return
-        VesselTerminalProcessCloser.requireSessionEmpty(captured.session)
+        VesselSessionProcessCloser.requireSessionEmpty(captured.session)
     }
 
     override fun onTextChanged(changedSession: TerminalSession?) = notifyOutput()

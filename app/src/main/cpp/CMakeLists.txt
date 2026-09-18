@@ -27,6 +27,8 @@ target_link_libraries(dev1_payload PRIVATE dl)
 add_library(vessel_wayland_presenter SHARED
     vessel_native_presenter.cpp
     vessel_surface_presenter.cpp
+    vessel_proroot_display_bridge.cpp
+    vessel_proroot_process.cpp
     vessel_virtio_input.cpp
 )
 target_compile_features(vessel_wayland_presenter PRIVATE cxx_std_17)

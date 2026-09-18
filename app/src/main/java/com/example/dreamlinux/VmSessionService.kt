@@ -161,6 +161,7 @@ class VmSessionService : Service() {
                 message = detail,
             )
         }
+        VesselVirtioInput.setRuntimeKind(runtime.kind)
         configureStableLandscape()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel("vessel-runtime", "Vessel Linux runtime", NotificationManager.IMPORTANCE_LOW),

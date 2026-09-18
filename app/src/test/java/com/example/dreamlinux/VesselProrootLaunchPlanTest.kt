@@ -7,7 +7,7 @@ import org.junit.Test
 
 class VesselProrootLaunchPlanTest {
     @Test
-    fun buildsUpstreamCompatibleArgvWithoutPerAppWrapper() {
+    fun buildsUpstreamCompatibleRootArgvWithoutPerAppWrapper() {
         val plan = VesselProrootContract.build(
             launcherPath = "/native/libproroot.so",
             runtimeLibraryDir = "/native",
@@ -28,6 +28,35 @@ class VesselProrootLaunchPlanTest {
         assertTrue(plan.argv.contains("/data/tmp:/tmp"))
         assertTrue(plan.argv.contains("/data/shm:/dev/shm"))
         assertEquals(listOf("/bin/bash", "-l"), plan.argv.takeLast(2))
+    }
+
+    @Test
+    fun normalDesktopIdentityDoesNotFakeRoot() {
+        val identity = VesselProrootIdentity(
+            fakeRoot = false,
+            user = "vessel",
+            logName = "vessel",
+            home = "/home/vessel",
+            workingDirectory = "/home/vessel",
+            runtimeDirectory = "/run/user/10234",
+        )
+        val plan = VesselProrootContract.build(
+            launcherPath = "/native/libproroot.so",
+            runtimeLibraryDir = "/native",
+            rootfsPath = "/data/rootfs",
+            prorootTmpPath = "/data/runtime/proroot-tmp",
+            hostWorkingDirectory = "/data",
+            guestWorkingDirectory = identity.workingDirectory,
+            identity = identity,
+            binds = emptyList(),
+            guestArgv = listOf("/usr/local/libexec/vessel-start-plasma"),
+        )
+
+        assertFalse(plan.argv.contains("-0"))
+        assertEquals("/home/vessel", plan.environment["HOME"])
+        assertEquals("vessel", plan.environment["USER"])
+        assertEquals("/run/user/10234", plan.environment["XDG_RUNTIME_DIR"])
+        assertTrue(plan.argv.containsAll(listOf("-w", "/home/vessel")))
     }
 
     @Test
@@ -56,7 +85,6 @@ class VesselProrootLaunchPlanTest {
         assertEquals("/tmp", env["TMPDIR"])
         assertEquals("/run/user/0", env["XDG_RUNTIME_DIR"])
     }
-
 
     @Test
     fun mergesSharedGpuEnvironmentWithoutTouchingRuntimeKeys() {

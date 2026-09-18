@@ -117,6 +117,7 @@ bool recv_all(int fd, void* data, size_t size) {
     return true;
 }
 
+// -1 = malformed fence message, -2 = valid "already complete" message.
 int recv_fence_fd(int socket_fd) {
     uint8_t tag = 0;
     iovec io{&tag, sizeof(tag)};
@@ -136,7 +137,7 @@ int recv_fence_fd(int socket_fd) {
             return fd;
         }
     }
-    return -1;
+    return -2;
 }
 
 class NativeSurfacePresenter {
@@ -450,6 +451,7 @@ private:
     }
 
     bool wait_producer_fence(int fence_fd) {
+        if (fence_fd == -2) return true;
         if (fence_fd < 0) return false;
         const EGLint attrs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fence_fd, EGL_NONE};
         EGLSyncKHR sync = create_sync_(display_, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
@@ -722,12 +724,12 @@ private:
             if (msg.slot >= FRAME_SLOTS) { dispose_job(job, false); return false; }
             if (AHardwareBuffer_recvHandleFromUnixSocket(fd, &job.incoming) != 0 || !job.incoming) { dispose_job(job, false); return false; }
             job.producer_fence_fd = recv_fence_fd(fd);
-            if (job.producer_fence_fd < 0) { dispose_job(job, false); return false; }
+            if (job.producer_fence_fd == -1) { dispose_job(job, false); return false; }
             return queue_job(std::move(job));
         }
         if (msg.type == MSG_FRAME) {
             job.producer_fence_fd = recv_fence_fd(fd);
-            if (job.producer_fence_fd < 0) { dispose_job(job, false); return false; }
+            if (job.producer_fence_fd == -1) { dispose_job(job, false); return false; }
             return queue_job(std::move(job));
         }
         if (msg.type == MSG_DISABLE) return queue_job(std::move(job));
