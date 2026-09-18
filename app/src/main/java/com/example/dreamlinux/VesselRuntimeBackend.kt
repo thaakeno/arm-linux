@@ -11,9 +11,10 @@ enum class VesselRuntimeKind {
 /**
  * Stable host-facing runtime seam.
  *
- * Phase 1 deliberately keeps the active implementation on UML. Future runtime
- * work plugs in below this interface instead of teaching the Android UI about
- * UML, proroot, PTYs, or individual Linux applications.
+ * Phase 6 production uses proroot while UML remains an explicit recovery
+ * backend. Shared Android UI/service code must not assume a guest kernel,
+ * VirtIO transport, ext4 block device, guest TCP agent, or any individual
+ * Linux application's launch quirks.
  */
 interface VesselRuntimeBackend {
     val kind: VesselRuntimeKind

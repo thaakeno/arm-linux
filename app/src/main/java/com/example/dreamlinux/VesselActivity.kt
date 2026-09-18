@@ -138,16 +138,32 @@ class VesselActivity : ComponentActivity() {
     }
 
     private fun preferHighRefresh() {
+        val attrs = window.attributes
+        if (VesselExperimentConfig.runtimeBackend(this) == VesselRuntimeFactory.ACTIVE_BACKEND_ID) {
+            // Production proroot uses Surface.setFrameRate/SurfaceControl hints.
+            // A fixed preferredDisplayModeId would pin the panel at 120 Hz and
+            // defeat Phase 5's idle 60 Hz battery policy.
+            if (attrs.preferredDisplayModeId != 0) {
+                attrs.preferredDisplayModeId = 0
+                window.attributes = attrs
+            }
+            return
+        }
+
+        // UML recovery still uses its legacy fixed-mode presentation path.
         val displayManager = getSystemService(android.hardware.display.DisplayManager::class.java)
         val display = displayManager?.getDisplay(android.view.Display.DEFAULT_DISPLAY) ?: return
         val current = display.mode
         val requested = VesselExperimentConfig.refreshHz(this).toFloat().coerceAtMost(120f)
         val best = display.supportedModes
-            .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight && it.refreshRate <= requested + 0.5f }
+            .filter {
+                it.physicalWidth == current.physicalWidth &&
+                    it.physicalHeight == current.physicalHeight &&
+                    it.refreshRate <= requested + 0.5f
+            }
             .maxByOrNull { it.refreshRate }
             ?: return
         if (best.modeId != current.modeId) {
-            val attrs = window.attributes
             attrs.preferredDisplayModeId = best.modeId
             window.attributes = attrs
         }
@@ -241,7 +257,7 @@ class VesselActivity : ComponentActivity() {
                 Spacer(Modifier.width(11.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Vessel", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("Rootless ARM64 Linux · VirtIO GPU · Native Surface · Adreno", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (state.runtimeBackend == VesselRuntimeFactory.ACTIVE_BACKEND_ID) "Rootless ARM64 Linux · Direct KGSL · Native Surface · Adreno" else "Recovery UML · VirtIO GPU · Native Surface · Adreno", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 val label = when {
                     state.stage == "stopping" -> "STOPPING"
@@ -615,6 +631,8 @@ class VesselActivity : ComponentActivity() {
         val diagnostics by VmSessionService.diagnostics.collectAsStateWithLifecycle()
         val updates by VesselUpdateManager.state.collectAsStateWithLifecycle()
         val updateScope = rememberCoroutineScope()
+        var expRuntime by remember { mutableStateOf(VesselExperimentConfig.runtimeBackend(this@VesselActivity)) }
+        val umlRecoveryAvailable = VesselRuntimeFactory.umlRecoveryAvailable(this@VesselActivity)
         var expVcpus by remember { mutableIntStateOf(VesselExperimentConfig.vcpus(this@VesselActivity)) }
         var expMemory by remember { mutableIntStateOf(VesselExperimentConfig.memoryMb(this@VesselActivity)) }
         var expRefresh by remember { mutableIntStateOf(VesselExperimentConfig.refreshHz(this@VesselActivity)) }
@@ -634,8 +652,8 @@ class VesselActivity : ComponentActivity() {
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Performance", fontWeight = FontWeight.SemiBold)
-                    Metric(Icons.Default.Memory, "Guest RAM", if (stats.guestRamTotalMb > 0) "${stats.guestRamUsedMb} / ${stats.guestRamTotalMb} MiB used" else "${state.guestMemoryMb} MiB allocated")
-                    Metric(Icons.Default.Bolt, "CPU", "${stats.vcpus} UML vCPU")
+                    Metric(Icons.Default.Memory, "Memory", if (stats.guestRamTotalMb > 0) "${stats.guestRamUsedMb} / ${stats.guestRamTotalMb} MiB used" else if (state.runtimeBackend == VesselRuntimeFactory.ACTIVE_BACKEND_ID) "Shared Android kernel memory" else "${state.guestMemoryMb} MiB allocated")
+                    Metric(Icons.Default.Bolt, "CPU", if (state.runtimeBackend == VesselRuntimeFactory.ACTIVE_BACKEND_ID) "${stats.vcpus} host CPU threads visible" else "${stats.vcpus} UML vCPU")
                     Metric(Icons.Default.DesktopWindows, "Display", "${state.guestDisplayWidth} × ${state.guestDisplayHeight} stable landscape · up to 120 Hz")
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                     OutlinedButton(
@@ -651,50 +669,81 @@ class VesselActivity : ComponentActivity() {
             }
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Experiment lab", fontWeight = FontWeight.SemiBold)
-                    Text("Stable default: 4 vCPU + 120 Hz request. Six CPUs stays available as an experiment, but it is no longer the restart default.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("UML vCPU", style = MaterialTheme.typography.labelMedium)
+                    Text("Runtime + performance", fontWeight = FontWeight.SemiBold)
+                    Text("Production default is proroot shared-kernel + direct KGSL. UML is kept only as an explicit recovery backend; Vessel never falls back to it after a runtime error.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Runtime backend", style = MaterialTheme.typography.labelMedium)
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        listOf(1, 2, 4, 6).forEach { value ->
-                            FilterChip(selected = expVcpus == value, onClick = { expVcpus = value; VesselExperimentConfig.setVcpus(this@VesselActivity, value) }, label = { Text("$value CPU") })
-                        }
+                        FilterChip(
+                            selected = expRuntime == VesselRuntimeFactory.ACTIVE_BACKEND_ID,
+                            enabled = !state.running && !state.busy,
+                            onClick = {
+                                if (VmSessionService.active?.switchRuntimeBackend(VesselRuntimeFactory.ACTIVE_BACKEND_ID) == true) {
+                                    expRuntime = VesselRuntimeFactory.ACTIVE_BACKEND_ID
+                                }
+                            },
+                            label = { Text("Proroot · production") },
+                        )
+                        FilterChip(
+                            selected = expRuntime == VesselRuntimeFactory.RECOVERY_BACKEND_ID,
+                            enabled = !state.running && !state.busy && umlRecoveryAvailable,
+                            onClick = {
+                                if (VmSessionService.active?.switchRuntimeBackend(VesselRuntimeFactory.RECOVERY_BACKEND_ID) == true) {
+                                    expRuntime = VesselRuntimeFactory.RECOVERY_BACKEND_ID
+                                }
+                            },
+                            label = { Text("UML · recovery") },
+                        )
                     }
-                    Text("Guest memory", style = MaterialTheme.typography.labelMedium)
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        listOf(0 to "Auto", 2048 to "2 GB", 3072 to "3 GB", 4096 to "4 GB").forEach { (value, label) ->
-                            FilterChip(selected = expMemory == value, onClick = { expMemory = value; VesselExperimentConfig.setMemoryMb(this@VesselActivity, value) }, label = { Text(label) })
-                        }
+                    Text("Stop Linux before changing runtime backend.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (!umlRecoveryAvailable) {
+                        Text("No retained UML disk is available on this install.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+
+                    if (expRuntime == VesselRuntimeFactory.RECOVERY_BACKEND_ID) {
+                        Text("UML vCPU", style = MaterialTheme.typography.labelMedium)
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            listOf(1, 2, 4, 6).forEach { value ->
+                                FilterChip(selected = expVcpus == value, onClick = { expVcpus = value; VesselExperimentConfig.setVcpus(this@VesselActivity, value) }, label = { Text("$value CPU") })
+                            }
+                        }
+                        Text("UML guest memory", style = MaterialTheme.typography.labelMedium)
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            listOf(0 to "Auto", 2048 to "2 GB", 3072 to "3 GB", 4096 to "4 GB").forEach { (value, label) ->
+                                FilterChip(selected = expMemory == value, onClick = { expMemory = value; VesselExperimentConfig.setMemoryMb(this@VesselActivity, value) }, label = { Text(label) })
+                            }
+                        }
+                        Text("UML desktop stack", style = MaterialTheme.typography.labelMedium)
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            FilterChip(selected = expDesktop == "wayland", onClick = { expDesktop = "wayland"; VesselExperimentConfig.setDesktopBackend(this@VesselActivity, "wayland") }, label = { Text("Wayland") })
+                            FilterChip(selected = expDesktop == "x11", onClick = { expDesktop = "x11"; VesselExperimentConfig.setDesktopBackend(this@VesselActivity, "x11") }, label = { Text("X11") })
+                        }
+                        Text("UML host GL", style = MaterialTheme.typography.labelMedium)
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            FilterChip(selected = expHostGl == "system", onClick = { expHostGl = "system"; VesselExperimentConfig.setHostGl(this@VesselActivity, "system") }, label = { Text("System EGL") })
+                            FilterChip(selected = expHostGl == "angle", onClick = { expHostGl = "angle"; VesselExperimentConfig.setHostGl(this@VesselActivity, "angle") }, label = { Text("Bundled ANGLE") })
+                            FilterChip(selected = expFirefoxDmabuf, onClick = { expFirefoxDmabuf = !expFirefoxDmabuf; VesselExperimentConfig.setFirefoxDmabuf(this@VesselActivity, expFirefoxDmabuf) }, label = { Text("Firefox DMA-BUF") })
+                        }
+                        FilterChip(selected = expFlipY, onClick = { expFlipY = !expFlipY; VesselExperimentConfig.setFlipDisplayY(this@VesselActivity, expFlipY) }, label = { Text("Fix UML display Y flip") })
+                    }
+
                     Text("Refresh cap", style = MaterialTheme.typography.labelMedium)
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                         listOf(60, 90, 120).forEach { value ->
                             FilterChip(selected = expRefresh == value, onClick = { expRefresh = value; VesselExperimentConfig.setRefreshHz(this@VesselActivity, value) }, label = { Text("$value Hz") })
                         }
                     }
-                    Text("Guest resolution", style = MaterialTheme.typography.labelMedium)
+                    Text("Desktop resolution", style = MaterialTheme.typography.labelMedium)
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                         listOf(67 to "~720p", 83 to "Balanced", 100 to "Native cap").forEach { (value, label) ->
                             FilterChip(selected = expResolution == value, onClick = { expResolution = value; VesselExperimentConfig.setResolutionPercent(this@VesselActivity, value) }, label = { Text(label) })
                         }
                     }
-                    Text("Desktop stack", style = MaterialTheme.typography.labelMedium)
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        FilterChip(selected = expDesktop == "wayland", onClick = { expDesktop = "wayland"; VesselExperimentConfig.setDesktopBackend(this@VesselActivity, "wayland") }, label = { Text("Wayland (default)") })
-                        FilterChip(selected = expDesktop == "x11", onClick = { expDesktop = "x11"; VesselExperimentConfig.setDesktopBackend(this@VesselActivity, "x11") }, label = { Text("X11 fallback") })
-                    }
-                    Text("Host GL", style = MaterialTheme.typography.labelMedium)
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        FilterChip(selected = expHostGl == "system", onClick = { expHostGl = "system"; VesselExperimentConfig.setHostGl(this@VesselActivity, "system") }, label = { Text("System EGL") })
-                        FilterChip(selected = expHostGl == "angle", onClick = { expHostGl = "angle"; VesselExperimentConfig.setHostGl(this@VesselActivity, "angle") }, label = { Text("Bundled ANGLE") })
-                        FilterChip(selected = expFirefoxDmabuf, onClick = { expFirefoxDmabuf = !expFirefoxDmabuf; VesselExperimentConfig.setFirefoxDmabuf(this@VesselActivity, expFirefoxDmabuf) }, label = { Text("Firefox DMA-BUF experimental") })
-                    }
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        FilterChip(selected = expFlipY, onClick = { expFlipY = !expFlipY; VesselExperimentConfig.setFlipDisplayY(this@VesselActivity, expFlipY) }, label = { Text("Fix display Y flip") })
-                        FilterChip(selected = expPointerY, onClick = { expPointerY = !expPointerY; VesselExperimentConfig.setInvertPointerY(this@VesselActivity, expPointerY) }, label = { Text("Invert pointer Y") })
-                    }
-                    Text("Wayland + System EGL are the new defaults. Restart Linux after changing architecture settings.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FilterChip(selected = expPointerY, onClick = { expPointerY = !expPointerY; VesselExperimentConfig.setInvertPointerY(this@VesselActivity, expPointerY) }, label = { Text("Invert pointer Y") })
+
                     OutlinedButton(onClick = {
                         VesselExperimentConfig.reset(this@VesselActivity)
+                        VmSessionService.active?.switchRuntimeBackend(VesselRuntimeFactory.ACTIVE_BACKEND_ID)
+                        expRuntime = VesselExperimentConfig.runtimeBackend(this@VesselActivity)
                         expVcpus = VesselExperimentConfig.vcpus(this@VesselActivity)
                         expMemory = VesselExperimentConfig.memoryMb(this@VesselActivity)
                         expRefresh = VesselExperimentConfig.refreshHz(this@VesselActivity)
@@ -704,27 +753,31 @@ class VesselActivity : ComponentActivity() {
                         expDesktop = VesselExperimentConfig.desktopBackend(this@VesselActivity)
                         expHostGl = VesselExperimentConfig.hostGl(this@VesselActivity)
                         expFirefoxDmabuf = VesselExperimentConfig.firefoxDmabuf(this@VesselActivity)
-                    }) { Text("Reset experiment defaults") }
+                    }) { Text("Reset production defaults") }
                 }
             }
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Storage", fontWeight = FontWeight.SemiBold)
                     Metric(Icons.Default.Storage, "Linux filesystem", if (stats.guestDiskFreeMb > 0) "${stats.guestDiskUsedMb} MiB used · ${stats.guestDiskFreeMb} MiB free" else "Start Linux for filesystem usage")
-                    Metric(Icons.Default.Storage, "Sparse disk", "${stats.diskVirtualMb} MiB virtual · ~${stats.diskPhysicalMb} MiB physically allocated")
+                    if (state.runtimeBackend == VesselRuntimeFactory.ACTIVE_BACKEND_ID) {
+                        Metric(Icons.Default.Storage, "Rootfs", "App-private directory rootfs · grows with available Android storage")
+                    } else {
+                        Metric(Icons.Default.Storage, "Recovery sparse disk", "${stats.diskVirtualMb} MiB virtual · ~${stats.diskPhysicalMb} MiB physically allocated")
+                        OutlinedButton(onClick = { VmSessionService.active?.expandDiskBy2GiB() }, enabled = !state.running && !state.busy) { Text("Expand recovery disk +2 GiB") }
+                    }
                     Metric(Icons.Default.Storage, "Android free", "${stats.hostFreeMb} MiB")
-                    OutlinedButton(onClick = { VmSessionService.active?.expandDiskBy2GiB() }, enabled = !state.running && !state.busy) { Text("Expand disk +2 GiB") }
-                    Text("Expansion is safe and sparse. ext4 grows automatically on the next boot; Vessel does not offer unsafe online shrinking.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Runtime", fontWeight = FontWeight.SemiBold)
                     Metric(Icons.Default.Bolt, "Vessel", "${BuildConfig.VERSION_NAME} · ${state.runtimeRevision}")
+                    Metric(Icons.Default.Bolt, "Backend", if (state.runtimeBackend == VesselRuntimeFactory.ACTIVE_BACKEND_ID) "Proroot · production" else "UML · recovery")
                     Metric(Icons.Default.DesktopWindows, "Transport", state.displayTransport)
                     Metric(Icons.Default.DesktopWindows, "Presenter", state.presenterStatus)
                     Metric(Icons.Default.Bolt, "Audio", VesselAudioBridge.status())
-                    Metric(Icons.Default.Terminal, "Control RPC", VesselGuestAgent.status())
+                    Metric(Icons.Default.Terminal, "Control", if (state.runtimeBackend == VesselRuntimeFactory.ACTIVE_BACKEND_ID) "Direct shared-kernel process control" else VesselGuestAgent.status())
                     Metric(Icons.Default.Storage, "Machine", state.machinePath)
                     if (stats.packageCount > 0) Metric(Icons.Default.Laptop, "Debian packages", "${stats.packageCount} installed")
                 }
@@ -737,20 +790,32 @@ class VesselActivity : ComponentActivity() {
                     if (updates.busy) LinearProgressIndicator(progress = { updates.progressPercent.coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
                     Text(updates.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = { updateScope.launch { runCatching { VesselUpdateManager.checkRuntimeUpdate(this@VesselActivity) } } },
-                            enabled = !updates.busy,
-                        ) { Text("Update runtime") }
+                        if (state.runtimeBackend == VesselRuntimeFactory.RECOVERY_BACKEND_ID) {
+                            Button(
+                                onClick = { updateScope.launch { runCatching { VesselUpdateManager.checkRuntimeUpdate(this@VesselActivity) } } },
+                                enabled = !updates.busy,
+                            ) { Text("Update UML runtime") }
+                        }
                         OutlinedButton(
                             onClick = { updateScope.launch { runCatching { VesselUpdateManager.checkAndInstallAppUpdate(this@VesselActivity) } } },
                             enabled = !updates.busy,
                         ) { Text("Update app") }
-                        OutlinedButton(
-                            onClick = { updateScope.launch { runCatching { VesselUpdateManager.rollbackRuntime(this@VesselActivity) } } },
-                            enabled = !updates.busy && updates.canRollback,
-                        ) { Text("Rollback runtime") }
+                        if (state.runtimeBackend == VesselRuntimeFactory.RECOVERY_BACKEND_ID) {
+                            OutlinedButton(
+                                onClick = { updateScope.launch { runCatching { VesselUpdateManager.rollbackRuntime(this@VesselActivity) } } },
+                                enabled = !updates.busy && updates.canRollback,
+                            ) { Text("Rollback UML runtime") }
+                        }
                     }
-                    Text("Runtime updates replace only allow-listed Wayland bootstrap scripts and apply on the next Linux start. Kotlin/native changes use the Android APK updater.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        if (state.runtimeBackend == VesselRuntimeFactory.ACTIVE_BACKEND_ID) {
+                            "Production proroot uses the verified Debian rootfs channel. Kotlin/native runtime changes ship with the Android APK."
+                        } else {
+                            "UML recovery keeps its allow-listed hot-script channel. Kotlin/native changes use the Android APK updater."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
@@ -758,7 +823,7 @@ class VesselActivity : ComponentActivity() {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("Crash diagnostics", fontWeight = FontWeight.SemiBold)
-                            Text("Host memory, UML exit state, Wayland/GPU, PulseAudio and Firefox crash artifacts", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(if (state.runtimeBackend == VesselRuntimeFactory.ACTIVE_BACKEND_ID) "Host memory, proroot process state, Wayland/KGSL, audio and app crash artifacts" else "Host memory, UML exit state, Wayland/GPU, PulseAudio and app crash artifacts", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         OutlinedButton(onClick = { copyText("Vessel diagnostics", diagnostics) }, enabled = diagnostics.isNotBlank()) { Text("Copy") }
                     }

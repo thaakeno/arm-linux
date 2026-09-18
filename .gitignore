@@ -17,3 +17,11 @@ local.properties
 **/build/
 *.keystore
 *.jks
+
+# Official proroot release binaries are fetched + SHA-verified at build time.
+# Do not commit proprietary upstream binary payloads into the source repository.
+app/src/main/jniLibs/arm64-v8a/libproroot.so
+app/src/main/jniLibs/arm64-v8a/libproroot-runtime.so
+app/src/main/jniLibs/arm64-v8a/libproroot-bridge.so
+app/src/main/jniLibs/arm64-v8a/libproroot-linker.so
+app/src/main/jniLibs/arm64-v8a/libproroot-stub-loader.so

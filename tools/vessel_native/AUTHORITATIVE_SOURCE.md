@@ -16,9 +16,11 @@ Current latency/correctness invariants:
 
 Runtime-backend invariant:
 
-- Android runtime/session code depends on `VesselRuntimeBackend`; the current active factory remains UML until the proroot acceptance phases are complete.
-- `VesselRuntimeController` remains the authoritative UML implementation and is not rewritten by the proroot foundation.
-- The proroot scaffold keeps mutable rootfs/runtime state under app-private storage but requires executable runtime DSOs to come from Android `nativeLibraryDir`.
+- Phase 6 production default is `proroot`. UML is retained only as an explicit user-selected recovery backend.
+- A proroot failure must never silently select UML. Runtime regressions must stay visible and diagnosable.
+- Android runtime/session code depends on `VesselRuntimeBackend`; shared code must not assume VirtIO, a guest kernel, ext4 block storage, or the UML guest TCP agent.
+- `VesselRuntimeController` remains the authoritative UML recovery implementation and is not rewritten by the production cutover.
+- Proroot mutable rootfs/runtime state stays under app-private storage and executable proroot DSOs come only from Android `nativeLibraryDir`.
 - Linux application compatibility belongs in the shared runtime/session layer. Do not add per-application launch patches as the primary compatibility strategy.
 
 Terminal invariants:
@@ -65,3 +67,16 @@ Phase-5 performance/battery invariants:
 - The Android Choreographer cursor loop is UML-only. Proroot must not run an extra Android cursor animation loop.
 - Procfs compatibility must shadow only files the Android app UID cannot read. Do not mirror readable host proc files on a periodic Java thread.
 - Phase 5 does not change the active default backend; the proroot default switch belongs to Phase 6.
+
+Phase-6 production-cutover invariants:
+
+- `VesselRuntimeFactory.ACTIVE_BACKEND_ID` is `proroot`; `uml` is recovery-only and may be selected only by explicit user preference.
+- First-run production bootstrap installs a Debian 13/Trixie directory rootfs, not an ext4 VM image. Existing UML disks are preserved for recovery and are never migrated destructively.
+- The rootfs release manifest is an atomic pointer published only after every chunk is uploaded and publicly readable. Android verifies every chunk and the complete compressed archive before extraction.
+- Rootfs extraction occurs in a sibling staging directory. Paths reject NUL, absolute paths and `..`; symlink/hardlink creation is deferred until regular-file extraction completes; live rootfs replacement is one same-filesystem rename with rollback.
+- A rootfs is production-ready only when `/var/cache/vessel/proroot-production-v1`, the pinned Mesa marker and the pinned desktop marker are present.
+- Android DNS is refreshed from the active network's `LinkProperties` into the bound `/run/resolv.conf` before launches. This must remain compatible with Wi-Fi/VPN/private-DNS network changes.
+- The five proroot v1.2.8 DSOs are official unmodified upstream release assets. Build tooling verifies exact SHA-256 digests and APK packaging must not strip or rewrite them.
+- Production app/process control calls `VesselRuntimeBackend.guest()` directly for proroot. The UML guest TCP control agent is recovery-only and must never gate proroot app discovery, stats or diagnostics.
+- Proroot directory storage grows with Android free space. Sparse-ext4 resize controls and UML vCPU/memory/host-GL experiments are recovery-only UI.
+- Phase 6 changes the active default but does not delete UML source, its native artifacts, or existing recovery disks.

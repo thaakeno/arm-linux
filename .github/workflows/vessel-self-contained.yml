@@ -8,6 +8,7 @@ on:
       - 'tools/vessel_native/**'
       - 'tools/vessel_proroot/**'
       - '.github/workflows/vessel-self-contained.yml'
+      - '.github/workflows/vessel-proroot-rootfs.yml'
       - 'gradle/**'
       - 'gradlew'
       - 'build.gradle.kts'
@@ -45,6 +46,16 @@ jobs:
         run: |
           set -euxo pipefail
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
+      - name: Stage official proroot runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x tools/vessel_proroot/fetch_official_proroot.sh
+          tools/vessel_proroot/fetch_official_proroot.sh app/src/main/jniLibs/arm64-v8a
+          cd app/src/main/jniLibs/arm64-v8a
+          printf '%s  %s\n'             a4e74d75b66cdc02b080adfe863dbf9951c3b30610d77beddc95488d5fe5de01 libproroot.so             8c47a0a7db32d84c179ebb5bf3640f655a3181860ece5886ae44d92858730c34 libproroot-runtime.so             1c5bc9537a270e8bf8b1c70222813f57b60b828bfb5503ddf8fe37685092de2f libproroot-bridge.so             51a0ec5bfed00e572a0de09e22d9057e2befc386b78e426613d3e0ab03f4ecee libproroot-linker.so             06c6624db3bdc45b9ced151cd781df439a37b47731d244b93e9d6a58cd48cde0 libproroot-stub-loader.so             | sha256sum -c -
+          cd "$GITHUB_WORKSPACE"
+
       - name: Compile Kotlin and run host unit tests
         shell: bash
         run: |
@@ -126,6 +137,50 @@ jobs:
           SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           "$CXX" --sysroot="$SYSROOT" -std=c++17 -Wall -Wextra -Werror             -fPIC -c app/src/main/cpp/vessel_proroot_surfacecontrol.cpp             -o /tmp/vessel-proroot-surfacecontrol.o
           ! "$NM" -u /tmp/vessel-proroot-surfacecontrol.o | grep -F 'ASurfaceTransaction_setBufferWithRelease'
+ 
+      - name: Validate Phase 6 production cutover
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          grep -F 'const val ACTIVE_BACKEND_ID = "proroot"' app/src/main/java/com/example/dreamlinux/VesselRuntimeFactory.kt
+          grep -F 'const val RECOVERY_BACKEND_ID = "uml"' app/src/main/java/com/example/dreamlinux/VesselRuntimeFactory.kt
+          grep -F 'VesselProrootRuntimeBackend(context, progress)' app/src/main/java/com/example/dreamlinux/VesselRuntimeFactory.kt
+          ! grep -Fq 'createProrootScaffold' app/src/main/java/com/example/dreamlinux/VesselTerminalManager.kt
+
+          grep -F 'android:name=".VesselProrootBootstrapActivity"' app/src/main/AndroidManifest.xml
+          grep -A5 -F 'android:name=".VesselProrootBootstrapActivity"' app/src/main/AndroidManifest.xml | grep -F 'android:exported="true"'
+          grep -F 'android.permission.ACCESS_NETWORK_STATE' app/src/main/AndroidManifest.xml
+          grep -F 'vessel-proroot-rootfs-v1-edge' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
+          grep -F 'debian-arm64.staging' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
+          grep -F 'stagingRootfs.renameTo(live)' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
+          grep -F 'Rootfs traversal rejected' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
+          grep -F 'Recovery is explicit' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
+
+          grep -F 'const val REVISION = "proroot-production-v6"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'direct-proroot' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'runtime.kind == VesselRuntimeKind.PROROOT || VesselGuestAgent.isConnected()' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+
+          bash -n tools/vessel_proroot/fetch_official_proroot.sh
+          bash -n tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'debootstrap' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'proroot-production-v1' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'install_direct_gpu_mesa.sh "$ROOTFS"' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'install_desktop_runtime.sh "$ROOTFS"' tools/vessel_proroot/build_prebuilt_rootfs.sh
+
+          for f in             libproroot.so             libproroot-runtime.so             libproroot-bridge.so             libproroot-linker.so             libproroot-stub-loader.so
+          do
+            test -s "app/src/main/jniLibs/arm64-v8a/$f"
+            grep -F ""**/$f"" app/build.gradle.kts
+          done
+
+          # No automatic recovery selection and no app-specific sandbox escape hatch.
+          ! grep -R -E 'catch.*Uml|fallback.*UML|fallback.*uml'             app/src/main/java/com/example/dreamlinux/VesselRuntimeFactory.kt             app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          ! grep -R -E -- '--no-sandbox|MOZ_DISABLE_CONTENT_SANDBOX|security\.sandbox\.content\.level'             app/src/main/java/com/example/dreamlinux/VesselProroot*.kt             tools/vessel_proroot
+
 
   # Source-only phase commits intentionally do not assemble APKs. A real APK
   # build is explicit via workflow_dispatch once the implementation phases are
@@ -265,7 +320,26 @@ jobs:
           test -s "$DEBUG_APK"; test -s "$RELEASE_APK"
           unzip -l "$DEBUG_APK" > /tmp/apk-files.txt
           unzip -l "$RELEASE_APK" > /tmp/release-apk-files.txt
-          for f in libtermux.so libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so libvessel_vhost_gpu.so libvessel_vhost_input.so libvessel_virglrenderer.so libvessel_epoxy.so libEGL_angle.so libGLESv2_angle.so libvessel_wayland_presenter.so; do grep -Fq "lib/arm64-v8a/$f" /tmp/apk-files.txt; grep -Fq "lib/arm64-v8a/$f" /tmp/release-apk-files.txt; done
+          for f in libtermux.so libproroot.so libproroot-runtime.so libproroot-bridge.so libproroot-linker.so libproroot-stub-loader.so libvessel_uml.so libvessel_stub.so libvessel_umnet.so libvessel_passt.so libvessel_vhost_gpu.so libvessel_vhost_input.so libvessel_virglrenderer.so libvessel_epoxy.so libEGL_angle.so libGLESv2_angle.so libvessel_wayland_presenter.so; do grep -Fq "lib/arm64-v8a/$f" /tmp/apk-files.txt; grep -Fq "lib/arm64-v8a/$f" /tmp/release-apk-files.txt; done
+
+          verify_proroot_apk() {
+            local apk="$1" suffix="$2"
+            declare -A expected=(
+              [libproroot.so]=a4e74d75b66cdc02b080adfe863dbf9951c3b30610d77beddc95488d5fe5de01
+              [libproroot-runtime.so]=8c47a0a7db32d84c179ebb5bf3640f655a3181860ece5886ae44d92858730c34
+              [libproroot-bridge.so]=1c5bc9537a270e8bf8b1c70222813f57b60b828bfb5503ddf8fe37685092de2f
+              [libproroot-linker.so]=51a0ec5bfed00e572a0de09e22d9057e2befc386b78e426613d3e0ab03f4ecee
+              [libproroot-stub-loader.so]=06c6624db3bdc45b9ced151cd781df439a37b47731d244b93e9d6a58cd48cde0
+            )
+            for f in "${!expected[@]}"; do
+              out="/tmp/${f}.${suffix}"
+              unzip -p "$apk" "lib/arm64-v8a/$f" > "$out"
+              actual="$(sha256sum "$out" | awk '{print $1}')"
+              [ "$actual" = "${expected[$f]}" ]
+            done
+          }
+          verify_proroot_apk "$DEBUG_APK" debug
+          verify_proroot_apk "$RELEASE_APK" release
           unzip -p "$DEBUG_APK" lib/arm64-v8a/libtermux.so > /tmp/libtermux-debug.so
           unzip -p "$RELEASE_APK" lib/arm64-v8a/libtermux.so > /tmp/libtermux-release.so
           strings /tmp/libtermux-debug.so | grep -Fq 'VESSEL_TERMUX_PTY_NDK29_DIRECT_SOURCE_V1'
@@ -278,36 +352,36 @@ jobs:
           cp "$DEBUG_APK" build/deliverables/Vessel-arm64-debug.apk
           cp "$RELEASE_APK" build/deliverables/Vessel-arm64-release-unsigned.apk
           sha256sum build/deliverables/*.apk > build/deliverables/SHA256SUMS.txt
-      - name: Verify public chunked workstation bootstrap target
+      - name: Verify public production proroot rootfs target
         shell: bash
         run: |
           set -euo pipefail
-          MANIFEST_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/vessel-workstation-v2-edge/Vessel-Workstation-bookworm-arm64.json"
+          MANIFEST_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/vessel-proroot-rootfs-v1-edge/Vessel-Proroot-trixie-arm64.json"
           READY=0
-          # This is only a migration gate. Once schema 2 exists, normal APK-only
-          # changes pass immediately and do not rebuild the workstation image.
           for i in $(seq 1 200); do
             JSON="$(curl -fsSL --connect-timeout 10 --max-time 30 "${MANIFEST_URL}?apk=${GITHUB_SHA}" 2>/dev/null || true)"
             SCHEMA="$(jq -r '.schema // 0' <<<"$JSON" 2>/dev/null || true)"
+            RUNTIME="$(jq -r '.runtime // empty' <<<"$JSON" 2>/dev/null || true)"
+            DEBIAN="$(jq -r '.debian // empty' <<<"$JSON" 2>/dev/null || true)"
             TRANSPORT="$(jq -r '.transport // empty' <<<"$JSON" 2>/dev/null || true)"
-            SHA="$(jq -r '.compressedSha256 // empty' <<<"$JSON" 2>/dev/null || true)"
-            TOTAL="$(jq -r '.compressedBytes // 0' <<<"$JSON" 2>/dev/null || echo 0)"
+            SHA="$(jq -r '.archiveSha256 // empty' <<<"$JSON" 2>/dev/null || true)"
+            TOTAL="$(jq -r '.archiveBytes // 0' <<<"$JSON" 2>/dev/null || echo 0)"
             COUNT="$(jq -r '.chunks | length' <<<"$JSON" 2>/dev/null || echo 0)"
             SUM="$(jq -r '[.chunks[]?.bytes] | add // 0' <<<"$JSON" 2>/dev/null || echo 0)"
             FIRST="$(jq -r '.chunks[0].url // empty' <<<"$JSON" 2>/dev/null || true)"
             LAST="$(jq -r '.chunks[-1].url // empty' <<<"$JSON" 2>/dev/null || true)"
-            if [ "$SCHEMA" = 2 ] && [ "$TRANSPORT" = github-release-chunks-v1 ] && [ ${#SHA} -eq 64 ] && [ "$COUNT" -gt 0 ] && [ "$TOTAL" = "$SUM" ]; then
-              if curl -fsSIL --connect-timeout 10 --max-time 30 "$FIRST" >/dev/null 2>&1 && \
-                 curl -fsSIL --connect-timeout 10 --max-time 30 "$LAST" >/dev/null 2>&1; then
+            if [ "$SCHEMA" = 2 ] && [ "$RUNTIME" = proroot ] && [ "$DEBIAN" = trixie ] &&                [ "$TRANSPORT" = github-release-chunks-v1 ] && [ ${#SHA} -eq 64 ] &&                [ "$COUNT" -gt 0 ] && [ "$TOTAL" = "$SUM" ]; then
+              if curl -fsSIL --connect-timeout 10 --max-time 30 "$FIRST" >/dev/null 2>&1 &&                  curl -fsSIL --connect-timeout 10 --max-time 30 "$LAST" >/dev/null 2>&1; then
                 READY=1
-                echo "chunked workstation bootstrap is publicly readable: $COUNT parts, $TOTAL bytes"
+                echo "production proroot rootfs is publicly readable: $COUNT parts, $TOTAL bytes"
                 break
               fi
             fi
-            echo "waiting for schema-2 workstation publication ($i/200)"
+            echo "waiting for production proroot rootfs publication ($i/200)"
             sleep 3
           done
           [ "$READY" = 1 ]
+
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:

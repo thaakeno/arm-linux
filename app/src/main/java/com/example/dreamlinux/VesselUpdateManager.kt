@@ -76,22 +76,40 @@ object VesselUpdateManager {
 
     fun initialize(context: Context) {
         refreshLocalState(context)
-        scope.launch {
-            runCatching { checkRuntimeUpdate(context, automatic = true) }
+        if (VesselExperimentConfig.runtimeBackend(context) == VesselRuntimeFactory.RECOVERY_BACKEND_ID) {
+            scope.launch {
+                runCatching { checkRuntimeUpdate(context, automatic = true) }
+            }
         }
     }
 
     fun refreshLocalState(context: Context) {
+        val production =
+            VesselExperimentConfig.runtimeBackend(context) == VesselRuntimeFactory.ACTIVE_BACKEND_ID
         val revision = currentRuntimeRevision(context)
         mutableState.value = mutableState.value.copy(
             runtimeRevision = revision,
-            canRollback = previousDir(context).isDirectory,
+            canRollback = !production && previousDir(context).isDirectory,
+            message = if (production) {
+                "Verified production rootfs · " + revision
+            } else {
+                mutableState.value.message
+            },
         )
     }
 
     fun currentRuntimeRevision(context: Context): String {
+        if (VesselExperimentConfig.runtimeBackend(context) == VesselRuntimeFactory.ACTIVE_BACKEND_ID) {
+            val metadata = File(context.filesDir, "vessel-proroot/rootfs-install.json")
+            return runCatching {
+                val revision = JSONObject(metadata.readText()).optString("revision")
+                if (revision.isBlank()) "proroot-production" else revision.take(16)
+            }.getOrDefault("proroot-production")
+        }
         val metadata = File(currentDir(context), "metadata.json")
-        return runCatching { JSONObject(metadata.readText()).optString("revision", "built-in") }.getOrDefault("built-in")
+        return runCatching {
+            JSONObject(metadata.readText()).optString("revision", "built-in")
+        }.getOrDefault("built-in")
     }
 
     fun runtimeScript(context: Context, name: String, fallback: String): String =
@@ -105,6 +123,16 @@ object VesselUpdateManager {
     }
 
     suspend fun checkRuntimeUpdate(context: Context, automatic: Boolean = false) = withContext(Dispatchers.IO) {
+        if (VesselExperimentConfig.runtimeBackend(context) == VesselRuntimeFactory.ACTIVE_BACKEND_ID) {
+            refreshLocalState(context)
+            mutableState.value = mutableState.value.copy(
+                busy = false,
+                progressPercent = 100,
+                message = "Production rootfs is verified; UML hot-script updates are disabled",
+                canRollback = false,
+            )
+            return@withContext
+        }
         val old = mutableState.value
         mutableState.value = old.copy(
             busy = !automatic,
@@ -185,6 +213,9 @@ object VesselUpdateManager {
     }
 
     suspend fun rollbackRuntime(context: Context) = withContext(Dispatchers.IO) {
+        require(VesselExperimentConfig.runtimeBackend(context) == VesselRuntimeFactory.RECOVERY_BACKEND_ID) {
+            "Hot runtime rollback is UML-recovery only"
+        }
         mutableState.value = mutableState.value.copy(busy = true, message = "Rolling runtime back…")
         val current = currentDir(context)
         val previous = previousDir(context)
