@@ -347,6 +347,13 @@ class VesselActivity : ComponentActivity() {
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    Text(
+                        "Vessel ${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_COMMIT} · ${state.runtimeRevision}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
                 if (state.displayReady) StatusPill("VISIBLE", true)
             }
@@ -868,6 +875,11 @@ class VesselActivity : ComponentActivity() {
             Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Runtime issue", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
                 Text(clean, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                Text(
+                    "build ${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_COMMIT}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
                 if (clean.length > 260) Text("Full details are kept in Runtime log.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onErrorContainer)
             }
         }
