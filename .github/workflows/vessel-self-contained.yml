@@ -34,7 +34,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:
@@ -177,7 +177,7 @@ jobs:
           grep -F 'fun rootfsReadiness(rootfs: File)' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
           grep -F 'fun baseReadiness(rootfs: File)' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibility.kt
 
-          grep -F 'const val REVISION = "proroot-production-v14"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'const val REVISION = "proroot-production-v15"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
@@ -194,6 +194,25 @@ jobs:
           grep -F 'proroot.smoke.begin' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'display.bridge.begin' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'startup-journal.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+
+          # Proroot desktop readiness belongs to the exact Plasma D-Bus session.
+          # Never spawn a second pgrep/procfs helper that can falsely kill a live
+          # compositor after a valid SurfaceControl frame has already arrived.
+          grep -F 'org.freedesktop.DBus.NameHasOwner' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
+          grep -F 'org.kde.plasmashell' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
+          grep -F 'plasmaDbusReady' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          ! grep -Fq 'pgrep -x kwin_wayland' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          ! grep -Fq 'pgrep -x kwin_wayland' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          bash -n app/src/main/assets/vessel/vessel-start-plasma
+          cmp tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma app/src/main/assets/vessel/vessel-start-plasma
+
+          # Diagnostics must expose complete named logs instead of only a
+          # 6 KiB/18-line tail, and missing UML is an explicit install choice.
+          grep -F 'PROROOT_DIAGNOSTIC_LOGS' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'Full runtime logs' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          grep -F 'selectedDiagnosticText' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          grep -F 'Install UML recovery' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          grep -F 'VesselBootstrapActivityV2::class.java' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
 
           # Rootless system D-Bus must never use Debian's stock <user>messagebus
           # privilege drop. The runtime actively proves RequestName before Plasma.
@@ -429,7 +448,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.2.8"' app/build.gradle.kts
+          grep -F 'versionName = "2.2.9"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
           grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
@@ -558,3 +577,29 @@ jobs:
             app/src/main/assets/vessel/runtime-build.txt
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish rolling Vessel app update
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/arch/vessel-self-contained' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APK=build/deliverables/Vessel-arm64-debug.apk
+          EDGE_APK=build/deliverables/Vessel-edge-arm64.apk
+          META=build/deliverables/vessel-edge.json
+          cp "$APK" "$EDGE_APK"
+          SHA="$(sha256sum "$EDGE_APK" | awk '{print $1}')"
+          VERSION_NAME="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)"
+          REVISION_COUNT="$(git rev-list --count HEAD)"
+          VERSION_CODE="$((4000 + REVISION_COUNT))"
+          test -n "$VERSION_NAME"
+          test "${#SHA}" -eq 64
+          jq -n             --arg versionName "$VERSION_NAME"             --arg sha256 "$SHA"             --arg commit "$GITHUB_SHA"             --argjson versionCode "$VERSION_CODE"             '{versionCode:$versionCode,versionName:$versionName,sha256:$sha256,commit:$commit}'             > "$META"
+
+          if gh release view vessel-edge >/dev/null 2>&1; then
+            gh release upload vessel-edge "$EDGE_APK" "$META" --clobber
+          else
+            gh release create vessel-edge               --target "$GITHUB_SHA"               --title "Vessel Edge"               --notes "Rolling verified Vessel Android build."               --prerelease               "$EDGE_APK" "$META"
+          fi
+
