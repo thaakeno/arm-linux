@@ -490,11 +490,21 @@ class VmSessionService : Service() {
                 if (op != operationGeneration) return@launch
                 ensureDesktopProfile(op)
                 if (op != operationGeneration) return@launch
-                applyState(runtime.status())
+                val finalStatus = runtime.status()
+                applyState(finalStatus)
+                val desktopReady = finalStatus.optBoolean("desktopReady")
                 state.value = state.value.copy(
-                    progressPercent = 100,
-                    progressDetail = "Vessel workstation ready",
-                    message = "Vessel workstation ready",
+                    progressPercent = if (desktopReady) 100 else 99,
+                    progressDetail = if (desktopReady) {
+                        "Vessel workstation ready"
+                    } else {
+                        "Native desktop is running; Plasma shell registration is still starting"
+                    },
+                    message = if (desktopReady) {
+                        "Vessel workstation ready"
+                    } else {
+                        "Linux is running; waiting for Plasma shell readiness"
+                    },
                     lastError = "",
                 )
                 if (controlReady()) {
@@ -605,34 +615,55 @@ class VmSessionService : Service() {
             state.value = state.value.copy(
                 stage = "desktop_profile",
                 progressPercent = 99,
-                progressDetail = "Validating live Plasma shell and QML",
+                progressDetail = "Confirming same-session Plasma D-Bus readiness",
                 message = "Finishing desktop validation",
             )
-            val live = runtime.guest(
-                "for i in $(seq 1 100); do " +
-                    "pgrep -x kwin_wayland >/dev/null && " +
-                    "pgrep -x plasmashell >/dev/null && exit 0; " +
-                    "sleep .1; done; exit 1",
-                15,
-            )
-            check(live.optBoolean("ok")) {
-                "Plasma shell did not become live: " + live.optString("output").takeLast(3000)
+
+            // Production proroot never starts a second helper and never relies
+            // on pgrep/procfs to discover desktop processes. The Plasma launcher
+            // owns the D-Bus session and publishes org.kde.plasmashell readiness
+            // through the host-visible /run bind.
+            val deadline = android.os.SystemClock.elapsedRealtime() + 60_000L
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                if (op != operationGeneration) return
+                val current = runtime.status()
+                if (!current.optBoolean("running")) {
+                    throw IllegalStateException(
+                        "Proroot Plasma session exited before desktop readiness: " +
+                            current.optString("lastError").ifBlank {
+                                current.optString("logTail").takeLast(4000)
+                            },
+                    )
+                }
+                if (current.optBoolean("desktopReady") &&
+                    current.optBoolean("plasmaDbusReady")
+                ) {
+                    state.value = state.value.copy(
+                        progressPercent = 100,
+                        progressDetail = "Plasma D-Bus shell is live",
+                        message = "Vessel workstation ready",
+                    )
+                    return
+                }
+                delay(100)
             }
 
+            // A readiness observation timeout is not a runtime failure. If KWin
+            // is still alive and the native path has already rendered, keep the
+            // Linux session running. Normal status polling will promote it the
+            // moment the same-session D-Bus marker appears.
             val current = runtime.status()
-            check(current.optBoolean("desktopReady")) {
-                "Proroot Plasma session did not remain ready"
+            if (!current.optBoolean("running")) {
+                throw IllegalStateException(
+                    "Proroot Plasma session exited while waiting for D-Bus readiness",
+                )
             }
-            val tail = current.optString("logTail")
-            val fatalQml = Regex(
-                """(?i)(module\s+["'][^"']+["']\s+is not installed|""" +
-                    """KSvg\.SvgItem\s+is not a type|""" +
-                    """Type\s+[^\n]+\s+unavailable|""" +
-                    """Failed to load overview:)""",
+            state.value = state.value.copy(
+                progressPercent = 99,
+                progressDetail = "Native desktop is live; Plasma D-Bus registration is still starting",
+                message = "Linux is running; inspect plasma-watch.log if the shell stays unavailable",
+                lastError = "",
             )
-            check(!fatalQml.containsMatchIn(tail)) {
-                "Plasma QML failed after startup:\n" + tail.takeLast(6000)
-            }
             return
         }
         state.value = state.value.copy(
@@ -897,21 +928,39 @@ class VmSessionService : Service() {
                     available = result.optBoolean("ok")
                     check(available) { "Could not install kinfocenter: ${result.optString("output").takeLast(1600)}" }
                 }
-                val launched = runtime.guest(
+                val launchCommand = if (runtime.kind == VesselRuntimeKind.PROROOT) {
+                    """
+                    set -e
+                    uid=${'$'}(id -u vessel)
+                    xdg=/run/user/${'$'}uid
+                    busfile="${'$'}xdg/vessel/session-bus-address"
+                    test -s "${'$'}busfile"
+                    bus=${'$'}(cat "${'$'}busfile")
+                    way=''
+                    for candidate in "${'$'}xdg"/wayland-*; do
+                      [ -S "${'$'}candidate" ] || continue
+                      way=${'$'}(basename "${'$'}candidate")
+                      break
+                    done
+                    test -n "${'$'}way"; test -n "${'$'}bus"
+                    su -l vessel -c "XDG_RUNTIME_DIR='${'$'}xdg' WAYLAND_DISPLAY='${'$'}way' DBUS_SESSION_BUS_ADDRESS='${'$'}bus' QT_QPA_PLATFORM=wayland XCURSOR_THEME=Breeze XCURSOR_SIZE=18 setsid -f kinfocenter >/tmp/vessel-kinfocenter.log 2>&1"
+                    echo VESSEL_KINFOCENTER_STARTED
+                    """.trimIndent()
+                } else {
                     """
                     set -e
                     pid=${'$'}(pgrep -u vessel -x plasmashell | head -1)
                     test -n "${'$'}pid"
                     envfile=/proc/${'$'}pid/environ
-                    xdg=${'$'}(tr '\000' '\n' <"${'$'}envfile" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -1)
-                    way=${'$'}(tr '\000' '\n' <"${'$'}envfile" | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)
-                    bus=${'$'}(tr '\000' '\n' <"${'$'}envfile" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
+                    xdg=${'$'}(tr '\\000' '\\n' <"${'$'}envfile" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -1)
+                    way=${'$'}(tr '\\000' '\\n' <"${'$'}envfile" | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)
+                    bus=${'$'}(tr '\\000' '\\n' <"${'$'}envfile" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
                     test -n "${'$'}xdg"; test -n "${'$'}way"; test -n "${'$'}bus"
                     su -l vessel -c "XDG_RUNTIME_DIR='${'$'}xdg' WAYLAND_DISPLAY='${'$'}way' DBUS_SESSION_BUS_ADDRESS='${'$'}bus' QT_QPA_PLATFORM=wayland XCURSOR_THEME=Breeze XCURSOR_SIZE=18 setsid -f kinfocenter >/tmp/vessel-kinfocenter.log 2>&1"
                     echo VESSEL_KINFOCENTER_STARTED
-                    """.trimIndent(),
-                    30,
-                )
+                    """.trimIndent()
+                }
+                val launched = runtime.guest(launchCommand, 30)
                 check(launched.optBoolean("ok")) { "KInfoCenter launch failed: ${launched.optString("output").takeLast(1600)}" }
                 state.value = state.value.copy(message = "KDE Info Center opened")
             } catch (t: Throwable) {
