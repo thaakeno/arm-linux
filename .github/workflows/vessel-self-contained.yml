@@ -243,14 +243,77 @@ jobs:
   # Source-only phase commits intentionally do not assemble APKs. A real APK
   # build is explicit via workflow_dispatch once the implementation phases are
   # ready for device validation.
+  xwayland-patch:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[manual-apk]')) }}
+    runs-on: ubuntu-26.04-arm
+    container:
+      image: debian:trixie
+      options: --user root
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Xwayland build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources
+          apt-get update
+          apt-get build-dep -y xwayland
+          apt-get install -y --no-install-recommends git ccache build-essential devscripts fakeroot quilt git-buildpackage pristine-tar python3
+      - name: Build Android-seccomp-safe Anland Xwayland
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd /tmp
+          git clone https://github.com/lfdevs/xwayland.git vessel-xwayland-src
+          cd vessel-xwayland-src
+          git checkout cec0c8d2a0246bc6107601b4c01101d4b6ffc274
+          git config user.email "actions@github.com"
+          git config user.name "Vessel CI"
+          python3 "$GITHUB_WORKSPACE/tools/vessel_proroot/patch_xwayland_android.py" "$PWD"
+          git add os/utils.c os/osinit.c Xext/xf86bigfont.c
+          git commit -m "vessel: make Xwayland safe under Android app seccomp"
+          origtargz
+          gbp buildpackage -uc -us -jauto --git-ignore-branch
+          mkdir -p /tmp/vessel-xwayland
+          DEB="$(find /tmp -maxdepth 1 -type f -name 'xwayland_*_arm64.deb' -print -quit)"
+          test -n "$DEB"
+          rm -rf /tmp/xwayland-extract
+          dpkg-deb -x "$DEB" /tmp/xwayland-extract
+          install -m0755 /tmp/xwayland-extract/usr/bin/Xwayland /tmp/vessel-xwayland/Xwayland.arm64
+          sha256sum /tmp/vessel-xwayland/Xwayland.arm64 > /tmp/vessel-xwayland/Xwayland.arm64.sha256
+          strings /tmp/vessel-xwayland/Xwayland.arm64 | grep -F 'XWAYLAND_SIGSYS syscall='
+      - name: Upload patched Xwayland
+        uses: actions/upload-artifact@v4
+        with:
+          name: vessel-xwayland-arm64
+          path: |
+            /tmp/vessel-xwayland/Xwayland.arm64
+            /tmp/vessel-xwayland/Xwayland.arm64.sha256
+          if-no-files-found: error
+          retention-days: 14
+
   build:
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[manual-apk]')) }}
+    needs: xwayland-patch
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Download patched Xwayland
+        uses: actions/download-artifact@v5
+        with:
+          name: vessel-xwayland-arm64
+          path: app/src/main/assets/vessel
+      - name: Verify patched Xwayland asset
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -s app/src/main/assets/vessel/Xwayland.arm64
+          chmod 0755 app/src/main/assets/vessel/Xwayland.arm64
+          strings app/src/main/assets/vessel/Xwayland.arm64 | grep -F 'XWAYLAND_SIGSYS syscall='
       - uses: actions/setup-java@v5
         with:
           java-version: '17'
@@ -404,6 +467,8 @@ jobs:
           strings /tmp/libtermux-release.so | grep -Fq 'VESSEL_TERMUX_PTY_NDK29_DIRECT_SOURCE_V1'
           grep -Eq 'lib/arm64-v8a/libzstd-jni.*\.so' /tmp/apk-files.txt
           grep -Eq 'lib/arm64-v8a/libzstd-jni.*\.so' /tmp/release-apk-files.txt
+          grep -Fq 'assets/vessel/Xwayland.arm64' /tmp/apk-files.txt
+          grep -Fq 'assets/vessel/Xwayland.arm64' /tmp/release-apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
