@@ -28,7 +28,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v7"
+        const val REVISION = "proroot-production-v8"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -381,6 +381,35 @@ class VesselProrootRuntimeBackend(
                     smoke.output.takeLast(5000)
             }
             startupJournal.mark("proroot.smoke.ok")
+
+            // Android can expose /proc/self/exe as readable while still denying
+            // readlink(2). Prove proroot's documented PROROOT_GUEST_EXE
+            // emulation before starting D-Bus, KWin or any desktop process.
+            progress("proroot_proc_self", 70, "Validating Linux /proc/self/exe semantics")
+            startupJournal.mark("proc.self-exe.begin")
+            val procSelfExe = VesselProrootProcessRunner.run(
+                desktopLaunchPlan(
+                    listOf("/usr/bin/readlink", "/proc/self/exe"),
+                    includeSharedStorage = false,
+                ),
+                timeoutSeconds = 8,
+                logFile = File(layout.diagnosticsDir, "proc-self-exe.log"),
+            )
+            val procSelfExePath = procSelfExe.output
+                .lineSequence()
+                .map(String::trim)
+                .firstOrNull { it.startsWith("/") }
+                .orEmpty()
+            check(
+                procSelfExe.exitCode == 0 &&
+                    procSelfExePath == "/usr/bin/readlink"
+            ) {
+                "proroot /proc/self/exe emulation failed rc=" +
+                    procSelfExe.exitCode + " path=" +
+                    procSelfExePath.ifBlank { "(none)" } + ": " +
+                    procSelfExe.output.takeLast(4000)
+            }
+            startupJournal.mark("proc.self-exe.ok", procSelfExePath)
 
             progress("proroot_compat", 72, "Preparing generic Linux ABI/session compatibility")
             startupJournal.mark("audio.prepare.begin")

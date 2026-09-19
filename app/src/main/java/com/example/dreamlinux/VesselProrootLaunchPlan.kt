@@ -90,6 +90,7 @@ object VesselProrootContract {
         "PROROOT_LIB_PATH",
         "PROROOT_LINKER_PATH",
         "PROROOT_STUB_LOADER",
+        "PROROOT_GUEST_EXE",
         "HOME",
         "USER",
         "LOGNAME",
@@ -119,6 +120,13 @@ object VesselProrootContract {
         require(hostWorkingDirectory.startsWith('/'))
         require(guestWorkingDirectory.startsWith('/'))
         require(guestArgv.isNotEmpty()) { "guest argv must not be empty" }
+        val guestExecutable = guestArgv.first()
+        require(guestExecutable.startsWith('/')) {
+            "guest executable must be an absolute Linux path: " + guestExecutable
+        }
+        require('\u0000' !in guestExecutable) {
+            "guest executable contains NUL"
+        }
 
         val argv = buildList {
             add(launcherPath)
@@ -142,6 +150,11 @@ object VesselProrootContract {
             "PROROOT_LIB_PATH" to "$runtimeLibraryDir/libproroot-runtime.so",
             "PROROOT_LINKER_PATH" to "$runtimeLibraryDir/libproroot-linker.so",
             "PROROOT_STUB_LOADER" to "$runtimeLibraryDir/libproroot-stub-loader.so",
+            // Upstream proroot's documented Android procfs compatibility
+            // contract. Android may deny readlink(/proc/self/exe); the runtime
+            // uses this guest path to emulate Linux /proc/self/exe instead of
+            // leaking/relying on the host app-process procfs entry.
+            "PROROOT_GUEST_EXE" to guestExecutable,
             "HOME" to identity.home,
             "USER" to identity.user,
             "LOGNAME" to identity.logName,

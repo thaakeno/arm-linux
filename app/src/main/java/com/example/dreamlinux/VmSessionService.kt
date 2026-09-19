@@ -1020,6 +1020,7 @@ class VmSessionService : Service() {
                     "startup-journal.log",
                     "proroot.log",
                     "proroot-smoke.log",
+                    "proc-self-exe.log",
                     "system-dbus.log",
                     "system-dbus-probe.log",
                     "compat-probe.log",

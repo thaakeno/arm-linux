@@ -28,6 +28,7 @@ class VesselProrootLaunchPlanTest {
         assertTrue(plan.argv.contains("/data/tmp:/tmp"))
         assertTrue(plan.argv.contains("/data/shm:/dev/shm"))
         assertEquals(listOf("/bin/bash", "-l"), plan.argv.takeLast(2))
+        assertEquals("/bin/bash", plan.environment["PROROOT_GUEST_EXE"])
     }
 
     @Test
@@ -56,6 +57,10 @@ class VesselProrootLaunchPlanTest {
         assertEquals("/home/vessel", plan.environment["HOME"])
         assertEquals("vessel", plan.environment["USER"])
         assertEquals("/run/user/10234", plan.environment["XDG_RUNTIME_DIR"])
+        assertEquals(
+            "/usr/local/libexec/vessel-start-plasma",
+            plan.environment["PROROOT_GUEST_EXE"],
+        )
         assertTrue(plan.argv.containsAll(listOf("-w", "/home/vessel")))
     }
 
@@ -125,4 +130,31 @@ class VesselProrootLaunchPlanTest {
     fun rejectsRelativeGuestBindPaths() {
         VesselProrootBind("/dev", "dev")
     }
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsGuestOverrideOfProcSelfExeContract() {
+        VesselProrootContract.build(
+            launcherPath = "/native/libproroot.so",
+            runtimeLibraryDir = "/native",
+            rootfsPath = "/data/rootfs",
+            prorootTmpPath = "/data/runtime/proroot-tmp",
+            hostWorkingDirectory = "/data",
+            binds = emptyList(),
+            guestArgv = listOf("/bin/true"),
+            guestEnvironment = mapOf("PROROOT_GUEST_EXE" to "/tmp/fake"),
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsRelativeGuestExecutableForProcSelfExeEmulation() {
+        VesselProrootContract.build(
+            launcherPath = "/native/libproroot.so",
+            runtimeLibraryDir = "/native",
+            rootfsPath = "/data/rootfs",
+            prorootTmpPath = "/data/runtime/proroot-tmp",
+            hostWorkingDirectory = "/data",
+            binds = emptyList(),
+            guestArgv = listOf("bash", "-l"),
+        )
+    }
+
 }
