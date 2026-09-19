@@ -316,12 +316,23 @@ class VesselActivity : ComponentActivity() {
             Text("Machine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Metric(Icons.Default.Memory, "Memory", "${if (state.guestMemoryMb > 0) state.guestMemoryMb else 4096} MiB UML guest · ${VesselExperimentConfig.vcpus(this@VesselActivity)} vCPU")
+                    val sharedKernel = state.runtimeBackend == VesselRuntimeFactory.ACTIVE_BACKEND_ID
+                    Metric(
+                        Icons.Default.Memory,
+                        "Memory",
+                        if (sharedKernel) "Shared Android memory · no fixed guest RAM"
+                        else "${if (state.guestMemoryMb > 0) state.guestMemoryMb else 4096} MiB UML guest · ${VesselExperimentConfig.vcpus(this@VesselActivity)} vCPU",
+                    )
                     Metric(Icons.Default.DesktopWindows, "Desktop", "${state.guestDisplayWidth} × ${state.guestDisplayHeight} · stable landscape")
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                     Metric(Icons.Default.DesktopWindows, "Android Surface", state.presenterStatus)
                     Metric(Icons.Default.Wifi, "Network", state.internetStage)
-                    Metric(Icons.Default.Storage, "Disk", "Private persistent sparse ext4 · safe auto-grow")
+                    Metric(
+                        Icons.Default.Storage,
+                        "Disk",
+                        if (sharedKernel) "Private persistent directory rootfs · grows with Android storage"
+                        else "Private persistent sparse ext4 · safe auto-grow",
+                    )
                 }
             }
             LogCard(state)
