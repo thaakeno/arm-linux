@@ -79,11 +79,9 @@ object VesselProrootDesktopProfile {
             "ANLAND_SOCKET" to guestSocketPath,
             "ANLAND" to "1",
             "ANLAND_NO_DRM_DEVICE" to "1",
-            // Android 16 currently SIGSYS-kills the pinned Anland XWayland.
-            // Keep the production desktop Wayland-only until the blocked syscall
-            // is identified and fixed generically; the APK-owned KWin wrapper
-            // strips --xwayland when this flag is set.
-            "VESSEL_DISABLE_XWAYLAND" to "1",
+            // Vessel ships an APK-owned Xwayland patched for Android's app
+            // seccomp boundary. Keep KWin's normal --xwayland path enabled.
+            "VESSEL_DISABLE_XWAYLAND" to "0",
             "VESSEL_AUDIO_HOST" to "127.0.0.1",
             "DBUS_SYSTEM_BUS_ADDRESS" to "unix:path=" + VesselRootlessSystemBus.GUEST_SOCKET,
         )
