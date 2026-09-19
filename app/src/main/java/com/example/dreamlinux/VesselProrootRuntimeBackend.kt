@@ -33,7 +33,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v13"
+        const val REVISION = "proroot-production-v14"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -857,7 +857,7 @@ class VesselProrootRuntimeBackend(
         )
         val repairedMarker = File(
             layout.rootfsDir,
-            "var/cache/vessel/plasma-qml-proroot-production-v13",
+            "var/cache/vessel/plasma-qml-proroot-production-v14",
         )
 
         fun filesReady(): Boolean =
