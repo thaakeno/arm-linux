@@ -688,6 +688,10 @@ class VesselProrootRuntimeBackend(
             File(qt6Qml, "org/kde/ksvg/qmldir"),
             File(qt6Qml, "org/kde/ksvg/libcorebindingsplugin.so"),
         )
+        val repairedMarker = File(
+            layout.rootfsDir,
+            "var/cache/vessel/plasma-qml-proroot-production-v12",
+        )
 
         fun filesReady(): Boolean =
             required.all { it.isFile && it.length() > 0L }
@@ -696,7 +700,7 @@ class VesselProrootRuntimeBackend(
             if (!filesReady()) return false
             val probe = VesselProrootProcessRunner.run(
                 shellLaunchPlan(
-                    "ldd /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/" +
+                    "ldd -r /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/" +
                         "libcorebindingsplugin.so 2>&1",
                     diagnostics = true,
                     includeSharedStorage = false,
@@ -705,10 +709,14 @@ class VesselProrootRuntimeBackend(
                 logFile = File(layout.diagnosticsDir, "plasma-qml-ksvg-ldd.log"),
             )
             return probe.exitCode == 0 &&
-                !probe.output.contains("not found", ignoreCase = true)
+                !probe.output.contains("not found", ignoreCase = true) &&
+                !probe.output.contains("undefined symbol", ignoreCase = true)
         }
 
-        if (pluginLinksReady()) return
+        // v11 only validated plasma.core, so an already-installed workstation may
+        // carry a partial KSvg module. Refresh the exact Debian packages once on v12
+        // even when the files exist, then use the marker on later cold starts.
+        if (repairedMarker.isFile && pluginLinksReady()) return
 
         startupJournal.mark("plasma.qml.repair.begin")
         val repair = VesselProrootProcessRunner.run(
@@ -729,6 +737,10 @@ class VesselProrootRuntimeBackend(
             "Plasma KSvg/QML runtime is incomplete and automatic repair failed rc=" +
                 repair.exitCode + ": " + repair.output.takeLast(6000)
         }
+        check(repairedMarker.parentFile?.isDirectory == true || repairedMarker.parentFile?.mkdirs() == true) {
+            "Could not create Plasma QML repair marker directory"
+        }
+        repairedMarker.writeText("ok\n")
         startupJournal.mark("plasma.qml.repair.ok")
     }
 
