@@ -407,10 +407,16 @@ class VesselProrootRuntimeBackend(
     }
 
     override fun configureDisplay(width: Int, height: Int, dpi: Int, refresh: Float) {
-        displayWidth = width.coerceIn(640, 3840)
-        displayHeight = height.coerceIn(480, 2160)
-        displayDpi = dpi.coerceIn(72, 480)
-        displayRefresh = refresh.coerceIn(30f, 240f)
+        val nextRefresh = refresh.coerceIn(30f, 240f)
+        if (!running) {
+            // Anland's producer receives monitor geometry during its control
+            // handshake. Keep that mode stable for the lifetime of the compositor;
+            // Android SurfaceView resizes are presentation-only.
+            displayWidth = width.coerceIn(640, 3840)
+            displayHeight = height.coerceIn(480, 2160)
+            displayDpi = dpi.coerceIn(72, 480)
+        }
+        displayRefresh = nextRefresh
         if (running) {
             VesselProrootDisplayBridge.configure(displayWidth, displayHeight, displayRefresh)
         }
