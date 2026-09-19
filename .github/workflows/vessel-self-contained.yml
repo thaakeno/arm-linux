@@ -213,6 +213,8 @@ jobs:
           grep -F 'selectedDiagnosticText' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'Install UML recovery' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'VesselBootstrapActivityV2::class.java' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          grep -F 'vessel.selectUmlAfterInstall' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          grep -F 'VesselExperimentConfig.setRuntimeBackend(this, VesselRuntimeFactory.RECOVERY_BACKEND_ID)' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
 
           # Rootless system D-Bus must never use Debian's stock <user>messagebus
           # privilege drop. The runtime actively proves RequestName before Plasma.
