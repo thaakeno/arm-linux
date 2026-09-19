@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
+import sys
 from pathlib import Path
 
-root = Path(__file__).resolve().parents[2]
+root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
 producer = root / "src/backends/anland/display_producer.c"
 backend = root / "src/backends/anland/anland_backend.cpp"
 egl = root / "src/backends/anland/anland_egl_backend.cpp"
