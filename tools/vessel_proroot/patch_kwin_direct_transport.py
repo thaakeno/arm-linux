@@ -115,39 +115,4 @@ if old_add not in text:
     raise SystemExit("EGL addOutput block not found")
 text = text.replace(old_add, new_add, 1)
 
-old_begin = """std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
-{
-    m_backend->openglContext()->makeCurrent();
-
-    m_currentIndex = get_selected_idx(m_display);
-
-    return OutputLayerBeginFrameInfo{
-        .renderTarget = *m_renderTargets[m_currentIndex],
-        .repaint = m_accumDamage[m_currentIndex],
-    };
-}
-"""
-new_begin = """std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
-{
-    m_backend->openglContext()->makeCurrent();
-
-    if (m_bufCount <= 0) {
-        qCCritical(KWIN_ANLAND) << "Vessel render requested without imported buffers";
-        return std::nullopt;
-    }
-    m_currentIndex = get_selected_idx(m_display);
-    if (m_currentIndex < 0 || m_currentIndex >= m_bufCount || !m_renderTargets[m_currentIndex]) {
-        qCCritical(KWIN_ANLAND) << "Vessel selected invalid render buffer" << m_currentIndex;
-        return std::nullopt;
-    }
-
-    return OutputLayerBeginFrameInfo{
-        .renderTarget = *m_renderTargets[m_currentIndex],
-        .repaint = m_accumDamage[m_currentIndex],
-    };
-}
-"""
-if old_begin not in text:
-    raise SystemExit("EGL begin-frame block not found")
-text = text.replace(old_begin, new_begin, 1)
-egl.write_text(text)
+# The pinned KWin reconnect-hardening patch already guards doBeginFrame() against\n# empty/invalid dmabuf sets, so no second frame guard patch is needed here.\n
