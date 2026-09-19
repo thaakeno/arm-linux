@@ -21,6 +21,7 @@ object VesselProrootDesktopProfile {
     const val MARKER = "/usr/lib/vessel/desktop/session.env"
     const val STARTER = "/usr/local/libexec/vessel-start-plasma"
     const val PROBE = "/usr/local/libexec/vessel-compat-probe"
+    const val SESSION_MARKER = "/var/cache/vessel/proroot-session-v2"
 
     fun identity(androidUid: Int = Process.myUid()): VesselProrootIdentity =
         VesselProrootIdentity(
@@ -35,7 +36,7 @@ object VesselProrootDesktopProfile {
     fun readiness(rootfs: File): VesselDesktopReadiness {
         // The compatibility probe is APK-owned at runtime so an old large
         // rootfs cannot pin Vessel to stale Android/procfs assumptions.
-        for (path in listOf(MARKER, STARTER)) {
+        for (path in listOf(MARKER, STARTER, SESSION_MARKER)) {
             val file = guestFile(rootfs, path)
             if (!file.isFile || file.length() <= 0L) {
                 return VesselDesktopReadiness(false, "Desktop runtime file is missing: " + path)
@@ -51,6 +52,9 @@ object VesselProrootDesktopProfile {
             "/usr/bin/dbus-send",
             "/usr/bin/python3",
             "/usr/bin/pulseaudio",
+            "/usr/bin/pipewire",
+            "/usr/bin/wireplumber",
+            "/usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir",
         )
         for (path in required) {
             val file = guestFile(rootfs, path)
