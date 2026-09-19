@@ -28,7 +28,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v9"
+        const val REVISION = "proroot-production-v10"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -99,6 +99,9 @@ class VesselProrootRuntimeBackend(
         if (!File(layout.rootfsDir, "var/cache/vessel/proroot-production-v1").isFile) {
             return VesselDesktopReadiness(false, "Phase-6 production rootfs marker is missing")
         }
+        if (!prepareRootlessDesktopPolicy()) {
+            return VesselDesktopReadiness(false, "Could not prepare rootless Plasma session policy")
+        }
         if (!prepareDns()) {
             return VesselDesktopReadiness(false, "Could not prepare Android network DNS for Linux")
         }
@@ -157,6 +160,70 @@ class VesselProrootRuntimeBackend(
             val file = File(layout.nativeLibraryDir, name)
             file.isFile && sha256(file).equals(expected, ignoreCase = true)
         }
+
+    /**
+     * Patch session policy from the APK rather than requiring a 1.4 GiB rootfs
+     * replacement for every Android compatibility iteration.
+     *
+     * Plasma must use its classic non-systemd startup in this rootless session.
+     * Android 16 also SIGSYS-kills the currently pinned Anland XWayland, so the
+     * wrapper strips --xwayland while VESSEL_DISABLE_XWAYLAND=1. Native Wayland
+     * applications continue to work; XWayland can be re-enabled once its blocked
+     * syscall is identified and fixed.
+     */
+    private fun prepareRootlessDesktopPolicy(): Boolean = runCatching {
+        val xdg = File(layout.rootfsDir, "etc/xdg")
+        check(xdg.isDirectory || xdg.mkdirs()) { "Could not create /etc/xdg" }
+        val startKdeRc = File(xdg, "startkderc")
+        val existing = if (startKdeRc.isFile) startKdeRc.readText() else ""
+        val systemdBoot = Regex("""(?m)^\s*systemdBoot\s*=.*$""")
+        val next = when {
+            systemdBoot.containsMatchIn(existing) ->
+                existing.replace(systemdBoot, "systemdBoot=false")
+            existing.contains("[General]") ->
+                existing.replace("[General]", "[General]\nsystemdBoot=false")
+            existing.isBlank() ->
+                "[General]\nsystemdBoot=false\n"
+            else ->
+                existing.trimEnd() + "\n\n[General]\nsystemdBoot=false\n"
+        }
+        if (!startKdeRc.isFile || startKdeRc.readText() != next) {
+            startKdeRc.writeText(next)
+            runCatching { Os.chmod(startKdeRc.absolutePath, 0x1A4) } // 0644
+        }
+
+        val wrapper = """
+            #!/bin/bash
+            set -euo pipefail
+            : "${VESSEL_DISPLAY_SOCKET:?VESSEL_DISPLAY_SOCKET is required}"
+            export ANLAND=1
+            export ANLAND_SOCKET="$VESSEL_DISPLAY_SOCKET"
+            export ANLAND_NO_DRM_DEVICE=1
+            export EGL_PLATFORM=surfaceless
+            args=()
+            for arg in "$@"; do
+              if [[ "${VESSEL_DISABLE_XWAYLAND:-0}" == "1" && "$arg" == "--xwayland" ]]; then
+                continue
+              fi
+              args+=("$arg")
+            done
+            exec /usr/bin/kwin_wayland "${args[@]}"
+        """.trimIndent() + "\n"
+        listOf(
+            "usr/local/lib/vessel/kwin-wrapper/kwin_wayland",
+            "usr/local/lib/vessel/kwin-wrapper/kwin_wayland_wrapper",
+        ).forEach { relative ->
+            val target = File(layout.rootfsDir, relative)
+            check(target.parentFile?.isDirectory == true || target.parentFile?.mkdirs() == true) {
+                "Could not create KWin wrapper directory"
+            }
+            if (!target.isFile || target.readText() != wrapper) {
+                target.writeText(wrapper)
+                Os.chmod(target.absolutePath, 0x1ED) // 0755
+            }
+        }
+        true
+    }.getOrDefault(false)
 
     private fun prepareDns(): Boolean {
         if (!layout.prepareHostLayout()) return false
@@ -694,10 +761,10 @@ class VesselProrootRuntimeBackend(
     private fun baseState(ok: Boolean): JSONObject {
         val presenter = VesselWaylandPresenter.status()
         val bridge = VesselProrootDisplayBridge.status()
-        val frameReady =
-            bridge.startsWith("presenting-proroot-") ||
-                presenter.startsWith("presenting-native-surface") ||
-                presenter.startsWith("presenting-retained")
+        // For the production proroot backend the native bridge is authoritative.
+        // A stale retained presenter or a one-time successful startup must never
+        // keep the UI on VISIBLE after KWin disconnects.
+        val frameReady = bridge.startsWith("presenting-proroot-")
         return JSONObject()
             .put("ok", ok)
             .put("backend", "PROROOT")
@@ -710,7 +777,7 @@ class VesselProrootRuntimeBackend(
             .put("softwareFallback", false)
             .put("running", running)
             .put("guestReady", hostAssetsReady() && layout.rootfsReady())
-            .put("desktopReady", desktopReady)
+            .put("desktopReady", desktopReady && frameReady)
             .put("frameContentValidated", frameReady)
             .put("inputConnected", bridge.startsWith("presenting-proroot-"))
             .put("machineDir", machineDir.absolutePath)
