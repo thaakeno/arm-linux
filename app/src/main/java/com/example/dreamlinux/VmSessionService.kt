@@ -292,10 +292,18 @@ class VmSessionService : Service() {
                 presenter.startsWith("presenting-retained")
         val frame = o.optBoolean("frameContentValidated") || presented
         val stopping = state.value.stage == "stopping"
+        val displayReady = if (runtime.kind == VesselRuntimeKind.PROROOT) {
+            // A compositor buffer by itself can just be KWin's black background.
+            // Production proroot becomes VISIBLE only after the runtime has also
+            // validated the Plasma session.
+            o.optBoolean("desktopReady")
+        } else {
+            o.optBoolean("desktopReady") || presented
+        }
         state.value = state.value.copy(
             running = o.optBoolean("running"),
             guestReady = o.optBoolean("guestReady"),
-            displayReady = o.optBoolean("desktopReady") || presented,
+            displayReady = displayReady,
             frameReachedApp = frame,
             inputReady = o.optBoolean("inputConnected"),
             presenterStatus = presenter,
@@ -313,7 +321,8 @@ class VmSessionService : Service() {
             message = when {
                 stopping -> "Stopping Linux"
                 err.isNotBlank() -> err
-                presented -> "Plasma visible · Android native Surface GPU path"
+                displayReady -> "Plasma visible · Android native Surface GPU path"
+                presented -> "Native compositor frame received; validating Plasma"
                 o.optBoolean("guestReady") -> state.value.progressDetail
                 else -> state.value.message
             },
@@ -575,9 +584,36 @@ class VmSessionService : Service() {
     private suspend fun ensureDesktopProfile(op: Long) {
         if (op != operationGeneration) return
         if (runtime.kind == VesselRuntimeKind.PROROOT) {
+            state.value = state.value.copy(
+                stage = "desktop_profile",
+                progressPercent = 99,
+                progressDetail = "Validating live Plasma shell and QML",
+                message = "Finishing desktop validation",
+            )
+            val live = runtime.guest(
+                "for i in $(seq 1 100); do " +
+                    "pgrep -x kwin_wayland >/dev/null && " +
+                    "pgrep -x plasmashell >/dev/null && exit 0; " +
+                    "sleep .1; done; exit 1",
+                15,
+            )
+            check(live.optBoolean("ok")) {
+                "Plasma shell did not become live: " + live.optString("output").takeLast(3000)
+            }
+
             val current = runtime.status()
             check(current.optBoolean("desktopReady")) {
                 "Proroot Plasma session did not remain ready"
+            }
+            val tail = current.optString("logTail")
+            val fatalQml = Regex(
+                """(?i)(module\s+["'][^"']+["']\s+is not installed|""" +
+                    """KSvg\.SvgItem\s+is not a type|""" +
+                    """Type\s+[^\n]+\s+unavailable|""" +
+                    """Failed to load overview:)""",
+            )
+            check(!fatalQml.containsMatchIn(tail)) {
+                "Plasma QML failed after startup:\n" + tail.takeLast(6000)
             }
             return
         }
