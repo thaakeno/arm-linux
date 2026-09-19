@@ -96,6 +96,25 @@ done
 HELD_PACKAGES+=("$(dpkg-deb -f "$XWAYLAND_DEB" Package)")
 dpkg-deb -x "$XWAYLAND_DEB" "$ROOTFS"
 
+# Keep the pinned Anland XWayland binary intact, but launch it through a very
+# small Vessel wrapper. The preload shim preserves Xorg's own SIGSYS handling
+# while logging seccomp siginfo (si_syscall/si_arch/si_code), so Android-16
+# failures become actionable instead of another opaque "Bad system call".
+command -v cc >/dev/null 2>&1 || {
+  echo "A C compiler is required to build the Vessel XWayland SIGSYS tracer" >&2
+  exit 5
+}
+install -d -m0755 "$ROOTFS/usr/lib/vessel/xwayland"
+[[ -x "$ROOTFS/usr/bin/Xwayland" ]] || {
+  echo "pinned XWayland package did not install /usr/bin/Xwayland" >&2
+  exit 5
+}
+mv "$ROOTFS/usr/bin/Xwayland" "$ROOTFS/usr/lib/vessel/xwayland/Xwayland.real"
+cc -shared -fPIC -O2 -Wall -Wextra   "$ROOTFS_FILES/usr/local/lib/vessel/xwayland/sigsys_trace.c"   -ldl   -o "$ROOTFS/usr/lib/vessel/xwayland/libvessel-sigsys-trace.so"
+chmod 0755 "$ROOTFS/usr/lib/vessel/xwayland/Xwayland.real"
+chmod 0644 "$ROOTFS/usr/lib/vessel/xwayland/libvessel-sigsys-trace.so"
+install -D -m0755 "$ROOTFS_FILES/usr/local/lib/vessel/xwayland/Xwayland"   "$ROOTFS/usr/bin/Xwayland"
+
 install -D -m0755 "$ROOTFS_FILES/usr/local/libexec/vessel-start-plasma"   "$ROOTFS/usr/local/libexec/vessel-start-plasma"
 install -D -m0755 "$ROOTFS_FILES/usr/local/libexec/vessel-compat-probe"   "$ROOTFS/usr/local/libexec/vessel-compat-probe"
 install -D -m0755 "$ROOTFS_FILES/usr/local/lib/vessel/kwin-wrapper/kwin_wayland"   "$ROOTFS/usr/local/lib/vessel/kwin-wrapper/kwin_wayland"
@@ -119,7 +138,7 @@ session=vessel-proroot-wayland-v1
 EOF
 chmod 0644 "$MARKER_HOST"
 
-for required in   "$ROOTFS/usr/bin/kwin_wayland"   "$ROOTFS/usr/bin/startplasma-wayland"   "$ROOTFS/usr/bin/Xwayland"   "$ROOTFS/usr/local/libexec/vessel-start-plasma"   "$ROOTFS/usr/local/libexec/vessel-compat-probe"
+for required in   "$ROOTFS/usr/bin/kwin_wayland"   "$ROOTFS/usr/bin/startplasma-wayland"   "$ROOTFS/usr/bin/Xwayland"   "$ROOTFS/usr/lib/vessel/xwayland/Xwayland.real"   "$ROOTFS/usr/lib/vessel/xwayland/libvessel-sigsys-trace.so"   "$ROOTFS/usr/local/libexec/vessel-start-plasma"   "$ROOTFS/usr/local/libexec/vessel-compat-probe"
 do
   [[ -e "$required" ]] || { echo "desktop install missing: ${required#$ROOTFS}" >&2; exit 6; }
 done
