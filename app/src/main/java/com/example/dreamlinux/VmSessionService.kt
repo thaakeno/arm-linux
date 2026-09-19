@@ -623,7 +623,7 @@ class VmSessionService : Service() {
             // on pgrep/procfs to discover desktop processes. The Plasma launcher
             // owns the D-Bus session and publishes org.kde.plasmashell readiness
             // through the host-visible /run bind.
-            val deadline = android.os.SystemClock.elapsedRealtime() + 60_000L
+            val deadline = android.os.SystemClock.elapsedRealtime() + 5_000L
             while (android.os.SystemClock.elapsedRealtime() < deadline) {
                 if (op != operationGeneration) return
                 val current = runtime.status()
