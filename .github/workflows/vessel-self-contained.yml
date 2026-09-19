@@ -46,29 +46,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Stage pinned direct KWin overlay
-        shell: bash
-        run: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends curl unzip zstd
-          KWIN_URL="https://github.com/thaakeno/arm-linux/releases/download/vessel-kwin-direct-edge/kwin_vessel-direct_6.3.6-96_arm64.zip"
-          KWIN_SHA="8cd81fc9d6d063be92dd9b874413ee2c64a6d536c4066630469455d2324e53a9"
-          rm -rf /tmp/vessel-kwin-overlay /tmp/vessel-kwin-debs
-          mkdir -p /tmp/vessel-kwin-overlay /tmp/vessel-kwin-debs app/src/main/assets/vessel
-          curl --fail --location --retry 4 --connect-timeout 15 -o /tmp/kwin-direct.zip "$KWIN_URL"
-          printf '%s  %s\n' "$KWIN_SHA" /tmp/kwin-direct.zip | sha256sum -c -
-          unzip -q /tmp/kwin-direct.zip -d /tmp/vessel-kwin-debs
-          mapfile -t KWIN_DEBS < <(find /tmp/vessel-kwin-debs -type f -name '*.deb' -print | sort)
-          test "${#KWIN_DEBS[@]}" -gt 0
-          for deb in "${KWIN_DEBS[@]}"; do
-            dpkg-deb -x "$deb" /tmp/vessel-kwin-overlay
-          done
-          install -d -m0755 /tmp/vessel-kwin-overlay/usr/lib/vessel/desktop
-          printf '%s\n' 'vessel-direct-6.3.6-96' > /tmp/vessel-kwin-overlay/usr/lib/vessel/desktop/direct-kwin-build.txt
-          tar --hard-dereference --numeric-owner --sort=name --mtime='UTC 2026-01-01'             -C /tmp/vessel-kwin-overlay -cf - .             | zstd -T0 -10 --no-progress -f -o app/src/main/assets/vessel/kwin-direct-overlay.tar.zst
-          test -s app/src/main/assets/vessel/kwin-direct-overlay.tar.zst
-          zstd -dc app/src/main/assets/vessel/kwin-direct-overlay.tar.zst             | tar -tf -             | grep -Fq './usr/lib/vessel/desktop/direct-kwin-build.txt'
       - uses: actions/setup-java@v5
         with:
           java-version: '17'
@@ -347,6 +324,29 @@ jobs:
           test -s app/src/main/assets/vessel/Xwayland.arm64
           chmod 0755 app/src/main/assets/vessel/Xwayland.arm64
           strings app/src/main/assets/vessel/Xwayland.arm64 | grep -F 'XWAYLAND_SIGSYS syscall='
+      - name: Stage pinned direct KWin overlay
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl unzip zstd
+          KWIN_URL="https://github.com/thaakeno/arm-linux/releases/download/vessel-kwin-direct-edge/kwin_vessel-direct_6.3.6-96_arm64.zip"
+          KWIN_SHA="8cd81fc9d6d063be92dd9b874413ee2c64a6d536c4066630469455d2324e53a9"
+          rm -rf /tmp/vessel-kwin-overlay /tmp/vessel-kwin-debs
+          mkdir -p /tmp/vessel-kwin-overlay /tmp/vessel-kwin-debs app/src/main/assets/vessel
+          curl --fail --location --retry 4 --connect-timeout 15 -o /tmp/kwin-direct.zip "$KWIN_URL"
+          printf '%s  %s\n' "$KWIN_SHA" /tmp/kwin-direct.zip | sha256sum -c -
+          unzip -q /tmp/kwin-direct.zip -d /tmp/vessel-kwin-debs
+          mapfile -t KWIN_DEBS < <(find /tmp/vessel-kwin-debs -type f -name '*.deb' -print | sort)
+          test "${#KWIN_DEBS[@]}" -gt 0
+          for deb in "${KWIN_DEBS[@]}"; do
+            dpkg-deb -x "$deb" /tmp/vessel-kwin-overlay
+          done
+          install -d -m0755 /tmp/vessel-kwin-overlay/usr/lib/vessel/desktop
+          printf '%s\n' 'vessel-direct-6.3.6-96' > /tmp/vessel-kwin-overlay/usr/lib/vessel/desktop/direct-kwin-build.txt
+          tar --hard-dereference --numeric-owner --sort=name --mtime='UTC 2026-01-01'             -C /tmp/vessel-kwin-overlay -cf - .             | zstd -T0 -10 --no-progress -f -o app/src/main/assets/vessel/kwin-direct-overlay.tar.zst
+          test -s app/src/main/assets/vessel/kwin-direct-overlay.tar.zst
+          zstd -dc app/src/main/assets/vessel/kwin-direct-overlay.tar.zst             | tar -tf -             | grep -Fq './usr/lib/vessel/desktop/direct-kwin-build.txt'
       - uses: actions/setup-java@v5
         with:
           java-version: '17'
