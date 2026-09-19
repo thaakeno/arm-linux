@@ -73,6 +73,9 @@ class VesselProrootBootstrapActivity : ComponentActivity() {
         val archiveBytes: Long,
         val extractedBytes: Long,
         val entryCount: Long,
+        val mesaVersion: String,
+        val desktopRelease: String,
+        val hardLinksFlattened: Boolean,
         val requiredPaths: List<String>,
         val chunks: List<Chunk>,
     )
@@ -88,10 +91,9 @@ class VesselProrootBootstrapActivity : ComponentActivity() {
         val archiveBytes: Long = 0,
     )
 
-    private data class DeferredLink(
+    private data class DeferredSymlink(
         val path: String,
         val target: String,
-        val hard: Boolean,
     )
 
     private val ui = MutableStateFlow(UiState())
@@ -290,7 +292,7 @@ class VesselProrootBootstrapActivity : ComponentActivity() {
         stagingRootfs.deleteRecursively()
         check(stagingRootfs.mkdirs()) { "Cannot create rootfs staging directory" }
 
-        val deferred = ArrayList<DeferredLink>()
+        val deferred = ArrayList<DeferredSymlink>()
         var entries = 0L
         try {
             val streams = chunks.map { BufferedInputStream(FileInputStream(it), BUFFER_BYTES) }
@@ -313,10 +315,10 @@ class VesselProrootBootstrapActivity : ComponentActivity() {
                                 chmod(target, entry.mode)
                             }
                             entry.isSymbolicLink -> {
-                                deferred += DeferredLink(relative, entry.linkName, hard = false)
+                                deferred += DeferredSymlink(relative, entry.linkName)
                             }
                             entry.isLink -> {
-                                deferred += DeferredLink(relative, safeRelative(entry.linkName), hard = true)
+                                error("Rootfs archive contains unsupported hard link: " + relative)
                             }
                             entry.isFile -> {
                                 val parent = target.parentFile
@@ -356,14 +358,8 @@ class VesselProrootBootstrapActivity : ComponentActivity() {
                 val target = safeTarget(stagingRootfs, link.path)
                 target.parentFile?.mkdirs()
                 target.delete()
-                if (link.hard) {
-                    val source = safeTarget(stagingRootfs, link.target)
-                    check(source.exists()) { "Hard-link target missing: " + link.target }
-                    Os.link(source.absolutePath, target.absolutePath)
-                } else {
-                    check('\u0000' !in link.target) { "Symlink target contains NUL" }
-                    Os.symlink(link.target, target.absolutePath)
-                }
+                check('\u0000' !in link.target) { "Symlink target contains NUL" }
+                Os.symlink(link.target, target.absolutePath)
             }
 
             manifest.requiredPaths.forEach { relative ->
@@ -471,12 +467,27 @@ class VesselProrootBootstrapActivity : ComponentActivity() {
 
     private fun parseManifest(text: String): Manifest {
         val json = JSONObject(text)
-        check(json.getInt("schema") == 2)
-        check(json.getString("runtime") == "proroot")
-        check(json.getString("debian") == "trixie")
-        check(json.getString("arch") == "arm64")
-        check(json.getString("compression") == "zstd")
-        check(json.getString("transport") == "github-release-chunks-v1")
+        val schema = json.getInt("schema")
+        val runtime = json.getString("runtime")
+        val debian = json.getString("debian")
+        val arch = json.getString("arch")
+        val compression = json.getString("compression")
+        val transport = json.getString("transport")
+        val mesaVersion = json.getString("mesaVersion")
+        val desktopRelease = json.getString("desktopRelease")
+        val hardLinksFlattened = json.optBoolean("hardLinksFlattened", false)
+
+        VesselRootfsReleaseContract.incompatibility(
+            schema = schema,
+            runtime = runtime,
+            debian = debian,
+            arch = arch,
+            compression = compression,
+            transport = transport,
+            mesaVersion = mesaVersion,
+            desktopRelease = desktopRelease,
+            hardLinksFlattened = hardLinksFlattened,
+        )?.let { error(it) }
 
         val archiveBytes = json.getLong("archiveBytes")
         check(archiveBytes in 1..MAX_ARCHIVE_BYTES)
@@ -513,6 +524,9 @@ class VesselProrootBootstrapActivity : ComponentActivity() {
             archiveBytes = archiveBytes,
             extractedBytes = json.getLong("extractedBytes").coerceAtLeast(1),
             entryCount = json.getLong("entryCount").coerceAtLeast(1),
+            mesaVersion = mesaVersion,
+            desktopRelease = desktopRelease,
+            hardLinksFlattened = hardLinksFlattened,
             requiredPaths = requiredPaths,
             chunks = chunks,
         )

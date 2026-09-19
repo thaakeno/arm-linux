@@ -29,7 +29,7 @@ class VesselDirectGpuProfileTest {
     }
 
     @Test
-    fun readinessRequiresPinnedMesaMarkerAndRealDriverFiles() {
+    fun readinessUsesVerifiedReleaseCapabilitiesNotDuplicatedMarkerIdentity() {
         val root = Files.createTempDirectory("vessel-gpu-test").toFile()
         fun file(path: String, value: String = "x") {
             val target = File(root, path.removePrefix("/"))
@@ -37,11 +37,9 @@ class VesselDirectGpuProfileTest {
             target.writeText(value)
         }
 
-        file(
-            VesselDirectGpuProfile.MARKER,
-            "version=" + VesselDirectGpuProfile.MESA_VERSION + "\n" +
-                "sha256=" + VesselDirectGpuProfile.ARCHIVE_SHA256 + "\n",
-        )
+        // Build identity is validated by the downloaded rootfs manifest + full
+        // archive SHA before activation. Runtime readiness checks capabilities.
+        file(VesselDirectGpuProfile.MARKER, "verified-rootfs-metadata\n")
         file(VesselDirectGpuProfile.KGSL_DRI)
         file(VesselDirectGpuProfile.TURNIP_LIBRARY)
         file("/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json", "{}")

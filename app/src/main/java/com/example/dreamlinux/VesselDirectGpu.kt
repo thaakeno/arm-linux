@@ -59,14 +59,8 @@ object VesselDirectGpuProfile {
                 "Pinned Mesa " + MESA_VERSION + " is not installed in the rootfs",
             )
         }
-        val markerText = runCatching { marker.readText() }.getOrDefault("")
-        if (!markerText.lineSequence().any { it.trim() == "version=" + MESA_VERSION } ||
-            !markerText.lineSequence().any { it.trim() == "sha256=" + ARCHIVE_SHA256 }
-        ) {
-            return VesselGpuReadiness(
-                false,
-                "Direct-GPU Mesa marker does not match Vessel's pinned build",
-            )
+        if (marker.length() <= 0L) {
+            return VesselGpuReadiness(false, "Direct-GPU Mesa marker is empty")
         }
 
         for (path in listOf(KGSL_DRI, TURNIP_LIBRARY)) {

@@ -56,14 +56,6 @@ object VesselProrootDesktopProfile {
             }
         }
 
-        val marker = runCatching { guestFile(rootfs, MARKER).readText() }.getOrDefault("")
-        if (!marker.lineSequence().any { it.trim() == "release=" + RELEASE } ||
-            !marker.lineSequence().any { it.trim() == "kwin_sha256=" + KWIN_SHA256 } ||
-            !marker.lineSequence().any { it.trim() == "xwayland_sha256=" + XWAYLAND_SHA256 }
-        ) {
-            return VesselDesktopReadiness(false, "Desktop runtime marker does not match Vessel Phase 4")
-        }
-
         return VesselDesktopReadiness(true, "Plasma Wayland · direct KGSL · Vessel native display")
     }
 

@@ -73,6 +73,7 @@ jobs:
         run: |
           set -euxo pipefail
           python3 -m json.tool tools/vessel_proroot/direct_gpu_manifest.json >/dev/null
+          python3 tools/vessel_native/verify_proroot_source_contract.py
           bash -n tools/vessel_proroot/install_direct_gpu_mesa.sh
           grep -F 'MESA_LOADER_DRIVER_OVERRIDE" to "kgsl"' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
           grep -F 'GALLIUM_DRIVER" to "freedreno"' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
@@ -152,6 +153,8 @@ jobs:
           grep -A5 -F 'android:name=".VesselProrootBootstrapActivity"' app/src/main/AndroidManifest.xml | grep -F 'android:exported="true"'
           grep -F 'android.permission.ACCESS_NETWORK_STATE' app/src/main/AndroidManifest.xml
           grep -F 'vessel-proroot-rootfs-v1-edge' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
+          grep -F 'VesselRootfsReleaseContract.incompatibility' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
+          grep -F 'Rootfs archive contains unsupported hard link' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'debian-arm64.staging' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'stagingRootfs.renameTo(live)' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'Rootfs traversal rejected' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
