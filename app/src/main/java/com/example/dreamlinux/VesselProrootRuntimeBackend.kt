@@ -88,7 +88,13 @@ class VesselProrootRuntimeBackend(
         )
     }
 
-    override fun desktopReadiness(verifyIntegrity: Boolean): VesselDesktopReadiness {
+    /**
+     * Gate used by the bootstrap activity to decide whether an existing rootfs
+     * can be kept. This intentionally excludes desktop payloads that the APK can
+     * migrate in place. A compositor/QML version change must never trigger a
+     * 1.4 GiB rootfs replacement.
+     */
+    fun bootstrapReadiness(verifyIntegrity: Boolean): VesselDesktopReadiness {
         if (!layout.prepareHostLayout()) {
             return VesselDesktopReadiness(false, "Vessel cannot prepare its private runtime storage")
         }
@@ -104,15 +110,25 @@ class VesselProrootRuntimeBackend(
         if (!File(layout.rootfsDir, "var/cache/vessel/proroot-production-v1").isFile) {
             return VesselDesktopReadiness(false, "Phase-6 production rootfs marker is missing")
         }
+
+        val gpu = directGpuReadiness()
+        if (!gpu.ready) return VesselDesktopReadiness(false, gpu.reason)
+
+        return VesselProrootDesktopProfile.baseReadiness(layout.rootfsDir)
+    }
+
+    override fun desktopReadiness(verifyIntegrity: Boolean): VesselDesktopReadiness {
+        val base = bootstrapReadiness(verifyIntegrity)
+        if (!base.ready) return base
+
+        // From this point on every failing condition is an in-place runtime
+        // migration/compatibility issue, not a reason to redownload the rootfs.
         if (!prepareRootlessDesktopPolicy()) {
             return VesselDesktopReadiness(false, "Could not prepare rootless Plasma session policy")
         }
         if (!prepareDns()) {
             return VesselDesktopReadiness(false, "Could not prepare Android network DNS for Linux")
         }
-
-        val gpu = directGpuReadiness()
-        if (!gpu.ready) return VesselDesktopReadiness(false, gpu.reason)
 
         val desktop = VesselProrootDesktopProfile.readiness(layout.rootfsDir)
         if (!desktop.ready) return desktop
