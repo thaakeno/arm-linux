@@ -53,6 +53,7 @@ jobs:
           assert x['debian'] == 'trixie'
           assert x['arch'] == 'arm64'
           assert x['compression'] == 'zstd'
+          assert x['hardLinksFlattened'] is True
           assert x['archiveBytes'] == os.path.getsize(archive)
           h=hashlib.sha256()
           with open(archive,'rb') as f:
@@ -62,6 +63,16 @@ jobs:
           assert x['entryCount'] > 1000
           assert x['extractedBytes'] > 0
           PY
+
+          # Android app sandboxes cannot recreate Linux hard links. Consume the
+          # entire verbose listing and fail if GNU tar reports an 'h' entry.
+          if tar --use-compress-program=unzstd -tvf "$ARCHIVE" | awk '
+            substr($1, 1, 1) == "h" { found=1 }
+            END { exit(found ? 0 : 1) }
+          '; then
+            echo "rootfs archive still contains hard-link entries" >&2
+            exit 1
+          fi
 
       - name: Publish chunked rootfs atomically
         env:

@@ -70,7 +70,10 @@ sudo rm -rf "$ROOTFS/dev" "$ROOTFS/proc" "$ROOTFS/sys" "$ROOTFS/run"
 sudo install -d -m0755 "$ROOTFS/dev" "$ROOTFS/proc" "$ROOTFS/sys" "$ROOTFS/run"
 
 # Tar paths are relative and deterministic enough for integrity verification.
-sudo tar   --numeric-owner   --xattrs   --acls   --sort=name   --mtime='UTC 2026-01-01'   -C "$ROOTFS"   -cf - .   | zstd -T0 -10 --no-progress -f -o "$ARCHIVE"
+# Android SELinux denies hard-link creation to ordinary app domains. Store
+# every multiply-linked inode as an ordinary file in the archive so extraction
+# never needs link(2). Symlinks remain symlinks.
+sudo tar   --hard-dereference   --numeric-owner   --xattrs   --acls   --sort=name   --mtime='UTC 2026-01-01'   -C "$ROOTFS"   -cf - .   | zstd -T0 -10 --no-progress -f -o "$ARCHIVE"
 
 ARCHIVE_SHA="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
 ARCHIVE_BYTES="$(stat -c '%s' "$ARCHIVE")"
@@ -87,6 +90,7 @@ data={
   "debian": "trixie",
   "arch": "arm64",
   "compression": "zstd",
+  "hardLinksFlattened": True,
   "archiveSha256": "$ARCHIVE_SHA",
   "archiveBytes": int("$ARCHIVE_BYTES"),
   "extractedBytes": int("$EXTRACTED_BYTES"),
