@@ -15,10 +15,11 @@ import kotlin.math.max
 /**
  * Android side of the compositor-level proroot display contract.
  *
- * API 36+ is true zero-copy: KWin renders into Vessel AHardwareBuffers and the
- * exact buffer + native render fence goes directly to SurfaceFlinger through
- * ASurfaceControl. Android 30-35 retains the Phase-4 GPU-blit presenter as a
- * compatibility fallback. Neither path reads pixels on the CPU.
+ * Production proroot uses one presentation path only: KWin renders into Vessel
+ * AHardwareBuffers and the exact buffer + native render fence goes directly to
+ * SurfaceFlinger through ASurfaceControl. There is no secondary viewer or GPU-blit
+ * fallback. If the required public SurfaceControl/AHardwareBuffer path is not
+ * available, startup fails explicitly instead of silently changing architecture.
  */
 object VesselProrootDisplayBridge {
     init { System.loadLibrary("vessel_wayland_presenter") }
@@ -123,7 +124,8 @@ object VesselProrootDisplayBridge {
 
         zeroCopy = nativeZeroCopyAvailable()
         if (!zeroCopy) {
-            VesselWaylandPresenter.configureSurfaceOnly(this.width, this.height)
+            runCatching { nativeStop() }
+            return@synchronized false
         }
 
         appContext = context.applicationContext
@@ -163,9 +165,6 @@ object VesselProrootDisplayBridge {
             if (zeroCopy) runCatching { nativeDetachSurface() }
             runCatching { nativeStop() }
         }
-        if (!zeroCopy) {
-            VesselWaylandPresenter.shutdownSurfaceOnly()
-        }
         started = false
         zeroCopy = false
     }
@@ -179,9 +178,6 @@ object VesselProrootDisplayBridge {
         lastInteractionUptimeMs = SystemClock.uptimeMillis()
         pointerX = pointerX.coerceIn(0f, this.width.toFloat())
         pointerY = pointerY.coerceIn(0f, this.height.toFloat())
-        if (!zeroCopy) {
-            VesselWaylandPresenter.configureSurfaceOnly(this.width, this.height)
-        }
         nativeConfigure(this.width, this.height, effectiveRefreshHz)
         scheduleIdleLocked()
     }
@@ -191,16 +187,8 @@ object VesselProrootDisplayBridge {
         val attached = nativeAttachSurface(surface)
         if (attached) {
             noteInteractiveLocked()
-            return@synchronized true
         }
-
-        // Native can downgrade this run if the public SurfaceControl path exists
-        // but this concrete Surface/AHB combination cannot host it.
-        zeroCopy = nativeZeroCopyAvailable()
-        if (!zeroCopy) {
-            VesselWaylandPresenter.configureSurfaceOnly(width, height)
-        }
-        false
+        attached
     }
 
     fun detachSurface(): Boolean = synchronized(lock) {
@@ -209,13 +197,12 @@ object VesselProrootDisplayBridge {
         true
     }
 
+    fun isActive(): Boolean = started
+
     fun usesZeroCopyPresentation(): Boolean = started && zeroCopy
 
-    fun presentationPath(): String = when {
-        !started -> "stopped"
-        zeroCopy -> "SurfaceControl/AHardwareBuffer zero-copy"
-        else -> "EGL AHardwareBuffer GPU-blit fallback"
-    }
+    fun presentationPath(): String =
+        if (started && zeroCopy) "SurfaceControl/AHardwareBuffer zero-copy" else "stopped"
 
     fun effectiveRefresh(): Float =
         if (!started) 0f else runCatching { nativeEffectiveRefresh() }.getOrDefault(effectiveRefreshHz)
@@ -254,9 +241,6 @@ object VesselProrootDisplayBridge {
         if (abs(target - effectiveRefreshHz) < 0.1f) return
         effectiveRefreshHz = target
         nativeSetEffectiveRefresh(target)
-        if (!zeroCopy) {
-            LinuxDesktopView.active?.setProrootFallbackFrameRate(target)
-        }
     }
 
     fun absoluteNormalized(x: Float, y: Float, down: Boolean): Boolean {
