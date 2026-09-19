@@ -271,7 +271,17 @@ jobs:
           git config user.email "actions@github.com"
           git config user.name "Vessel CI"
           python3 "$GITHUB_WORKSPACE/tools/vessel_proroot/patch_xwayland_android.py" "$PWD"
-          git add os/utils.c os/osinit.c Xext/xf86bigfont.c
+
+          # Keep Debian's 3.0 (quilt) source package clean: turn the Vessel
+          # Android compatibility delta into the final quilt patch instead of
+          # leaving unexpected upstream modifications for dpkg-source.
+          PATCH=debian/patches/0005-vessel-android-seccomp.patch
+          git diff -- os/utils.c os/osinit.c Xext/xf86bigfont.c > "$PATCH"
+          test -s "$PATCH"
+          grep -Fqx '0005-vessel-android-seccomp.patch' debian/patches/series || \
+            printf '%s\n' '0005-vessel-android-seccomp.patch' >> debian/patches/series
+          git checkout -- os/utils.c os/osinit.c Xext/xf86bigfont.c
+          git add "$PATCH" debian/patches/series
           git commit -m "vessel: make Xwayland safe under Android app seccomp"
           origtargz
           gbp buildpackage -uc -us -jauto --git-ignore-branch
