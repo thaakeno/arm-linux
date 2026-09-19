@@ -26,7 +26,7 @@ export UCF_FORCE_CONFFOLD=1
 export NEEDRESTART_MODE=a
 
 apt-get update
-apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y   bash ca-certificates curl git locales sudo   dbus dbus-x11 python3 python3-dbus python3-gi   kde-plasma-desktop plasma-workspace plasma-desktop kwin-wayland   xwayland qt6-wayland wayland-utils systemsettings   libinput-tools mesa-utils   breeze breeze-icon-theme hicolor-icon-theme   desktop-file-utils xdg-user-dirs shared-mime-info menu   appstream packagekit packagekit-tools polkitd pkexec plasma-discover   pulseaudio pulseaudio-utils alsa-utils   fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation   firefox-esr konsole dolphin ark kcalc okular gwenview kate
+apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y   bash ca-certificates curl git locales sudo   dbus dbus-x11 python3 python3-dbus python3-gi   kde-plasma-desktop plasma-workspace plasma-desktop plasma-desktoptheme kwin-wayland   xwayland qt6-wayland wayland-utils systemsettings   libinput-tools mesa-utils   breeze breeze-icon-theme hicolor-icon-theme   desktop-file-utils xdg-user-dirs shared-mime-info menu   appstream packagekit packagekit-tools polkitd pkexec plasma-discover   xdg-desktop-portal xdg-desktop-portal-kde   pulseaudio pulseaudio-utils alsa-utils   fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation   firefox-esr konsole dolphin ark kcalc okular gwenview kate
 
 dpkg --configure -a
 id -u vessel >/dev/null 2>&1 || useradd -m -s /bin/bash vessel
@@ -44,6 +44,33 @@ POLKIT
 chmod 0644 /etc/polkit-1/rules.d/49-vessel-packagekit.rules
 
 # Runtime owns the user/session lifecycle; systemd is not used as PID 1.
+install -d -m0755 /etc/xdg
+cat >/etc/xdg/startkderc <<'STARTKDE'
+[General]
+systemdBoot=false
+STARTKDE
+
+# Android's app sandbox does not provide a user systemd manager or /dev/fuse.
+# Do not leave D-Bus activation entries that can only spawn doomed services.
+for service in \
+  /usr/share/dbus-1/services/org.freedesktop.systemd1.service \
+  /usr/share/dbus-1/services/org.freedesktop.portal.Documents.service
+do
+  if [ -f "$service" ]; then mv "$service" "$service.vessel-disabled"; fi
+done
+
+install -d -m0700 -o vessel -g vessel /home/vessel/.config/xdg-desktop-portal
+cat >/home/vessel/.config/xdg-desktop-portal/portals.conf <<'PORTALS'
+[preferred]
+default=kde
+org.freedesktop.impl.portal.ScreenCast=none
+org.freedesktop.impl.portal.RemoteDesktop=none
+org.freedesktop.impl.portal.Lockdown=none
+PORTALS
+chown vessel:vessel /home/vessel/.config/xdg-desktop-portal/portals.conf
+chmod 0600 /home/vessel/.config/xdg-desktop-portal/portals.conf
+
+test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir
 
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /tmp/* /var/tmp/*
