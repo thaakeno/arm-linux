@@ -9,11 +9,11 @@ data class VesselDesktopReadiness(
 )
 
 object VesselProrootDesktopProfile {
-    const val RELEASE = "5.13.3"
+    const val RELEASE = "vessel-direct-6.3.6-96"
     const val KWIN_ARCHIVE =
-        "kwin_anland-5.13-debian-4_6.3.6-95.zip"
+        "kwin_vessel-direct_6.3.6-96_arm64.zip"
     const val KWIN_SHA256 =
-        "56ce1da27b640c977bad5ca0b7b13196e609b5fc419703429e51805ec05e4ee4"
+        "8cd81fc9d6d063be92dd9b874413ee2c64a6d536c4066630469455d2324e53a9"
     const val XWAYLAND_ARCHIVE =
         "xwayland_24.1.6-91_arm64.deb"
     const val XWAYLAND_SHA256 =
