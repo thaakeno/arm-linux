@@ -192,10 +192,23 @@ class VesselProrootRuntimeBackend(
             runCatching { Os.chmod(startKdeRc.absolutePath, 0x1A4) } // 0644
         }
 
-        val wrapper = """
-            #!/bin/bash
-            set -euo pipefail
-            : "${'
+        val wrapper = listOf(
+            "#!/bin/bash",
+            "set -euo pipefail",
+            ": \"\${VESSEL_DISPLAY_SOCKET:?VESSEL_DISPLAY_SOCKET is required}\"",
+            "export ANLAND=1",
+            "export ANLAND_SOCKET=\"\$VESSEL_DISPLAY_SOCKET\"",
+            "export ANLAND_NO_DRM_DEVICE=1",
+            "export EGL_PLATFORM=surfaceless",
+            "args=()",
+            "for arg in \"\$@\"; do",
+            "  if [[ \"\${VESSEL_DISABLE_XWAYLAND:-0}\" == \"1\" && \"\$arg\" == \"--xwayland\" ]]; then",
+            "    continue",
+            "  fi",
+            "  args+=(\"\$arg\")",
+            "done",
+            "exec /usr/bin/kwin_wayland \"\${args[@]}\"",
+        ).joinToString("\\n", postfix = "\\n")
         listOf(
             "usr/local/lib/vessel/kwin-wrapper/kwin_wayland",
             "usr/local/lib/vessel/kwin-wrapper/kwin_wayland_wrapper",
