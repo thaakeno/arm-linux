@@ -108,6 +108,24 @@ class VmSessionService : Service() {
         val diagnostics = MutableStateFlow("No diagnostics collected yet.")
         @Volatile var active: VmSessionService? = null
 
+        val PROROOT_DIAGNOSTIC_LOGS = listOf(
+            "startup-journal.log",
+            "desktop.log",
+            "plasma-watch.log",
+            "proroot.log",
+            "proroot-smoke.log",
+            "proc-self-exe.log",
+            "system-dbus.log",
+            "system-dbus-probe.log",
+            "compat-probe.log",
+            "compat-kernel-probe.log",
+            "compat-session-dbus.log",
+            "plasma-qml-tmp-preflight.log",
+            "plasma-qml-repair.log",
+            "plasma-qml-ksvg-ldd.log",
+            "guest-command.log",
+        )
+
         private val PACKAGE_RE = Regex("[a-z0-9][a-z0-9+.-]{0,127}")
         private val DEFAULT_APPS = linkedMapOf(
             "firefox-esr" to "Firefox",
@@ -472,11 +490,21 @@ class VmSessionService : Service() {
                 if (op != operationGeneration) return@launch
                 ensureDesktopProfile(op)
                 if (op != operationGeneration) return@launch
-                applyState(runtime.status())
+                val finalStatus = runtime.status()
+                applyState(finalStatus)
+                val desktopReady = finalStatus.optBoolean("desktopReady")
                 state.value = state.value.copy(
-                    progressPercent = 100,
-                    progressDetail = "Vessel workstation ready",
-                    message = "Vessel workstation ready",
+                    progressPercent = if (desktopReady) 100 else 99,
+                    progressDetail = if (desktopReady) {
+                        "Vessel workstation ready"
+                    } else {
+                        "Native desktop is running; Plasma shell registration is still starting"
+                    },
+                    message = if (desktopReady) {
+                        "Vessel workstation ready"
+                    } else {
+                        "Linux is running; waiting for Plasma shell readiness"
+                    },
                     lastError = "",
                 )
                 if (controlReady()) {
@@ -587,34 +615,55 @@ class VmSessionService : Service() {
             state.value = state.value.copy(
                 stage = "desktop_profile",
                 progressPercent = 99,
-                progressDetail = "Validating live Plasma shell and QML",
+                progressDetail = "Confirming same-session Plasma D-Bus readiness",
                 message = "Finishing desktop validation",
             )
-            val live = runtime.guest(
-                "for i in $(seq 1 100); do " +
-                    "pgrep -x kwin_wayland >/dev/null && " +
-                    "pgrep -x plasmashell >/dev/null && exit 0; " +
-                    "sleep .1; done; exit 1",
-                15,
-            )
-            check(live.optBoolean("ok")) {
-                "Plasma shell did not become live: " + live.optString("output").takeLast(3000)
+
+            // Production proroot never starts a second helper and never relies
+            // on pgrep/procfs to discover desktop processes. The Plasma launcher
+            // owns the D-Bus session and publishes org.kde.plasmashell readiness
+            // through the host-visible /run bind.
+            val deadline = android.os.SystemClock.elapsedRealtime() + 5_000L
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                if (op != operationGeneration) return
+                val current = runtime.status()
+                if (!current.optBoolean("running")) {
+                    throw IllegalStateException(
+                        "Proroot Plasma session exited before desktop readiness: " +
+                            current.optString("lastError").ifBlank {
+                                current.optString("logTail").takeLast(4000)
+                            },
+                    )
+                }
+                if (current.optBoolean("desktopReady") &&
+                    current.optBoolean("plasmaDbusReady")
+                ) {
+                    state.value = state.value.copy(
+                        progressPercent = 100,
+                        progressDetail = "Plasma D-Bus shell is live",
+                        message = "Vessel workstation ready",
+                    )
+                    return
+                }
+                delay(100)
             }
 
+            // A readiness observation timeout is not a runtime failure. If KWin
+            // is still alive and the native path has already rendered, keep the
+            // Linux session running. Normal status polling will promote it the
+            // moment the same-session D-Bus marker appears.
             val current = runtime.status()
-            check(current.optBoolean("desktopReady")) {
-                "Proroot Plasma session did not remain ready"
+            if (!current.optBoolean("running")) {
+                throw IllegalStateException(
+                    "Proroot Plasma session exited while waiting for D-Bus readiness",
+                )
             }
-            val tail = current.optString("logTail")
-            val fatalQml = Regex(
-                """(?i)(module\s+["'][^"']+["']\s+is not installed|""" +
-                    """KSvg\.SvgItem\s+is not a type|""" +
-                    """Type\s+[^\n]+\s+unavailable|""" +
-                    """Failed to load overview:)""",
+            state.value = state.value.copy(
+                progressPercent = 99,
+                progressDetail = "Native desktop is live; Plasma D-Bus registration is still starting",
+                message = "Linux is running; inspect plasma-watch.log if the shell stays unavailable",
+                lastError = "",
             )
-            check(!fatalQml.containsMatchIn(tail)) {
-                "Plasma QML failed after startup:\n" + tail.takeLast(6000)
-            }
             return
         }
         state.value = state.value.copy(
@@ -879,21 +928,39 @@ class VmSessionService : Service() {
                     available = result.optBoolean("ok")
                     check(available) { "Could not install kinfocenter: ${result.optString("output").takeLast(1600)}" }
                 }
-                val launched = runtime.guest(
+                val launchCommand = if (runtime.kind == VesselRuntimeKind.PROROOT) {
+                    """
+                    set -e
+                    uid=${'$'}(id -u vessel)
+                    xdg=/run/user/${'$'}uid
+                    busfile="${'$'}xdg/vessel/session-bus-address"
+                    test -s "${'$'}busfile"
+                    bus=${'$'}(cat "${'$'}busfile")
+                    way=''
+                    for candidate in "${'$'}xdg"/wayland-*; do
+                      [ -S "${'$'}candidate" ] || continue
+                      way=${'$'}(basename "${'$'}candidate")
+                      break
+                    done
+                    test -n "${'$'}way"; test -n "${'$'}bus"
+                    su -l vessel -c "XDG_RUNTIME_DIR='${'$'}xdg' WAYLAND_DISPLAY='${'$'}way' DBUS_SESSION_BUS_ADDRESS='${'$'}bus' QT_QPA_PLATFORM=wayland XCURSOR_THEME=Breeze XCURSOR_SIZE=18 setsid -f kinfocenter >/tmp/vessel-kinfocenter.log 2>&1"
+                    echo VESSEL_KINFOCENTER_STARTED
+                    """.trimIndent()
+                } else {
                     """
                     set -e
                     pid=${'$'}(pgrep -u vessel -x plasmashell | head -1)
                     test -n "${'$'}pid"
                     envfile=/proc/${'$'}pid/environ
-                    xdg=${'$'}(tr '\000' '\n' <"${'$'}envfile" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -1)
-                    way=${'$'}(tr '\000' '\n' <"${'$'}envfile" | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)
-                    bus=${'$'}(tr '\000' '\n' <"${'$'}envfile" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
+                    xdg=${'$'}(tr '\\000' '\\n' <"${'$'}envfile" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -1)
+                    way=${'$'}(tr '\\000' '\\n' <"${'$'}envfile" | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)
+                    bus=${'$'}(tr '\\000' '\\n' <"${'$'}envfile" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
                     test -n "${'$'}xdg"; test -n "${'$'}way"; test -n "${'$'}bus"
                     su -l vessel -c "XDG_RUNTIME_DIR='${'$'}xdg' WAYLAND_DISPLAY='${'$'}way' DBUS_SESSION_BUS_ADDRESS='${'$'}bus' QT_QPA_PLATFORM=wayland XCURSOR_THEME=Breeze XCURSOR_SIZE=18 setsid -f kinfocenter >/tmp/vessel-kinfocenter.log 2>&1"
                     echo VESSEL_KINFOCENTER_STARTED
-                    """.trimIndent(),
-                    30,
-                )
+                    """.trimIndent()
+                }
+                val launched = runtime.guest(launchCommand, 30)
                 check(launched.optBoolean("ok")) { "KInfoCenter launch failed: ${launched.optString("output").takeLast(1600)}" }
                 state.value = state.value.copy(message = "KDE Info Center opened")
             } catch (t: Throwable) {
@@ -1027,6 +1094,17 @@ class VmSessionService : Service() {
                 )
                 appendLine("audio=${VesselAudioBridge.status()}")
                 appendLine("presenter=$activePresenter")
+                if (proroot) {
+                    appendLine("framesPresented=${VesselProrootDisplayBridge.framesPresented()} framesReleased=${VesselProrootDisplayBridge.framesReleased()}")
+                    appendLine("zeroCopy=${VesselProrootDisplayBridge.usesZeroCopyPresentation()} presentationPath=${VesselProrootDisplayBridge.presentationPath()}")
+                    val plasmaReady = File(
+                        filesDir,
+                        "vessel-proroot/volatile/run/user/" +
+                            android.os.Process.myUid() +
+                            "/vessel/plasma-ready",
+                    )
+                    appendLine("plasmaDbusReady=${plasmaReady.isFile}")
+                }
                 appendLine("vcpus=${runtime.processorCount} guestRamMiB=${runtime.guestMemoryMb}")
             }
 
@@ -1052,33 +1130,17 @@ class VmSessionService : Service() {
 
             val persisted = if (proroot) {
                 val dir = File(filesDir, "vessel-proroot/diagnostics")
-                val names = listOf(
-                    "startup-journal.log",
-                    "proroot.log",
-                    "proroot-smoke.log",
-                    "proc-self-exe.log",
-                    "system-dbus.log",
-                    "system-dbus-probe.log",
-                    "compat-probe.log",
-                    "compat-kernel-probe.log",
-                    "compat-session-dbus.log",
-                    "plasma-qml-tmp-preflight.log",
-                    "plasma-qml-repair.log",
-                    "plasma-qml-ksvg-ldd.log",
-                    "plasma-live-probe.log",
-                    "desktop.log",
-                    "guest-command.log",
-                )
                 buildString {
-                    appendLine("=== PROROOT PERSISTED LOGS ===")
-                    names.forEach { name ->
-                        val file = File(dir, name)
-                        if (!file.isFile) return@forEach
+                    appendLine("=== PROROOT LOG SUMMARY ===")
+                    PROROOT_DIAGNOSTIC_LOGS.forEach { name ->
+                        val text = readDiagnosticLog(name)
+                        if (text.isBlank() || text.startsWith("[missing]")) return@forEach
                         appendLine("--- " + name + " ---")
-                        val text = runCatching { file.readText() }
-                            .getOrElse { "[read failed: " + (it.message ?: it.javaClass.simpleName) + "]" }
-                        appendLine(text.takeLast(18_000))
+                        val limit = if (name == "guest-command.log") 8_000 else 48_000
+                        appendLine(text.takeLast(limit))
                     }
+                    appendLine()
+                    appendLine("Use Full runtime logs below to inspect/copy an entire individual log without truncation.")
                 }
             } else {
                 ""
@@ -1090,8 +1152,26 @@ class VmSessionService : Service() {
                     persisted + "\n" +
                     "=== RUNTIME STATE TAIL ===\n" +
                     state.value.console.takeLast(18_000)
-                ).takeLast(120_000)
+                ).takeLast(512_000)
         }
+    }
+
+    fun readDiagnosticLog(name: String): String {
+        if (runtime.kind != VesselRuntimeKind.PROROOT) return "[not available for UML]"
+        if (name !in PROROOT_DIAGNOSTIC_LOGS) return "[unknown log: $name]"
+        val file = if (name == "plasma-watch.log") {
+            File(
+                filesDir,
+                "vessel-proroot/volatile/run/user/" +
+                    android.os.Process.myUid() +
+                    "/vessel/plasma-watch.log",
+            )
+        } else {
+            File(filesDir, "vessel-proroot/diagnostics/" + name)
+        }
+        if (!file.isFile) return "[missing] " + file.absolutePath
+        return runCatching { file.readText() }
+            .getOrElse { "[read failed: " + (it.message ?: it.javaClass.simpleName) + "]" }
     }
 
     private fun hostDiskStats(): Triple<Long, Long, Long> {

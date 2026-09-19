@@ -755,6 +755,11 @@ class VesselBootstrapActivityV2 : ComponentActivity() {
 
     private fun openVessel() {
         if (isFinishing || isDestroyed) return
+        if (intent.getBooleanExtra("vessel.selectUmlAfterInstall", false)) {
+            // Explicit user-requested recovery install/switch only. This is not
+            // an automatic runtime fallback after a proroot failure.
+            VesselExperimentConfig.setRuntimeBackend(this, VesselRuntimeFactory.RECOVERY_BACKEND_ID)
+        }
         startActivity(Intent(this, VesselActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
         finish()
     }
