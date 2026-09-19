@@ -7,6 +7,11 @@ on:
     paths:
       - 'tools/vessel_proroot/**'
       - '.github/workflows/vessel-proroot-rootfs.yml'
+  pull_request:
+    branches: [ arch/vessel-self-contained ]
+    paths:
+      - 'tools/vessel_proroot/**'
+      - '.github/workflows/vessel-proroot-rootfs.yml'
 
 concurrency:
   group: vessel-proroot-rootfs-v1-${{ github.ref }}
@@ -75,6 +80,7 @@ jobs:
           fi
 
       - name: Publish chunked rootfs atomically
+        if: ${{ github.event_name != 'pull_request' }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_PROMPT_DISABLED: '1'
