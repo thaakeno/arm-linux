@@ -522,17 +522,20 @@ class VesselProrootRuntimeBackend(
                     )
                 }
                 bridge = VesselProrootDisplayBridge.status()
-                if (VesselProrootDisplayBridge.displayHealthy()) break
+                if (VesselProrootDisplayBridge.producerReady()) break
                 Thread.sleep(50)
             }
-            check(VesselProrootDisplayBridge.displayHealthy()) {
-                "KWin did not reach a healthy native presentation path: " + bridge +
+            check(VesselProrootDisplayBridge.producerReady()) {
+                "KWin did not finish the native display handshake: " + bridge +
                     " producer=" + VesselProrootDisplayBridge.producerConnected() +
                     " surface=" + VesselProrootDisplayBridge.surfaceAttached() +
                     " disconnect=" + VesselProrootDisplayBridge.disconnectReason()
             }
 
-            desktopReady = true
+            // Starting Linux from the Machine page is valid even before an
+            // Android Surface exists. Visibility becomes true dynamically after
+            // Display attaches and the first frame is committed.
+            desktopReady = VesselProrootDisplayBridge.displayHealthy()
             startupJournal.mark("desktop.ready", bridge)
             progress(
                 "proroot_ready",
