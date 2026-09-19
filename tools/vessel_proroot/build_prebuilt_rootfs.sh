@@ -26,7 +26,7 @@ export UCF_FORCE_CONFFOLD=1
 export NEEDRESTART_MODE=a
 
 apt-get update
-apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y   bash ca-certificates curl git locales sudo   dbus dbus-x11 python3 python3-dbus python3-gi   kde-plasma-desktop plasma-workspace plasma-desktop kwin-wayland   xwayland qt6-wayland wayland-utils systemsettings   libinput-tools mesa-utils   breeze breeze-icon-theme hicolor-icon-theme   desktop-file-utils xdg-user-dirs shared-mime-info menu   appstream packagekit packagekit-tools polkitd pkexec plasma-discover   pulseaudio pulseaudio-utils alsa-utils   fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation   firefox-esr konsole dolphin ark kcalc okular gwenview kate
+apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y   bash ca-certificates curl git locales sudo   dbus dbus-x11 python3 python3-dbus python3-gi   kde-plasma-desktop plasma-workspace plasma-desktop kwin-wayland   xwayland qt6-wayland wayland-utils systemsettings   libinput-tools mesa-utils   breeze breeze-icon-theme hicolor-icon-theme plasma-desktoptheme   desktop-file-utils xdg-user-dirs shared-mime-info menu   appstream packagekit packagekit-tools polkitd pkexec plasma-discover   pulseaudio pulseaudio-utils alsa-utils pipewire wireplumber   fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation   firefox-esr konsole dolphin ark kcalc okular gwenview kate
 
 dpkg --configure -a
 id -u vessel >/dev/null 2>&1 || useradd -m -s /bin/bash vessel
@@ -43,7 +43,19 @@ polkit.addRule(function(action, subject) {
 POLKIT
 chmod 0644 /etc/polkit-1/rules.d/49-vessel-packagekit.rules
 
-# Runtime owns the user/session lifecycle; systemd is not used as PID 1.
+# Runtime owns the user/session lifecycle; systemd is not used as PID 1 and
+# there is no systemd --user manager in the Android app sandbox.
+install -d -m0755 /etc/xdg
+cat >/etc/xdg/startkderc <<'EOF'
+[General]
+systemdBoot=false
+EOF
+
+# xdg-document-portal requires a usable /dev/fuse mount. Ordinary Android app
+# domains cannot provide that, so do not advertise an activatable service that
+# can only spin/fail during Plasma startup. Native Linux apps keep normal KDE
+# file dialogs; Vessel can add an Android file bridge separately.
+rm -f /usr/share/dbus-1/services/org.freedesktop.portal.Documents.service
 
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /tmp/* /var/tmp/*
@@ -58,9 +70,13 @@ sudo test -s "$ROOTFS/usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so"
 sudo test -s "$ROOTFS/usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so"
 sudo test -s "$ROOTFS/usr/local/libexec/vessel-start-plasma"
 sudo test -s "$ROOTFS/usr/local/libexec/vessel-compat-probe"
+sudo test -x "$ROOTFS/usr/bin/pipewire"
+sudo test -x "$ROOTFS/usr/bin/wireplumber"
+sudo test -s "$ROOTFS/usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir"
 sudo test -s "$ROOTFS/usr/lib/vessel/direct-gpu/mesa.env"
 sudo test -s "$ROOTFS/usr/lib/vessel/desktop/session.env"
 sudo touch "$ROOTFS/var/cache/vessel/proroot-production-v1"
+sudo touch "$ROOTFS/var/cache/vessel/proroot-session-v2"
 
 sudo rm -f "$ROOTFS/etc/resolv.conf"
 sudo ln -s /run/resolv.conf "$ROOTFS/etc/resolv.conf" || true
@@ -105,7 +121,11 @@ data={
     "usr/local/libexec/vessel-compat-probe",
     "usr/lib/vessel/direct-gpu/mesa.env",
     "usr/lib/vessel/desktop/session.env",
-    "var/cache/vessel/proroot-production-v1"
+    "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir",
+    "usr/bin/pipewire",
+    "usr/bin/wireplumber",
+    "var/cache/vessel/proroot-production-v1",
+    "var/cache/vessel/proroot-session-v2"
   ]
 }
 with open(out,"w",encoding="utf-8") as f:

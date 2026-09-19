@@ -28,7 +28,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v9"
+        const val REVISION = "proroot-production-v10"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -275,9 +275,14 @@ class VesselProrootRuntimeBackend(
     }
 
     override fun configureDisplay(width: Int, height: Int, dpi: Int, refresh: Float) {
-        displayWidth = width.coerceIn(640, 3840)
-        displayHeight = height.coerceIn(480, 2160)
-        displayDpi = dpi.coerceIn(72, 480)
+        // Anland negotiates monitor geometry during the producer handshake.
+        // Android SurfaceView geometry is presentation geometry, not a request
+        // to renegotiate the live Linux output.
+        if (!VesselProrootDisplayBridge.producerConnected()) {
+            displayWidth = width.coerceIn(640, 3840)
+            displayHeight = height.coerceIn(480, 2160)
+            displayDpi = dpi.coerceIn(72, 480)
+        }
         displayRefresh = refresh.coerceIn(30f, 240f)
         if (running) {
             VesselProrootDisplayBridge.configure(displayWidth, displayHeight, displayRefresh)
@@ -317,6 +322,15 @@ class VesselProrootRuntimeBackend(
         }
         val presenter = VesselWaylandPresenter.status()
         val bridge = VesselProrootDisplayBridge.status()
+        val producerConnected = VesselProrootDisplayBridge.producerConnected()
+        val producerGeneration = VesselProrootDisplayBridge.producerGeneration()
+        val surfaceAttached = VesselProrootDisplayBridge.surfaceAttached()
+        val framesPresented = VesselProrootDisplayBridge.framesPresented()
+        val framesReleased = VesselProrootDisplayBridge.framesReleased()
+        val displayHealthy =
+            running && process?.isAlive() == true && VesselProrootDisplayBridge.displayHealthy()
+        desktopReady = displayHealthy
+        val displayState = VesselProrootDisplayBridge.displayState()
         baseState(storage)
             .put("rootfsReady", layout.rootfsReady())
             .put("runtimeAssetsReady", hostAssetsReady())
@@ -339,8 +353,15 @@ class VesselProrootRuntimeBackend(
             .put("presentationPath", VesselProrootDisplayBridge.presentationPath())
             .put("zeroCopyPresentation", VesselProrootDisplayBridge.usesZeroCopyPresentation())
             .put("effectiveRefreshHz", VesselProrootDisplayBridge.effectiveRefresh().toDouble())
-            .put("framesPresented", VesselProrootDisplayBridge.framesPresented())
-            .put("framesReleased", VesselProrootDisplayBridge.framesReleased())
+            .put("framesPresented", framesPresented)
+            .put("framesReleased", framesReleased)
+            .put("producerConnected", producerConnected)
+            .put("producerGeneration", producerGeneration)
+            .put("producerDisconnectReason", VesselProrootDisplayBridge.disconnectReason())
+            .put("surfaceAttached", surfaceAttached)
+            .put("lastFramePresentedMs", VesselProrootDisplayBridge.lastFramePresentedMs())
+            .put("displayState", displayState)
+            .put("displayHealthy", displayHealthy)
             .put("audioTransport", VesselAudioBridge.status())
             .put("logTail", process?.outputTail().orEmpty())
     }
@@ -501,14 +522,20 @@ class VesselProrootRuntimeBackend(
                     )
                 }
                 bridge = VesselProrootDisplayBridge.status()
-                if (bridge.startsWith("presenting-proroot-")) break
+                if (VesselProrootDisplayBridge.producerReady()) break
                 Thread.sleep(50)
             }
-            check(bridge.startsWith("presenting-proroot-")) {
-                "KWin did not reach Vessel's native presentation path: " + bridge
+            check(VesselProrootDisplayBridge.producerReady()) {
+                "KWin did not finish the native display handshake: " + bridge +
+                    " producer=" + VesselProrootDisplayBridge.producerConnected() +
+                    " surface=" + VesselProrootDisplayBridge.surfaceAttached() +
+                    " disconnect=" + VesselProrootDisplayBridge.disconnectReason()
             }
 
-            desktopReady = true
+            // Starting Linux from the Machine page is valid even before an
+            // Android Surface exists. Visibility becomes true dynamically after
+            // Display attaches and the first frame is committed.
+            desktopReady = VesselProrootDisplayBridge.displayHealthy()
             startupJournal.mark("desktop.ready", bridge)
             progress(
                 "proroot_ready",
@@ -694,8 +721,9 @@ class VesselProrootRuntimeBackend(
     private fun baseState(ok: Boolean): JSONObject {
         val presenter = VesselWaylandPresenter.status()
         val bridge = VesselProrootDisplayBridge.status()
+        val prorootFrameReady = VesselProrootDisplayBridge.displayHealthy()
         val frameReady =
-            bridge.startsWith("presenting-proroot-") ||
+            prorootFrameReady ||
                 presenter.startsWith("presenting-native-surface") ||
                 presenter.startsWith("presenting-retained")
         return JSONObject()
@@ -710,9 +738,13 @@ class VesselProrootRuntimeBackend(
             .put("softwareFallback", false)
             .put("running", running)
             .put("guestReady", hostAssetsReady() && layout.rootfsReady())
-            .put("desktopReady", desktopReady)
+            .put("desktopReady", desktopReady && prorootFrameReady)
             .put("frameContentValidated", frameReady)
-            .put("inputConnected", bridge.startsWith("presenting-proroot-"))
+            .put(
+                "inputConnected",
+                VesselProrootDisplayBridge.producerConnected() &&
+                    VesselProrootDisplayBridge.framesPresented() > 0L,
+            )
             .put("machineDir", machineDir.absolutePath)
             .put("guestMemoryMb", 0)
             .put("processorCount", processorCount)

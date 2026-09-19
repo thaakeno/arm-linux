@@ -37,6 +37,11 @@ object VesselProrootDisplayBridge {
     private external fun nativeSetEffectiveRefresh(refresh: Float)
     private external fun nativeFramesPresented(): Long
     private external fun nativeFramesReleased(): Long
+    private external fun nativeProducerConnected(): Boolean
+    private external fun nativeProducerGeneration(): Long
+    private external fun nativeSurfaceAttached(): Boolean
+    private external fun nativeLastFramePresentedMs(): Long
+    private external fun nativeDisconnectReason(): String
     private external fun nativeEffectiveRefresh(): Float
     private external fun nativeStatus(): String
     private external fun nativeTouch(action: Int, x: Float, y: Float, pointerId: Int): Boolean
@@ -225,6 +230,47 @@ object VesselProrootDisplayBridge {
 
     fun framesReleased(): Long =
         if (!started) 0L else runCatching { nativeFramesReleased() }.getOrDefault(0L)
+
+    fun producerConnected(): Boolean =
+        started && runCatching { nativeProducerConnected() }.getOrDefault(false)
+
+    fun producerGeneration(): Long =
+        if (!started) 0L else runCatching { nativeProducerGeneration() }.getOrDefault(0L)
+
+    fun surfaceAttached(): Boolean =
+        started && runCatching { nativeSurfaceAttached() }.getOrDefault(false)
+
+    fun lastFramePresentedMs(): Long =
+        if (!started) 0L else runCatching { nativeLastFramePresentedMs() }.getOrDefault(0L)
+
+    fun disconnectReason(): String =
+        if (!started) "stopped" else runCatching { nativeDisconnectReason() }.getOrDefault("unknown")
+
+    fun producerReady(): Boolean {
+        if (!started || !producerConnected()) return false
+        val current = status()
+        return current.startsWith("presenting-proroot-") ||
+            current == "zero-copy-ready-waiting-for-surface" ||
+            current == "zero-copy-surface-attached" ||
+            current == "zero-copy-surface-detached"
+    }
+
+    fun displayHealthy(): Boolean {
+        if (!producerReady() || framesPresented() <= 0L) return false
+        return !zeroCopy || surfaceAttached()
+    }
+
+    fun displayState(): String {
+        if (!started) return "STOPPED"
+        val status = status()
+        if (status.startsWith("error:")) return "ERROR"
+        if (zeroCopy && !surfaceAttached()) return "SURFACE_DETACHED"
+        if (!producerConnected()) {
+            return if (framesPresented() > 0L) "DISCONNECTED" else "WAITING"
+        }
+        if (framesPresented() <= 0L) return "CONNECTED"
+        return "PRESENTING"
+    }
 
     fun status(): String =
         if (!started) "proroot-display-stopped"

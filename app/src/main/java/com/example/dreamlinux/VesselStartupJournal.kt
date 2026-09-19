@@ -17,11 +17,15 @@ class VesselStartupJournal(context: Context) {
         context.filesDir,
         "vessel-proroot/diagnostics/startup-journal.log",
     )
-    private val startedAt = SystemClock.elapsedRealtime()
+    private var startedAt = SystemClock.elapsedRealtime()
+    private var lastMarkAt = startedAt
 
     @Synchronized
     fun begin() {
         file.parentFile?.mkdirs()
+        val now = SystemClock.elapsedRealtime()
+        startedAt = now
+        lastMarkAt = now
         write(
             "BEGIN app=" + BuildConfig.VERSION_NAME +
                 " commit=" + BuildConfig.GIT_COMMIT +
@@ -34,8 +38,12 @@ class VesselStartupJournal(context: Context) {
     fun mark(stage: String, detail: String = "") {
         val cleanStage = stage.replace('\n', ' ').replace('\r', ' ')
         val cleanDetail = detail.replace('\n', ' ').replace('\r', ' ').take(1200)
+        val now = SystemClock.elapsedRealtime()
+        val totalMs = now - startedAt
+        val deltaMs = now - lastMarkAt
+        lastMarkAt = now
         write(
-            "+" + (SystemClock.elapsedRealtime() - startedAt) + "ms " +
+            "+" + totalMs + "ms (+" + deltaMs + "ms) " +
                 cleanStage +
                 if (cleanDetail.isBlank()) "" else " :: " + cleanDetail,
             append = true,

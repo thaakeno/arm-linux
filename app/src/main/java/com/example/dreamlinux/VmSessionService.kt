@@ -86,6 +86,7 @@ data class SessionState(
     val terminalOutput: String = "",
     val graphics: String = "VirtIO GPU · VirGL · Android Surface · Adreno",
     val presenterStatus: String = "not-started",
+    val displayState: String = "STOPPED",
     val rendererMode: String = "virgl-opengl",
     val translationLayer: String = "VirGL",
     val displayTransport: String = "vhost-user-gpu-ahb-native-surface-v3",
@@ -286,19 +287,30 @@ class VmSessionService : Service() {
             VesselWaylandPresenter.status()
         }
         val err = o.optString("lastError")
-        val presented =
-            presenter.startsWith("presenting-proroot-") ||
-                presenter.startsWith("presenting-native-surface") ||
+        val proroot = runtime.kind == VesselRuntimeKind.PROROOT
+        val presented = if (proroot) {
+            o.optBoolean("displayHealthy")
+        } else {
+            presenter.startsWith("presenting-native-surface") ||
                 presenter.startsWith("presenting-retained")
+        }
+        val displayState = if (proroot) {
+            o.optString("displayState", "WAITING")
+        } else if (presented) {
+            "PRESENTING"
+        } else {
+            "WAITING"
+        }
         val frame = o.optBoolean("frameContentValidated") || presented
         val stopping = state.value.stage == "stopping"
         state.value = state.value.copy(
             running = o.optBoolean("running"),
             guestReady = o.optBoolean("guestReady"),
-            displayReady = o.optBoolean("desktopReady") || presented,
+            displayReady = if (proroot) o.optBoolean("displayHealthy") else o.optBoolean("desktopReady") || presented,
             frameReachedApp = frame,
             inputReady = o.optBoolean("inputConnected"),
             presenterStatus = presenter,
+            displayState = displayState,
             console = o.optString("logTail", state.value.console),
             lastError = if (stopping) "" else err,
             uptimeMs = o.optLong("uptimeMs"),
@@ -314,6 +326,12 @@ class VmSessionService : Service() {
                 stopping -> "Stopping Linux"
                 err.isNotBlank() -> err
                 presented -> "Plasma visible · Android native Surface GPU path"
+                proroot && displayState == "DISCONNECTED" ->
+                    "KWin display producer disconnected · " + o.optString("producerDisconnectReason", "unknown")
+                proroot && displayState == "SURFACE_DETACHED" ->
+                    "Android display surface is detached · waiting for reattach"
+                proroot && displayState == "ERROR" ->
+                    "Native display bridge error · " + presenter
                 o.optBoolean("guestReady") -> state.value.progressDetail
                 else -> state.value.message
             },
@@ -353,6 +371,19 @@ class VmSessionService : Service() {
         lastResizeHeight = targetHeight
 
         val targetDpi = densityDpi.coerceIn(96, 180)
+
+        // Keep the Linux monitor mode stable while the Anland producer is live.
+        // Android SurfaceView geometry is presentation geometry; live output
+        // renegotiation used to disconnect KWin and trigger its fallback path.
+        if (runtime.kind == VesselRuntimeKind.PROROOT && state.value.running) {
+            guestRefresh = rate.coerceIn(
+                30f,
+                VesselExperimentConfig.refreshHz(this@VmSessionService).toFloat(),
+            )
+            runtime.configureDisplay(guestWidth, guestHeight, guestDpi, guestRefresh)
+            return
+        }
+
         val generation = ++resizeGeneration
         scope.launch(Dispatchers.IO) {
             delay(220)
@@ -419,6 +450,7 @@ class VmSessionService : Service() {
             inputReady = false,
             frameReachedApp = false,
             presenterStatus = "not-started",
+            displayState = "STOPPED",
             rendererMode = if (runtime.kind == VesselRuntimeKind.PROROOT) {
                 "freedreno-turnip-kgsl-direct"
             } else {
@@ -741,7 +773,7 @@ class VmSessionService : Service() {
                     "/usr/local/lib/vessel/app_discovery.py ${shellQuote(query)} ${shellQuote(normalizedSort)} ${shellQuote(normalizedCategory)}",
                     30,
                 )
-                check(result.optBoolean("ok")) { "Debian app discovery returned rc=${result.optInt("rc", -1)}" }
+                check(result.optBoolean("ok")) { guestFailure("Debian app discovery", result, 3000) }
                 val apps = parseApps(result.optString("output"))
                 appStore.value = appStore.value.copy(
                     apps = apps,
@@ -783,7 +815,8 @@ class VmSessionService : Service() {
                             policy + "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update",
                             600,
                         )
-                        check(update.optBoolean("ok")) { "APT update returned rc=${update.optInt("rc", -1)}" }
+                        persistAptLog("apt-update.log", update)
+                        check(update.optBoolean("ok")) { guestFailure("APT update", update, 8192) }
                     }
                     appStore.value = appStore.value.copy(
                         operationProgress = -1,
@@ -801,7 +834,13 @@ class VmSessionService : Service() {
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 remove -y ${shellQuote(packageName)}"
                 }
                 val result = runtime.guest(policy + action, 1800)
-                check(result.optBoolean("ok")) { "APT returned rc=${result.optInt("rc", -1)}: ${result.optString("output").takeLast(1800)}" }
+                persistAptLog(
+                    (if (install) "apt-install-" else "apt-remove-") + packageName + ".log",
+                    result,
+                )
+                check(result.optBoolean("ok")) {
+                    guestFailure(if (install) "APT install" else "APT remove", result, 8192)
+                }
                 appStore.value = appStore.value.copy(
                     operationProgress = 92,
                     operationDetail = "Refreshing desktop metadata",
@@ -1029,9 +1068,15 @@ class VmSessionService : Service() {
                     "desktop.log",
                     "guest-command.log",
                 )
+                val aptLogs = dir.listFiles()
+                    ?.filter { it.isFile && it.name.startsWith("apt-") && it.name.endsWith(".log") }
+                    ?.sortedByDescending { it.lastModified() }
+                    ?.take(12)
+                    ?.map { it.name }
+                    .orEmpty()
                 buildString {
                     appendLine("=== PROROOT PERSISTED LOGS ===")
-                    names.forEach { name ->
+                    (names + aptLogs).distinct().forEach { name ->
                         val file = File(dir, name)
                         if (!file.isFile) return@forEach
                         appendLine("--- " + name + " ---")
@@ -1094,6 +1139,29 @@ class VmSessionService : Service() {
                 updateHostOnlyStats()
                 state.value = state.value.copy(message = "Disk expanded by 2 GiB; ext4 will grow on next boot")
             }.onFailure { machineStats.value = machineStats.value.copy(error = it.message ?: "Disk expansion failed") }
+        }
+    }
+
+    private fun guestExitCode(result: JSONObject): Int =
+        if (result.has("exitCode")) result.optInt("exitCode", -1) else result.optInt("rc", -1)
+
+    private fun guestFailure(label: String, result: JSONObject, tailChars: Int): String {
+        val tail = result.optString("output").takeLast(tailChars).trim()
+        return buildString {
+            append(label).append(" failed exitCode=").append(guestExitCode(result))
+            if (tail.isNotEmpty()) append(":\n").append(tail)
+        }
+    }
+
+    private fun persistAptLog(name: String, result: JSONObject) {
+        if (runtime.kind != VesselRuntimeKind.PROROOT) return
+        val safe = name.replace(Regex("[^A-Za-z0-9._+-]"), "_").take(180)
+        runCatching {
+            val dir = File(filesDir, "vessel-proroot/diagnostics")
+            check(dir.isDirectory || dir.mkdirs())
+            File(dir, safe).writeText(
+                "exitCode=" + guestExitCode(result) + "\n" + result.optString("output"),
+            )
         }
     }
 

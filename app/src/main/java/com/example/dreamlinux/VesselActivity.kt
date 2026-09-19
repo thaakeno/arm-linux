@@ -277,6 +277,7 @@ class VesselActivity : ComponentActivity() {
     private fun MachinePage(state: SessionState, openDisplay: () -> Unit) {
         val stopping = state.stage == "stopping"
         val canStop = state.running || state.busy
+        val proroot = state.runtimeBackend == "proroot"
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             ElevatedCard(shape = RoundedCornerShape(26.dp)) {
                 Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
@@ -316,12 +317,28 @@ class VesselActivity : ComponentActivity() {
             Text("Machine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             ElevatedCard(shape = RoundedCornerShape(22.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Metric(Icons.Default.Memory, "Memory", "${if (state.guestMemoryMb > 0) state.guestMemoryMb else 4096} MiB UML guest · ${VesselExperimentConfig.vcpus(this@VesselActivity)} vCPU")
+                    Metric(
+                        Icons.Default.Memory,
+                        "Memory",
+                        if (proroot) {
+                            "Shared Android memory · ${Runtime.getRuntime().availableProcessors()} logical CPUs"
+                        } else {
+                            "${state.guestMemoryMb.coerceAtLeast(4096)} MiB UML guest · ${VesselExperimentConfig.vcpus(this@VesselActivity)} vCPU"
+                        },
+                    )
                     Metric(Icons.Default.DesktopWindows, "Desktop", "${state.guestDisplayWidth} × ${state.guestDisplayHeight} · stable landscape")
                     Metric(Icons.Default.Bolt, "Graphics", state.graphics)
                     Metric(Icons.Default.DesktopWindows, "Android Surface", state.presenterStatus)
                     Metric(Icons.Default.Wifi, "Network", state.internetStage)
-                    Metric(Icons.Default.Storage, "Disk", "Private persistent sparse ext4 · safe auto-grow")
+                    Metric(
+                        Icons.Default.Storage,
+                        "Disk",
+                        if (proroot) {
+                            "App-private directory rootfs · Android filesystem"
+                        } else {
+                            "Private persistent sparse ext4 · safe auto-grow"
+                        },
+                    )
                 }
             }
             LogCard(state)
@@ -338,6 +355,12 @@ class VesselActivity : ComponentActivity() {
                     Text(
                         when {
                             state.displayReady -> "Wayland · native GPU surface · ${uptime(state.uptimeMs)}"
+                            state.running && state.displayState == "DISCONNECTED" ->
+                                "KWin producer disconnected · waiting for recovery"
+                            state.running && state.displayState == "SURFACE_DETACHED" ->
+                                "Android Surface detached · waiting for display"
+                            state.running && state.displayState == "ERROR" ->
+                                "Native display bridge error · ${state.presenterStatus}"
                             state.frameReachedApp -> "Validated GPU frame reached Vessel"
                             state.running || state.busy -> state.progressDetail
                             else -> "Press Start Linux first"
@@ -355,7 +378,9 @@ class VesselActivity : ComponentActivity() {
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                if (state.displayReady) StatusPill("VISIBLE", true)
+                if (state.running || state.busy) {
+                    StatusPill(if (state.displayReady) "VISIBLE" else state.displayState, state.displayReady)
+                }
             }
             if (state.running || state.busy) {
                 DesktopControls(mode, { newMode -> mode = newMode; LinuxDesktopView.active?.setPointerMode(newMode) }, fullscreen)
