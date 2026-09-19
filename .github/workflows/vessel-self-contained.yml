@@ -160,7 +160,7 @@ jobs:
           grep -F 'Rootfs traversal rejected' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'Recovery is explicit' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
 
-          grep -F 'const val REVISION = "proroot-production-v9"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'const val REVISION = "proroot-production-v10"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
@@ -208,6 +208,32 @@ jobs:
           ! grep -Fq 'VesselProrootDesktopProfile.PROBE' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'compat-kernel-probe.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
           grep -F 'compat-session-dbus.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+
+          # PRoot display readiness must follow live producer/surface health, not
+          # a one-shot splash-frame latch. Android Surface recreation must not
+          # tear down the Anland producer.
+          grep -F 'nativeProducerConnected' app/src/main/java/com/example/dreamlinux/VesselProrootDisplayBridge.kt
+          grep -F 'nativeLastFramePresentedMs' app/src/main/java/com/example/dreamlinux/VesselProrootDisplayBridge.kt
+          grep -F 'producerDisconnectReason' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'displayHealthy' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'Surface lifecycle is independent from the KWin producer lifecycle' app/src/main/cpp/vessel_proroot_display_bridge.cpp
+          ! grep -A8 -F 'void detach_surface()' app/src/main/cpp/vessel_proroot_display_bridge.cpp | grep -Fq 'shutdown(ctrl'
+          grep -F 'live output' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'displayState: String = "STOPPED"' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+
+          # Package-management errors must expose the actual proroot exitCode and
+          # preserve apt output instead of displaying the old fake rc=-1.
+          grep -F 'guestExitCode(result: JSONObject)' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'apt-update.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          ! grep -Fq 'APT update returned rc=' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+
+          # The corrected desktop image disables systemd-user mode, ships the
+          # Plasma core QML module and PipeWire, and instruments XWayland SIGSYS.
+          grep -F 'const val SESSION_MARKER = "/var/cache/vessel/proroot-session-v2"' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibility.kt
+          grep -F 'systemdBoot=false' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
+          grep -F 'plasma-desktoptheme' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'pipewire wireplumber' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'VESSEL_XWAYLAND_SIGSYS syscall=' tools/vessel_proroot/rootfs/usr/local/lib/vessel/xwayland/sigsys_trace.c
 
           bash -n tools/vessel_proroot/fetch_official_proroot.sh
           bash -n tools/vessel_proroot/build_prebuilt_rootfs.sh
@@ -314,7 +340,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.2.3"' app/build.gradle.kts
+          grep -F 'versionName = "2.2.4"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
           grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
