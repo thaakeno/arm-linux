@@ -43,6 +43,9 @@ jobs:
           cd /work/kwin
           git checkout beea4c3d22f08100b1b3acda1bd502e87bb1a347
           git switch -c vessel-direct
+          # lfdevs/kwin is Debian packaging with pristine upstream source tarballs.
+          # Materialize the upstream tree before applying the quilt series.
+          origtargz
 
       - name: Apply Vessel direct-transport patch
         shell: bash
@@ -56,7 +59,7 @@ jobs:
             src/backends/anland/display_producer.c \
             src/backends/anland/anland_backend.cpp \
             src/backends/anland/anland_egl_backend.cpp
-          python3 "$GITHUB_WORKSPACE/tools/vessel_proroot/patch_kwin_direct_transport.py"
+          python3 "$GITHUB_WORKSPACE/tools/vessel_proroot/patch_kwin_direct_transport.py" /work/kwin
           quilt refresh
           grep -Fqx '0006-vessel-direct-transport-no-fallback.patch' debian/patches/series || \
             printf '%s\n' '0006-vessel-direct-transport-no-fallback.patch' >> debian/patches/series
@@ -68,7 +71,6 @@ jobs:
         run: |
           set -euxo pipefail
           cd /work/kwin
-          origtargz
           gbp buildpackage -uc -us -jauto --git-ignore-branch --git-no-pristine-tar
 
       - name: Package runtime debs
