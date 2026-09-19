@@ -154,6 +154,23 @@ static void vessel_sigsys_trampoline(int signo, siginfo_t *info, void *context) 
     action.sa_handler(signo);
 }
 
+__attribute__((constructor))
+static void vessel_sigsys_install_early(void) {
+    sigaction_fn fn = real_sigaction();
+    if (!fn) return;
+
+    struct sigaction current;
+    if (fn(SIGSYS, NULL, &current) != 0) return;
+
+    vessel_sigsys_user_action = current;
+    vessel_sigsys_user_action_valid = 1;
+
+    struct sigaction wrapped = current;
+    wrapped.sa_flags |= SA_SIGINFO;
+    wrapped.sa_sigaction = vessel_sigsys_trampoline;
+    (void)fn(SIGSYS, &wrapped, NULL);
+}
+
 int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
     sigaction_fn fn = real_sigaction();
     if (!fn) return -1;
