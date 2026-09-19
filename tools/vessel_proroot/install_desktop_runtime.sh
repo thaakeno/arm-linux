@@ -119,6 +119,14 @@ session=vessel-proroot-wayland-v1
 EOF
 chmod 0644 "$MARKER_HOST"
 
+# Machine-readable marker used by the APK's in-place desktop overlay migrator.
+# Unlike the general session.env metadata, this file means the actual KWin
+# payload for this release has been materialized into the rootfs.
+DIRECT_MARKER="$ROOTFS/usr/lib/vessel/desktop/direct-kwin-build.txt"
+mkdir -p "$(dirname "$DIRECT_MARKER")"
+printf '%s\n' "$RELEASE" > "$DIRECT_MARKER"
+chmod 0644 "$DIRECT_MARKER"
+
 for required in   "$ROOTFS/usr/bin/kwin_wayland"   "$ROOTFS/usr/bin/startplasma-wayland"   "$ROOTFS/usr/bin/Xwayland"   "$ROOTFS/usr/local/libexec/vessel-start-plasma"   "$ROOTFS/usr/local/libexec/vessel-compat-probe"
 do
   [[ -e "$required" ]] || { echo "desktop install missing: ${required#$ROOTFS}" >&2; exit 6; }

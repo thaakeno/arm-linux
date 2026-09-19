@@ -173,7 +173,7 @@ jobs:
           grep -F 'Rootfs traversal rejected' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'Recovery is explicit' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
 
-          grep -F 'const val REVISION = "proroot-production-v12"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'const val REVISION = "proroot-production-v13"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
@@ -324,6 +324,31 @@ jobs:
           test -s app/src/main/assets/vessel/Xwayland.arm64
           chmod 0755 app/src/main/assets/vessel/Xwayland.arm64
           strings app/src/main/assets/vessel/Xwayland.arm64 | grep -F 'XWAYLAND_SIGSYS syscall='
+      - name: Stage pinned direct KWin overlay
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl unzip zstd
+          KWIN_URL="https://github.com/thaakeno/arm-linux/releases/download/vessel-kwin-direct-edge/kwin_vessel-direct_6.3.6-96_arm64.zip"
+          KWIN_SHA="8cd81fc9d6d063be92dd9b874413ee2c64a6d536c4066630469455d2324e53a9"
+          rm -rf /tmp/vessel-kwin-overlay /tmp/vessel-kwin-debs
+          mkdir -p /tmp/vessel-kwin-overlay /tmp/vessel-kwin-debs app/src/main/assets/vessel
+          curl --fail --location --retry 4 --connect-timeout 15 -o /tmp/kwin-direct.zip "$KWIN_URL"
+          printf '%s  %s\n' "$KWIN_SHA" /tmp/kwin-direct.zip | sha256sum -c -
+          unzip -q /tmp/kwin-direct.zip -d /tmp/vessel-kwin-debs
+          mapfile -t KWIN_DEBS < <(find /tmp/vessel-kwin-debs -type f -name '*.deb' -print | sort)
+          test "${#KWIN_DEBS[@]}" -gt 0
+          for deb in "${KWIN_DEBS[@]}"; do
+            dpkg-deb -x "$deb" /tmp/vessel-kwin-overlay
+          done
+          install -d -m0755 /tmp/vessel-kwin-overlay/usr/lib/vessel/desktop
+          printf '%s\n' 'vessel-direct-6.3.6-96' > /tmp/vessel-kwin-overlay/usr/lib/vessel/desktop/direct-kwin-build.txt
+          tar --hard-dereference --numeric-owner --sort=name --mtime='UTC 2026-01-01'             -C /tmp/vessel-kwin-overlay -cf - .             | zstd -T0 -10 --no-progress -f -o app/src/main/assets/vessel/kwin-direct-overlay.tar.zst
+          test -s app/src/main/assets/vessel/kwin-direct-overlay.tar.zst
+          zstd -t app/src/main/assets/vessel/kwin-direct-overlay.tar.zst
+          zstd -dc app/src/main/assets/vessel/kwin-direct-overlay.tar.zst | tar -tf - > /tmp/kwin-overlay-files.txt
+          grep -Fq './usr/lib/vessel/desktop/direct-kwin-build.txt' /tmp/kwin-overlay-files.txt
       - uses: actions/setup-java@v5
         with:
           java-version: '17'
@@ -400,7 +425,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.2.6"' app/build.gradle.kts
+          grep -F 'versionName = "2.2.7"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
           grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
@@ -479,6 +504,8 @@ jobs:
           grep -Eq 'lib/arm64-v8a/libzstd-jni.*\.so' /tmp/release-apk-files.txt
           grep -Fq 'assets/vessel/Xwayland.arm64' /tmp/apk-files.txt
           grep -Fq 'assets/vessel/Xwayland.arm64' /tmp/release-apk-files.txt
+          grep -Fq 'assets/vessel/kwin-direct-overlay.tar.zst' /tmp/apk-files.txt
+          grep -Fq 'assets/vessel/kwin-direct-overlay.tar.zst' /tmp/release-apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
@@ -497,13 +524,14 @@ jobs:
             RUNTIME="$(jq -r '.runtime // empty' <<<"$JSON" 2>/dev/null || true)"
             DEBIAN="$(jq -r '.debian // empty' <<<"$JSON" 2>/dev/null || true)"
             TRANSPORT="$(jq -r '.transport // empty' <<<"$JSON" 2>/dev/null || true)"
+            DESKTOP="$(jq -r '.desktopRelease // empty' <<<"$JSON" 2>/dev/null || true)"
             SHA="$(jq -r '.archiveSha256 // empty' <<<"$JSON" 2>/dev/null || true)"
             TOTAL="$(jq -r '.archiveBytes // 0' <<<"$JSON" 2>/dev/null || echo 0)"
             COUNT="$(jq -r '.chunks | length' <<<"$JSON" 2>/dev/null || echo 0)"
             SUM="$(jq -r '[.chunks[]?.bytes] | add // 0' <<<"$JSON" 2>/dev/null || echo 0)"
             FIRST="$(jq -r '.chunks[0].url // empty' <<<"$JSON" 2>/dev/null || true)"
             LAST="$(jq -r '.chunks[-1].url // empty' <<<"$JSON" 2>/dev/null || true)"
-            if [ "$SCHEMA" = 2 ] && [ "$RUNTIME" = proroot ] && [ "$DEBIAN" = trixie ] &&                [ "$TRANSPORT" = github-release-chunks-v1 ] && [ ${#SHA} -eq 64 ] &&                [ "$COUNT" -gt 0 ] && [ "$TOTAL" = "$SUM" ]; then
+            if [ "$SCHEMA" = 2 ] && [ "$RUNTIME" = proroot ] && [ "$DEBIAN" = trixie ] &&                [ "$TRANSPORT" = github-release-chunks-v1 ] && [ "$DESKTOP" = vessel-direct-6.3.6-96 ] && [ ${#SHA} -eq 64 ] &&                [ "$COUNT" -gt 0 ] && [ "$TOTAL" = "$SUM" ]; then
               if curl -fsSIL --connect-timeout 10 --max-time 30 "$FIRST" >/dev/null 2>&1 &&                  curl -fsSIL --connect-timeout 10 --max-time 30 "$LAST" >/dev/null 2>&1; then
                 READY=1
                 echo "production proroot rootfs is publicly readable: $COUNT parts, $TOTAL bytes"

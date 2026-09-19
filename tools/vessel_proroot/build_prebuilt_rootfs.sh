@@ -5,6 +5,11 @@ OUT_DIR="${1:-build/proroot-rootfs}"
 ROOTFS="$OUT_DIR/rootfs"
 ARCHIVE="$OUT_DIR/Vessel-Proroot-trixie-arm64.tar.zst"
 MANIFEST="$OUT_DIR/Vessel-Proroot-trixie-arm64.json"
+DESKTOP_RELEASE="$(python3 - <<'PY'
+import json
+print(json.load(open("tools/vessel_proroot/desktop_manifest.json", encoding="utf-8"))["release"])
+PY
+)"
 
 rm -rf "$ROOTFS"
 mkdir -p "$OUT_DIR"
@@ -24,6 +29,11 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export UCF_FORCE_CONFFOLD=1
 export NEEDRESTART_MODE=a
+
+# /tmp is a normal Linux runtime invariant. APT, Qt and many desktop tools use
+# mkstemp(3) there and must never depend on a later Android-side bind existing.
+install -d -m1777 /tmp /var/tmp
+install -d -m0755 /var/lib/apt/lists/partial /var/cache/apt/archives/partial
 
 apt-get update
 apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y   bash ca-certificates curl git locales sudo   dbus dbus-x11 python3 python3-dbus python3-gi   kde-plasma-desktop plasma-workspace plasma-desktop plasma-desktoptheme qml6-module-org-kde-ksvg libkf6svg6 libkirigamiplatform6 kwin-wayland   xwayland qt6-wayland wayland-utils systemsettings   libinput-tools mesa-utils   breeze breeze-icon-theme hicolor-icon-theme   desktop-file-utils xdg-user-dirs shared-mime-info menu   appstream packagekit packagekit-tools polkitd pkexec plasma-discover   xdg-desktop-portal xdg-desktop-portal-kde   pulseaudio pulseaudio-utils alsa-utils   fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation   firefox-esr konsole dolphin ark kcalc okular gwenview kate
@@ -74,10 +84,11 @@ test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir
 test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/qmldir
 test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so
 ! ldd -r /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so 2>&1 | grep -Eqi 'not found|undefined symbol'
-touch /var/cache/vessel/plasma-qml-proroot-production-v12
+touch /var/cache/vessel/plasma-qml-proroot-production-v13
 
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /tmp/* /var/tmp/*
+install -d -m1777 /tmp /var/tmp
 rm -f /usr/sbin/policy-rc.d
 CHROOT
 
@@ -111,9 +122,10 @@ ARCHIVE_BYTES="$(stat -c '%s' "$ARCHIVE")"
 EXTRACTED_BYTES="$(sudo du -sb "$ROOTFS" | awk '{print $1}')"
 ENTRY_COUNT="$(sudo tar -C "$ROOTFS" -cf - . | tar -tf - | wc -l)"
 
-python3 - "$MANIFEST" <<PY
+python3 - "$MANIFEST" "$DESKTOP_RELEASE" <<PY
 import json, os, sys
 out=sys.argv[1]
+desktop_release=sys.argv[2]
 data={
   "schema": 1,
   "revision": os.environ.get("GITHUB_SHA","local"),
@@ -127,7 +139,7 @@ data={
   "extractedBytes": int("$EXTRACTED_BYTES"),
   "entryCount": int("$ENTRY_COUNT"),
   "mesaVersion": "26.3.0-devel-20260824",
-  "desktopRelease": "5.13.3",
+  "desktopRelease": desktop_release,
   "requiredPaths": [
     "bin/sh",
     "usr/bin/kwin_wayland",
@@ -136,6 +148,7 @@ data={
     "usr/local/libexec/vessel-compat-probe",
     "usr/lib/vessel/direct-gpu/mesa.env",
     "usr/lib/vessel/desktop/session.env",
+    "usr/lib/vessel/desktop/direct-kwin-build.txt",
     "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/qmldir",
     "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so",
     "var/cache/vessel/proroot-production-v1"
