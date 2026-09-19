@@ -33,7 +33,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v13"
+        const val REVISION = "proroot-production-v14"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -88,15 +88,15 @@ class VesselProrootRuntimeBackend(
         )
     }
 
-    override fun desktopReadiness(verifyIntegrity: Boolean): VesselDesktopReadiness {
+    /**
+     * Rootfs-only gate used by bootstrap. This answers whether the persistent
+     * Debian installation itself is reusable. APK integrity, host KGSL access,
+     * KWin/Xwayland versions and QML repair state are runtime concerns and can
+     * never be fixed by downloading the same 1.4 GiB rootfs again.
+     */
+    fun installedRootfsReadiness(): VesselDesktopReadiness {
         if (!layout.prepareHostLayout()) {
             return VesselDesktopReadiness(false, "Vessel cannot prepare its private runtime storage")
-        }
-        if (!hostAssetsReady()) {
-            return VesselDesktopReadiness(false, "proroot runtime libraries are not packaged yet")
-        }
-        if (verifyIntegrity && !officialRuntimeHashesMatch()) {
-            return VesselDesktopReadiness(false, "proroot runtime integrity check failed")
         }
         if (!layout.rootfsReady()) {
             return VesselDesktopReadiness(false, "proroot directory rootfs is not installed yet")
@@ -104,15 +104,37 @@ class VesselProrootRuntimeBackend(
         if (!File(layout.rootfsDir, "var/cache/vessel/proroot-production-v1").isFile) {
             return VesselDesktopReadiness(false, "Phase-6 production rootfs marker is missing")
         }
+
+        val gpuRootfs = VesselDirectGpuProfile.rootfsReadiness(layout.rootfsDir)
+        if (!gpuRootfs.ready) {
+            return VesselDesktopReadiness(false, gpuRootfs.reason)
+        }
+
+        return VesselProrootDesktopProfile.baseReadiness(layout.rootfsDir)
+    }
+
+    override fun desktopReadiness(verifyIntegrity: Boolean): VesselDesktopReadiness {
+        if (!hostAssetsReady()) {
+            return VesselDesktopReadiness(false, "proroot runtime libraries are not packaged yet")
+        }
+        if (verifyIntegrity && !officialRuntimeHashesMatch()) {
+            return VesselDesktopReadiness(false, "proroot runtime integrity check failed")
+        }
+
+        val base = installedRootfsReadiness()
+        if (!base.ready) return base
+
+        val gpu = directGpuReadiness()
+        if (!gpu.ready) return VesselDesktopReadiness(false, gpu.reason)
+
+        // From this point on every failing condition is an in-place runtime
+        // migration/compatibility issue, not a reason to redownload the rootfs.
         if (!prepareRootlessDesktopPolicy()) {
             return VesselDesktopReadiness(false, "Could not prepare rootless Plasma session policy")
         }
         if (!prepareDns()) {
             return VesselDesktopReadiness(false, "Could not prepare Android network DNS for Linux")
         }
-
-        val gpu = directGpuReadiness()
-        if (!gpu.ready) return VesselDesktopReadiness(false, gpu.reason)
 
         val desktop = VesselProrootDesktopProfile.readiness(layout.rootfsDir)
         if (!desktop.ready) return desktop
@@ -841,7 +863,7 @@ class VesselProrootRuntimeBackend(
         )
         val repairedMarker = File(
             layout.rootfsDir,
-            "var/cache/vessel/plasma-qml-proroot-production-v13",
+            "var/cache/vessel/plasma-qml-proroot-production-v14",
         )
 
         fun filesReady(): Boolean =

@@ -172,8 +172,12 @@ jobs:
           grep -F 'stagingRootfs.renameTo(live)' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'Rootfs traversal rejected' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'Recovery is explicit' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
+          grep -F 'installedRootfsReadiness().ready' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
+          grep -F 'fun installedRootfsReadiness()' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'fun rootfsReadiness(rootfs: File)' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
+          grep -F 'fun baseReadiness(rootfs: File)' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibility.kt
 
-          grep -F 'const val REVISION = "proroot-production-v13"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'const val REVISION = "proroot-production-v14"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
@@ -425,7 +429,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.2.7"' app/build.gradle.kts
+          grep -F 'versionName = "2.2.8"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
           grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt

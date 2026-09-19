@@ -29,6 +29,31 @@ class VesselDirectGpuProfileTest {
     }
 
     @Test
+    fun rootfsReadinessIgnoresTemporaryHostKgslState() {
+        val root = Files.createTempDirectory("vessel-gpu-rootfs-test").toFile()
+        fun file(path: String, value: String = "x") {
+            val target = File(root, path.removePrefix("/"))
+            target.parentFile?.mkdirs()
+            target.writeText(value)
+        }
+
+        file(VesselDirectGpuProfile.MARKER, "verified-rootfs-metadata\n")
+        file(VesselDirectGpuProfile.KGSL_DRI)
+        file(VesselDirectGpuProfile.TURNIP_LIBRARY)
+        file("/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json", "{}")
+
+        assertTrue(VesselDirectGpuProfile.rootfsReadiness(root).ready)
+        assertFalse(
+            VesselDirectGpuProfile.readiness(
+                rootfs = root,
+                deviceExists = false,
+                deviceReadable = false,
+                deviceWritable = false,
+            ).ready,
+        )
+    }
+
+    @Test
     fun readinessUsesVerifiedReleaseCapabilitiesNotDuplicatedMarkerIdentity() {
         val root = Files.createTempDirectory("vessel-gpu-test").toFile()
         fun file(path: String, value: String = "x") {

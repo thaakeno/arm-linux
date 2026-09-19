@@ -39,19 +39,8 @@ object VesselDirectGpuProfile {
         "/usr/share/vulkan/icd.d/freedreno_icd.json",
     )
 
-    fun readiness(
-        rootfs: File,
-        deviceExists: Boolean,
-        deviceReadable: Boolean,
-        deviceWritable: Boolean,
-    ): VesselGpuReadiness {
-        if (!deviceExists) {
-            return VesselGpuReadiness(false, DEVICE + " is missing on the Android host")
-        }
-        if (!deviceReadable || !deviceWritable) {
-            return VesselGpuReadiness(false, DEVICE + " is not readable+writable by Vessel")
-        }
-
+    /** Rootfs-only GPU contract used to decide whether persistent Linux data is reusable. */
+    fun rootfsReadiness(rootfs: File): VesselGpuReadiness {
         val marker = guestFile(rootfs, MARKER)
         if (!marker.isFile) {
             return VesselGpuReadiness(
@@ -80,6 +69,21 @@ object VesselDirectGpuProfile {
             reason = "Freedreno OpenGL/ES + Turnip Vulkan · direct KGSL",
             icdGuestPath = icd,
         )
+    }
+
+    fun readiness(
+        rootfs: File,
+        deviceExists: Boolean,
+        deviceReadable: Boolean,
+        deviceWritable: Boolean,
+    ): VesselGpuReadiness {
+        if (!deviceExists) {
+            return VesselGpuReadiness(false, DEVICE + " is missing on the Android host")
+        }
+        if (!deviceReadable || !deviceWritable) {
+            return VesselGpuReadiness(false, DEVICE + " is not readable+writable by Vessel")
+        }
+        return rootfsReadiness(rootfs)
     }
 
     fun environment(icdGuestPath: String): Map<String, String> {

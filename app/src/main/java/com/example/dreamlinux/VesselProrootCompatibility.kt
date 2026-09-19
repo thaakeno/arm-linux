@@ -32,14 +32,42 @@ object VesselProrootDesktopProfile {
             runtimeDirectory = "/run/user/" + androidUid,
         )
 
-    fun readiness(rootfs: File): VesselDesktopReadiness {
-        // The compatibility probe is APK-owned at runtime so an old large
-        // rootfs cannot pin Vessel to stale Android/procfs assumptions.
-        for (path in listOf(MARKER, STARTER)) {
+    /**
+     * Readiness required to reuse an already-installed persistent rootfs.
+     *
+     * Desktop payloads that Vessel can migrate in-place (KWin, Xwayland policy,
+     * QML repair state) are intentionally NOT part of this gate. Bootstrap must
+     * only replace a 1.4 GiB rootfs when the base Debian/Mesa install is actually
+     * unusable, never just because the APK carries a newer compositor payload.
+     */
+    fun baseReadiness(rootfs: File): VesselDesktopReadiness {
+        val required = listOf(
+            STARTER,
+            "/usr/bin/startplasma-wayland",
+            "/usr/bin/dbus-daemon",
+            "/usr/bin/dbus-run-session",
+            "/usr/bin/dbus-send",
+            "/usr/bin/python3",
+            "/usr/bin/pulseaudio",
+        )
+        for (path in required) {
             val file = guestFile(rootfs, path)
             if (!file.isFile || file.length() <= 0L) {
-                return VesselDesktopReadiness(false, "Desktop runtime file is missing: " + path)
+                return VesselDesktopReadiness(false, "Base desktop dependency is missing: " + path)
             }
+        }
+        return VesselDesktopReadiness(true, "Existing Debian desktop rootfs is reusable")
+    }
+
+    fun readiness(rootfs: File): VesselDesktopReadiness {
+        val base = baseReadiness(rootfs)
+        if (!base.ready) return base
+
+        // The compatibility probe is APK-owned at runtime so an old large
+        // rootfs cannot pin Vessel to stale Android/procfs assumptions.
+        val marker = guestFile(rootfs, MARKER)
+        if (!marker.isFile || marker.length() <= 0L) {
+            return VesselDesktopReadiness(false, "Desktop runtime file is missing: " + MARKER)
         }
 
         val directKwinMarker = guestFile(rootfs, "/usr/lib/vessel/desktop/direct-kwin-build.txt")
@@ -52,17 +80,7 @@ object VesselProrootDesktopProfile {
             )
         }
 
-        val required = listOf(
-            "/usr/bin/kwin_wayland",
-            "/usr/bin/startplasma-wayland",
-            "/usr/bin/Xwayland",
-            "/usr/bin/dbus-daemon",
-            "/usr/bin/dbus-run-session",
-            "/usr/bin/dbus-send",
-            "/usr/bin/python3",
-            "/usr/bin/pulseaudio",
-        )
-        for (path in required) {
+        for (path in listOf("/usr/bin/kwin_wayland", "/usr/bin/Xwayland")) {
             val file = guestFile(rootfs, path)
             if (!file.isFile || file.length() <= 0L) {
                 return VesselDesktopReadiness(false, "Desktop dependency is missing: " + path)

@@ -3,9 +3,37 @@ package com.example.dreamlinux
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.File
 
 class VesselProrootDesktopProfileTest {
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
+
+    private fun installFile(rootfs: File, guestPath: String, text: String = "x") {
+        val file = File(rootfs, guestPath.removePrefix("/"))
+        file.parentFile?.mkdirs()
+        file.writeText(text)
+    }
+    @Test
+    fun reusableBaseRootfsDoesNotRequireCurrentDirectKwinPayload() {
+        val rootfs = temporaryFolder.newFolder("rootfs")
+        listOf(
+            VesselProrootDesktopProfile.STARTER,
+            "/usr/bin/startplasma-wayland",
+            "/usr/bin/dbus-daemon",
+            "/usr/bin/dbus-run-session",
+            "/usr/bin/dbus-send",
+            "/usr/bin/python3",
+            "/usr/bin/pulseaudio",
+        ).forEach { installFile(rootfs, it) }
+
+        assertTrue(VesselProrootDesktopProfile.baseReadiness(rootfs).ready)
+        assertFalse(VesselProrootDesktopProfile.readiness(rootfs).ready)
+    }
+
     @Test
     fun normalDesktopEnvironmentIsWaylandAndDoesNotPoisonApplicationEgl() {
         val env = VesselProrootDesktopProfile.sessionEnvironment(
