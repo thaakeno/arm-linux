@@ -1,13 +1,13 @@
 {
   "schema": 1,
   "component": "vessel-proroot-desktop",
-  "release": "5.13.3",
-  "sourceRepository": "https://github.com/lfdevs/anland-termux",
+  "release": "vessel-direct-6.3.6-96",
+  "sourceRepository": "https://github.com/thaakeno/arm-linux",
   "debian": "13",
   "kwin": {
-    "archive": "kwin_anland-5.13-debian-4_6.3.6-95.zip",
-    "url": "https://github.com/lfdevs/anland-termux/releases/download/5.13.3/kwin_anland-5.13-debian-4_6.3.6-95.zip",
-    "sha256": "56ce1da27b640c977bad5ca0b7b13196e609b5fc419703429e51805ec05e4ee4"
+    "archive": "kwin_vessel-direct_6.3.6-96_arm64.zip",
+    "url": "https://github.com/thaakeno/arm-linux/releases/download/vessel-kwin-direct-edge/kwin_vessel-direct_6.3.6-96_arm64.zip",
+    "sha256": "8cd81fc9d6d063be92dd9b874413ee2c64a6d536c4066630469455d2324e53a9"
   },
   "xwayland": {
     "archive": "xwayland_24.1.6-91_arm64.deb",
