@@ -15,6 +15,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.nio.file.Files
 
 /**
  * Shared-kernel ARM64 Linux backend.
@@ -244,7 +245,7 @@ class VesselProrootRuntimeBackend(
                                 if (mode != 0) runCatching { Os.chmod(target.absolutePath, mode) }
                             }
                             entry.isSymbolicLink -> {
-                                if (target.exists() || target.isSymbolicLink()) {
+                                if (target.exists() || Files.isSymbolicLink(target.toPath())) {
                                     check(target.delete()) { "Could not replace KWin symlink: " + relative }
                                 }
                                 check('\u0000' !in entry.linkName) { "KWin symlink target contains NUL" }
@@ -254,7 +255,7 @@ class VesselProrootRuntimeBackend(
                                 error("KWin overlay contains unsupported hard link: " + relative)
                             }
                             entry.isFile -> {
-                                if (target.isSymbolicLink()) {
+                                if (Files.isSymbolicLink(target.toPath())) {
                                     check(target.delete()) { "Could not replace KWin file symlink: " + relative }
                                 }
                                 FileOutputStream(target, false).buffered(256 * 1024).use { output ->
