@@ -14,6 +14,19 @@ on:
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
       - 'gradle.properties'
+  pull_request:
+    branches: [ arch/vessel-self-contained ]
+    paths:
+      - 'app/**'
+      - 'tools/vessel_native/**'
+      - 'tools/vessel_proroot/**'
+      - '.github/workflows/vessel-self-contained.yml'
+      - '.github/workflows/vessel-proroot-rootfs.yml'
+      - 'gradle/**'
+      - 'gradlew'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
   workflow_dispatch:
 
 concurrency:
@@ -26,7 +39,7 @@ permissions:
 
 jobs:
   source-check:
-    if: ${{ github.event_name == 'push' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
