@@ -349,27 +349,28 @@ public:
         const uint32_t next_height = std::clamp(height, 240u, 4096u);
         const bool size_changed =
             next_width != width_.load() || next_height != height_.load();
-        width_.store(next_width);
-        height_.store(next_height);
+
+        // Never tear down a live Anland producer merely because Android recreated
+        // or resized its SurfaceView. KWin treats a consumer disconnect as a
+        // backend failure and may enter a permanent fallback/black-screen state.
+        // The Linux monitor mode remains stable for the lifetime of the producer;
+        // Android SurfaceControl scales that stable buffer to the current view.
+        if (size_changed && !producer_connected_.load()) {
+            width_.store(next_width);
+            height_.store(next_height);
+        } else if (size_changed) {
+            set_disconnect_reason("live-resize-deferred");
+        }
+
         refresh_mhz_.store(
             static_cast<uint32_t>(std::clamp(refresh, 1.0f, 240.0f) * 1000.0f + 0.5f));
         if (zero_copy_) {
             vessel_proroot_surfacecontrol_configure(
-                next_width,
-                next_height,
+                width_.load(),
+                height_.load(),
                 refresh_mhz_.load() / 1000.0f);
         }
-
-        if (size_changed) {
-            // KWin receives screen geometry only during producer handshake.
-            // Break only the current control connection; its reconnect path
-            // immediately receives the new geometry and a fresh AHB pool.
-            set_disconnect_reason("requested-resize-reconnect");
-            const int ctrl = ctrl_fd_.load();
-            if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
-        } else {
-            send_refresh();
-        }
+        send_refresh();
     }
 
     bool zero_copy_available() const {
@@ -405,9 +406,10 @@ public:
         if (!zero_copy_) return;
         surface_attached_.store(false);
         vessel_proroot_surfacecontrol_detach();
-        set_disconnect_reason("surface-detached-reconnect");
-        const int ctrl = ctrl_fd_.load();
-        if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
+        // Surface lifecycle is independent from the KWin producer lifecycle.
+        // Keep the producer socket/resources alive; attach_surface() will request
+        // a fresh frame when Android supplies the next Surface.
+        set_disconnect_reason("surface-detached");
         set_status("zero-copy-surface-detached");
     }
 
