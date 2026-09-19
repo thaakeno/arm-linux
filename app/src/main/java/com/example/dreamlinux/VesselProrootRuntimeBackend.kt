@@ -208,7 +208,7 @@ class VesselProrootRuntimeBackend(
             "  args+=(\"\$arg\")",
             "done",
             "exec /usr/bin/kwin_wayland \"\${args[@]}\"",
-        ).joinToString("\\n", postfix = "\\n")
+        ).joinToString("\n", postfix = "\n")
         listOf(
             "usr/local/lib/vessel/kwin-wrapper/kwin_wayland",
             "usr/local/lib/vessel/kwin-wrapper/kwin_wayland_wrapper",
