@@ -346,7 +346,9 @@ jobs:
           printf '%s\n' 'vessel-direct-6.3.6-96' > /tmp/vessel-kwin-overlay/usr/lib/vessel/desktop/direct-kwin-build.txt
           tar --hard-dereference --numeric-owner --sort=name --mtime='UTC 2026-01-01'             -C /tmp/vessel-kwin-overlay -cf - .             | zstd -T0 -10 --no-progress -f -o app/src/main/assets/vessel/kwin-direct-overlay.tar.zst
           test -s app/src/main/assets/vessel/kwin-direct-overlay.tar.zst
-          zstd -dc app/src/main/assets/vessel/kwin-direct-overlay.tar.zst             | tar -tf -             | grep -Fq './usr/lib/vessel/desktop/direct-kwin-build.txt'
+          zstd -t app/src/main/assets/vessel/kwin-direct-overlay.tar.zst
+          zstd -dc app/src/main/assets/vessel/kwin-direct-overlay.tar.zst | tar -tf - > /tmp/kwin-overlay-files.txt
+          grep -Fq './usr/lib/vessel/desktop/direct-kwin-build.txt' /tmp/kwin-overlay-files.txt
       - uses: actions/setup-java@v5
         with:
           java-version: '17'
