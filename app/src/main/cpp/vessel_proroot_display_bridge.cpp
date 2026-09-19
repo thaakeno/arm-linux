@@ -307,13 +307,18 @@ public:
                 AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY;
             zero_copy_ = AHardwareBuffer_isSupported(&probe);
         }
-        if (zero_copy_) {
-            release_event_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-            if (release_event_fd_ < 0) {
-                env->DeleteGlobalRef(callback_);
-                callback_ = nullptr;
-                return false;
-            }
+        if (!zero_copy_) {
+            env->DeleteGlobalRef(callback_);
+            callback_ = nullptr;
+            set_status("error:zero-copy-required");
+            return false;
+        }
+        release_event_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        if (release_event_fd_ < 0) {
+            env->DeleteGlobalRef(callback_);
+            callback_ = nullptr;
+            set_status("error:release-eventfd");
+            return false;
         }
         running_.store(true);
         thread_ = std::thread([this] { loop(); });
@@ -323,10 +328,18 @@ public:
     void stop(JNIEnv* env) {
         running_.store(false);
         surface_attached_.store(false);
+
+        // Retire every outstanding SurfaceFlinger callback before tearing down the
+        // child layer. Buffer-release callbacks are allowed to arrive on any thread.
+        generation_.fetch_add(1);
         if (zero_copy_) vessel_proroot_surfacecontrol_detach();
-        const int listen = listen_fd_.exchange(-1);
-        if (listen >= 0) close(listen);
-        const int ctrl = ctrl_fd_.exchange(-1);
+
+        // The bridge thread owns listen_fd_ and closes it exactly once. Closing the
+        // same descriptor from here and again in loop() can close an unrelated fd if
+        // Android reuses the number in between, which explains stop-time app crashes.
+        // poll() wakes by itself within 250 ms. Only shutdown the connected producer
+        // socket so its blocking operations return immediately.
+        const int ctrl = ctrl_fd_.load();
         if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
         wake_release_loop();
         if (thread_.joinable()) thread_.join();
@@ -393,13 +406,8 @@ public:
             height_.load(),
             refresh_mhz_.load() / 1000.0f);
         if (!ok) {
-            // Capability was present but this concrete Surface could not host the
-            // child layer. Permanently downgrade this run to the Phase-4 GPU path
-            // and reconnect KWin after Java starts the fallback presenter.
-            zero_copy_ = false;
             surface_attached_.store(false);
-            const int ctrl = ctrl_fd_.load();
-            if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
+            set_status("error:surfacecontrol-attach");
             return false;
         }
         surface_attached_.store(true);
@@ -756,33 +764,54 @@ private:
                     }
                 }
                 if (msg.type == CTRL_PICKUP_FDS) {
-                    if (!setup_resources(ctrl)) {
-                        set_status("error:consumer-resources");
-                        return;
+                    // The upstream Anland producer uses a 100 ms pickup timeout because
+                    // its normal consumer pre-deposits fds in the daemon. Vessel creates
+                    // AHardwareBuffers on demand, which can exceed that first timeout on
+                    // real phones. A retry may therefore arrive after the first reply.
+                    // Never tear down a live generation for a duplicate pickup.
+                    if (!resources_ready_) {
+                        if (!setup_resources(ctrl)) {
+                            set_status("error:consumer-resources");
+                            return;
+                        }
                     }
                 }
             }
 
+            bool resource_lost = false;
             if (pfds[1].fd >= 0 && (pfds[1].revents & (POLLHUP | POLLERR))) {
-                set_status("disconnected:fence-hup-or-error");
-                return;
-            }
-            if (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN)) {
+                set_status("transport-recovering:fence-channel");
+                resource_lost = true;
+            } else if (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN)) {
                 if (!handle_frame_done()) {
-                    if (status().rfind("error:", 0) != 0) set_status("disconnected:frame-done");
-                    return;
+                    if (status().rfind("error:", 0) != 0) {
+                        set_status("transport-recovering:frame-done");
+                    }
+                    resource_lost = true;
                 }
             }
 
-            if (pfds[2].fd >= 0 && (pfds[2].revents & (POLLHUP | POLLERR))) {
-                set_status("disconnected:data-hup-or-error");
-                return;
-            }
-            if (pfds[2].fd >= 0 && (pfds[2].revents & POLLIN)) {
+            if (!resource_lost &&
+                pfds[2].fd >= 0 &&
+                (pfds[2].revents & (POLLHUP | POLLERR))) {
+                set_status("transport-recovering:data-channel");
+                resource_lost = true;
+            } else if (!resource_lost &&
+                       pfds[2].fd >= 0 &&
+                       (pfds[2].revents & POLLIN)) {
                 if (!handle_output_event()) {
-                    set_status("disconnected:data-read");
-                    return;
+                    set_status("transport-recovering:data-read");
+                    resource_lost = true;
                 }
+            }
+
+            if (resource_lost) {
+                // Match the real Anland daemon contract: a data/fence generation can
+                // be replaced without dropping the producer control connection. KWin
+                // keeps the same ctrl fd and requests a fresh generation on its next
+                // reconnect tick.
+                cleanup_resources();
+                continue;
             }
 
             if (pfds[3].fd >= 0 && (pfds[3].revents & (POLLIN | POLLERR))) {
@@ -901,13 +930,11 @@ private:
         close(fence_pair[1]);
         close(data_pair[1]);
         close(audio_pair[1]);
-        // Vessel keeps its existing Pulse/ALSA -> Android AudioTrack bridge.
-        // Close the unused Anland audio peer immediately so KWin's optional
-        // PipeWire transport cannot accumulate PCM in an unread socket buffer.
-        if (audio_fd_ >= 0) {
-            close(audio_fd_);
-            audio_fd_ = -1;
-        }
+        // Keep the peer alive for the whole resource generation. KWin owns an audio
+        // source bound to this fd; closing our peer immediately creates a permanent
+        // HUP/EPIPE state. Vessel still uses its own Android AudioTrack bridge for
+        // playback, so unread Anland PCM is simply dropped by the producer once the
+        // non-blocking socket buffer is full.
         if (!sent_fds || !send_buffer_set()) {
             cleanup_resources();
             return false;
@@ -920,25 +947,14 @@ private:
         slot_states_.fill(SlotState::FREE);
         resources_ready_ = true;
 
-        if (!zero_copy_) {
-            presenter_fd_ = connect_abstract_presenter();
-            if (presenter_fd_ < 0) {
-                cleanup_resources();
-                set_status("error:presenter-connect");
-                return false;
-            }
-        }
-
         send_refresh();
         if (!request_next_frame()) {
             cleanup_resources();
             return false;
         }
-        set_status(zero_copy_
-            ? (surface_attached_.load()
-                ? "producer-ready-waiting-for-first-frame-zero-copy"
-                : "zero-copy-ready-waiting-for-surface")
-            : "producer-ready-waiting-for-first-frame-gpu-blit");
+        set_status(surface_attached_.load()
+            ? "producer-ready-waiting-for-first-frame-zero-copy"
+            : "zero-copy-ready-waiting-for-surface");
         return true;
     }
 
