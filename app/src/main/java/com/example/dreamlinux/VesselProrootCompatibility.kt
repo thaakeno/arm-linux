@@ -42,6 +42,16 @@ object VesselProrootDesktopProfile {
             }
         }
 
+        val directKwinMarker = guestFile(rootfs, "/usr/lib/vessel/desktop/direct-kwin-build.txt")
+        if (!directKwinMarker.isFile ||
+            directKwinMarker.readText().trim() != RELEASE
+        ) {
+            return VesselDesktopReadiness(
+                false,
+                "Direct KWin payload does not match APK pin " + RELEASE,
+            )
+        }
+
         val required = listOf(
             "/usr/bin/kwin_wayland",
             "/usr/bin/startplasma-wayland",
