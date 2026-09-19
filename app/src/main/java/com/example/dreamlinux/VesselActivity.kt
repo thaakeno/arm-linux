@@ -724,7 +724,10 @@ class VesselActivity : ComponentActivity() {
                                     // UML is explicit recovery only. If its old sparse disk is
                                     // not present, open the existing workstation installer on
                                     // direct user action; never fall back automatically.
-                                    startActivity(Intent(this@VesselActivity, VesselBootstrapActivityV2::class.java))
+                                    startActivity(
+                                        Intent(this@VesselActivity, VesselBootstrapActivityV2::class.java)
+                                            .putExtra("vessel.selectUmlAfterInstall", true),
+                                    )
                                 }
                             },
                             label = { Text(if (umlRecoveryAvailable) "UML · recovery" else "Install UML recovery") },
