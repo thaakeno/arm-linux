@@ -13,8 +13,17 @@ fi
 
 install -d -m 0700 "$XDG_RUNTIME_DIR"
 install -d -m 0700 "$XDG_RUNTIME_DIR/vessel"
+install -d -m 0700 "$HOME/.config"
 install -d -m 01777 /tmp/.X11-unix
 rm -f "$XDG_RUNTIME_DIR"/wayland-* "$XDG_RUNTIME_DIR"/plasma-* 2>/dev/null || true
+
+# There is no systemd --user manager in an ordinary Android app sandbox.
+# Plasma's legacy/session launcher is the correct mode here and avoids repeated
+# org.freedesktop.systemd1 activation timeouts.
+cat >"$HOME/.config/startkderc" <<'EOF'
+[General]
+systemdBoot=false
+EOF
 
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=KDE
@@ -29,6 +38,14 @@ unset DISPLAY
 # Never leak a surfaceless EGL default into normal Linux applications. The
 # KWin wrapper scopes EGL_PLATFORM=surfaceless to the compositor process only.
 unset EGL_PLATFORM
+
+# Keep Qt 6's distro QML tree explicit. The Anland KWin overlay must not make
+# Plasma lose the normal Debian import path (notably org.kde.plasma.core).
+qt_qml_path="$(qtpaths6 --query QT_INSTALL_QML 2>/dev/null || true)"
+if [[ -n "$qt_qml_path" && -d "$qt_qml_path" ]]; then
+  export QML_IMPORT_PATH="$qt_qml_path${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+  export QML2_IMPORT_PATH="$qt_qml_path${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
+fi
 
 # startplasma resolves KWin from PATH. Shadow only the compositor executables so
 # surfaceless/Anland settings do not leak into normal applications.
@@ -47,9 +64,27 @@ if ! command -v startplasma-wayland >/dev/null 2>&1; then
   exit 73
 fi
 
-exec dbus-run-session -- /bin/sh -c '
+exec dbus-run-session -- /bin/bash -c '
+  set -u
+  export PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR"
+
+  # KWin/xdg-desktop-portal expect a PipeWire core even though Vessel keeps its
+  # existing ALSA/Pulse -> Android AudioTrack path for actual playback.
+  if command -v pipewire >/dev/null 2>&1; then
+    rm -f "$XDG_RUNTIME_DIR/pipewire-0" "$XDG_RUNTIME_DIR/pipewire-0.lock"
+    pipewire >"$XDG_RUNTIME_DIR/vessel/pipewire.log" 2>&1 &
+    for _ in $(seq 1 30); do
+      [[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]] && break
+      sleep 0.05
+    done
+    if [[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]] && command -v wireplumber >/dev/null 2>&1; then
+      wireplumber >"$XDG_RUNTIME_DIR/vessel/wireplumber.log" 2>&1 &
+    fi
+  fi
+
   if command -v pulseaudio >/dev/null 2>&1; then
     pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
   fi
+
   exec startplasma-wayland
 '
