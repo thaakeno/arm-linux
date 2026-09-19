@@ -322,6 +322,7 @@ public:
 
     void stop(JNIEnv* env) {
         running_.store(false);
+        producer_connected_.store(false);
         surface_attached_.store(false);
         if (zero_copy_) vessel_proroot_surfacecontrol_detach();
         const int listen = listen_fd_.exchange(-1);
@@ -363,6 +364,7 @@ public:
             // KWin receives screen geometry only during producer handshake.
             // Break only the current control connection; its reconnect path
             // immediately receives the new geometry and a fresh AHB pool.
+            set_disconnect_reason("requested-resize-reconnect");
             const int ctrl = ctrl_fd_.load();
             if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
         } else {
@@ -388,6 +390,7 @@ public:
             // and reconnect KWin after Java starts the fallback presenter.
             zero_copy_ = false;
             surface_attached_.store(false);
+            set_disconnect_reason("surfacecontrol-downgrade-reconnect");
             const int ctrl = ctrl_fd_.load();
             if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
             return false;
@@ -402,6 +405,7 @@ public:
         if (!zero_copy_) return;
         surface_attached_.store(false);
         vessel_proroot_surfacecontrol_detach();
+        set_disconnect_reason("surface-detached-reconnect");
         const int ctrl = ctrl_fd_.load();
         if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
         set_status("zero-copy-surface-detached");
@@ -426,6 +430,27 @@ public:
 
     uint64_t frames_released() const {
         return frames_released_.load();
+    }
+
+    bool producer_connected() const {
+        return producer_connected_.load();
+    }
+
+    uint64_t producer_generation() const {
+        return producer_generation_.load();
+    }
+
+    bool surface_attached() const {
+        return surface_attached_.load();
+    }
+
+    uint64_t last_frame_presented_ms() const {
+        return last_frame_presented_ms_.load();
+    }
+
+    std::string disconnect_reason() const {
+        std::lock_guard<std::mutex> guard(status_lock_);
+        return disconnect_reason_;
     }
 
     float effective_refresh() const {
@@ -532,6 +557,9 @@ private:
     std::atomic<bool> surface_attached_{false};
     std::atomic<uint64_t> frames_presented_{0};
     std::atomic<uint64_t> frames_released_{0};
+    std::atomic<bool> producer_connected_{false};
+    std::atomic<uint64_t> producer_generation_{0};
+    std::atomic<uint64_t> last_frame_presented_ms_{0};
 
     // Android 30-35 compatibility fallback keeps the Phase-4 GPU-blit presenter.
     std::array<bool, BUFFER_COUNT> presenter_registered_{{false, false, false}};
@@ -546,10 +574,22 @@ private:
 
     mutable std::mutex status_lock_;
     std::string status_ = "idle";
+    std::string disconnect_reason_ = "none";
+
+    static uint64_t monotonic_ms() {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
 
     void set_status(const std::string& value) {
         std::lock_guard<std::mutex> guard(status_lock_);
         status_ = value;
+    }
+
+    void set_disconnect_reason(const std::string& value) {
+        std::lock_guard<std::mutex> guard(status_lock_);
+        disconnect_reason_ = value;
     }
 
     void unlink_socket() {
@@ -680,6 +720,7 @@ private:
             if (client < 0) continue;
             ctrl_fd_.store(client);
             serve_producer(client);
+            producer_connected_.store(false);
             ctrl_fd_.store(-1);
             close(client);
             cleanup_resources();
@@ -694,15 +735,25 @@ private:
     }
 
     void serve_producer(int ctrl) {
+        auto disconnected = [this](const char* reason) {
+            producer_connected_.store(false);
+            set_disconnect_reason(reason);
+        };
+
         CtrlMsg hello{};
         if (!recv_all(ctrl, &hello, sizeof(hello)) || hello.type != CTRL_PRODUCER_HELLO) {
             set_status("error:producer-hello");
+            disconnected("producer-hello-failed");
             return;
         }
         if (!send_screen(ctrl)) {
             set_status("error:screen-info");
+            disconnected("screen-info-send-failed");
             return;
         }
+        producer_connected_.store(true);
+        producer_generation_.fetch_add(1);
+        set_disconnect_reason("none");
         set_status("kwin-connected");
 
         while (running_.load()) {
@@ -723,32 +774,57 @@ private:
             }
             const int rc = poll(pfds.data(), pfds.size(), 250);
             if (rc < 0 && errno == EINTR) continue;
-            if (rc < 0) return;
+            if (rc < 0) {
+                disconnected("producer-poll-error");
+                return;
+            }
 
-            if (pfds[0].revents & (POLLHUP | POLLERR)) return;
+            if (pfds[0].revents & (POLLHUP | POLLERR)) {
+                disconnected("producer-control-hangup");
+                return;
+            }
             if (pfds[0].revents & POLLIN) {
                 CtrlMsg msg{};
-                if (!recv_all(ctrl, &msg, sizeof(msg))) return;
+                if (!recv_all(ctrl, &msg, sizeof(msg))) {
+                    disconnected("producer-control-eof");
+                    return;
+                }
                 if (msg.size > 0) {
                     std::vector<uint8_t> discard(msg.size);
-                    if (!recv_all(ctrl, discard.data(), discard.size())) return;
+                    if (!recv_all(ctrl, discard.data(), discard.size())) {
+                        disconnected("producer-control-payload-eof");
+                        return;
+                    }
                 }
                 if (msg.type == CTRL_PICKUP_FDS) {
                     if (!setup_resources(ctrl)) {
                         set_status("error:consumer-resources");
+                        disconnected("consumer-resource-setup-failed");
                         return;
                     }
                 }
             }
 
-            if (pfds[1].fd >= 0 && (pfds[1].revents & (POLLHUP | POLLERR))) return;
+            if (pfds[1].fd >= 0 && (pfds[1].revents & (POLLHUP | POLLERR))) {
+                disconnected("frame-fence-hangup");
+                return;
+            }
             if (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN)) {
-                if (!handle_frame_done()) return;
+                if (!handle_frame_done()) {
+                    disconnected("frame-processing-failed");
+                    return;
+                }
             }
 
-            if (pfds[2].fd >= 0 && (pfds[2].revents & (POLLHUP | POLLERR))) return;
+            if (pfds[2].fd >= 0 && (pfds[2].revents & (POLLHUP | POLLERR))) {
+                disconnected("data-channel-hangup");
+                return;
+            }
             if (pfds[2].fd >= 0 && (pfds[2].revents & POLLIN)) {
-                if (!handle_output_event()) return;
+                if (!handle_output_event()) {
+                    disconnected("output-event-failed");
+                    return;
+                }
             }
 
             if (pfds[3].fd >= 0 && (pfds[3].revents & (POLLIN | POLLERR))) {
@@ -1022,6 +1098,7 @@ private:
             // ASurfaceTransaction owns the acquire fence after a successful
             // setBufferWithRelease call. Reuse waits for its release callback.
             frames_presented_.fetch_add(1);
+            last_frame_presented_ms_.store(monotonic_ms());
             set_status("presenting-proroot-surfacecontrol-zero-copy");
             return request_next_frame();
         }
@@ -1033,6 +1110,7 @@ private:
             return false;
         }
         frames_presented_.fetch_add(1);
+        last_frame_presented_ms_.store(monotonic_ms());
         return request_next_frame();
     }
 
@@ -1258,6 +1336,37 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_com_example_dreamlinux_VesselProrootDisplayBridge_nativeFramesReleased(
     JNIEnv*, jobject) {
     return static_cast<jlong>(g_bridge.frames_released());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_dreamlinux_VesselProrootDisplayBridge_nativeProducerConnected(
+    JNIEnv*, jobject) {
+    return g_bridge.producer_connected() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_example_dreamlinux_VesselProrootDisplayBridge_nativeProducerGeneration(
+    JNIEnv*, jobject) {
+    return static_cast<jlong>(g_bridge.producer_generation());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_dreamlinux_VesselProrootDisplayBridge_nativeSurfaceAttached(
+    JNIEnv*, jobject) {
+    return g_bridge.surface_attached() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_example_dreamlinux_VesselProrootDisplayBridge_nativeLastFramePresentedMs(
+    JNIEnv*, jobject) {
+    return static_cast<jlong>(g_bridge.last_frame_presented_ms());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_example_dreamlinux_VesselProrootDisplayBridge_nativeDisconnectReason(
+    JNIEnv* env, jobject) {
+    const std::string value = g_bridge.disconnect_reason();
+    return env->NewStringUTF(value.c_str());
 }
 
 extern "C" JNIEXPORT jfloat JNICALL
