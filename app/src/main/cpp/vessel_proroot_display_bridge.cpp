@@ -294,6 +294,12 @@ public:
         width_.store(width);
         height_.store(height);
         refresh_mhz_.store(static_cast<uint32_t>(refresh * 1000.0f + 0.5f));
+        producer_connected_.store(false);
+        producer_generation_.store(0);
+        frames_presented_.store(0);
+        frames_released_.store(0);
+        last_frame_presented_ms_.store(0);
+        set_disconnect_reason("none");
         zero_copy_ = vessel_proroot_surfacecontrol_available();
         if (zero_copy_) {
             AHardwareBuffer_Desc probe{};
@@ -358,8 +364,6 @@ public:
         if (size_changed && !producer_connected_.load()) {
             width_.store(next_width);
             height_.store(next_height);
-        } else if (size_changed) {
-            set_disconnect_reason("live-resize-deferred");
         }
 
         refresh_mhz_.store(
@@ -409,7 +413,6 @@ public:
         // Surface lifecycle is independent from the KWin producer lifecycle.
         // Keep the producer socket/resources alive; attach_surface() will request
         // a fresh frame when Android supplies the next Surface.
-        set_disconnect_reason("surface-detached");
         set_status("zero-copy-surface-detached");
     }
 
@@ -739,7 +742,8 @@ private:
     void serve_producer(int ctrl) {
         auto disconnected = [this](const char* reason) {
             producer_connected_.store(false);
-            set_disconnect_reason(reason);
+            std::lock_guard<std::mutex> guard(status_lock_);
+            if (disconnect_reason_ == "none") disconnect_reason_ = reason;
         };
 
         CtrlMsg hello{};
