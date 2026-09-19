@@ -741,7 +741,7 @@ class VmSessionService : Service() {
                     "/usr/local/lib/vessel/app_discovery.py ${shellQuote(query)} ${shellQuote(normalizedSort)} ${shellQuote(normalizedCategory)}",
                     30,
                 )
-                check(result.optBoolean("ok")) { "Debian app discovery returned rc=${result.optInt("rc", -1)}" }
+                check(result.optBoolean("ok")) { "Debian app discovery returned exitCode=${result.optInt("exitCode", -1)}: ${result.optString("output").takeLast(1800)}" }
                 val apps = parseApps(result.optString("output"))
                 appStore.value = appStore.value.copy(
                     apps = apps,
@@ -783,7 +783,7 @@ class VmSessionService : Service() {
                             policy + "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update",
                             600,
                         )
-                        check(update.optBoolean("ok")) { "APT update returned rc=${update.optInt("rc", -1)}" }
+                        check(update.optBoolean("ok")) { "APT update returned exitCode=${update.optInt("exitCode", -1)}: ${update.optString("output").takeLast(2400)}" }
                     }
                     appStore.value = appStore.value.copy(
                         operationProgress = -1,
@@ -801,7 +801,7 @@ class VmSessionService : Service() {
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 remove -y ${shellQuote(packageName)}"
                 }
                 val result = runtime.guest(policy + action, 1800)
-                check(result.optBoolean("ok")) { "APT returned rc=${result.optInt("rc", -1)}: ${result.optString("output").takeLast(1800)}" }
+                check(result.optBoolean("ok")) { "APT returned exitCode=${result.optInt("exitCode", -1)}: ${result.optString("output").takeLast(2400)}" }
                 appStore.value = appStore.value.copy(
                     operationProgress = 92,
                     operationDetail = "Refreshing desktop metadata",
