@@ -181,9 +181,13 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     override fun surfaceCreated(holder: SurfaceHolder) {
         surfaceView.requestFocus()
         if (!surfaceAttached) {
-            if (VesselProrootDisplayBridge.attachSurface(holder.surface)) {
-                clearParentFrameRateHint(holder.surface)
+            if (VesselProrootDisplayBridge.isActive()) {
+                if (VesselProrootDisplayBridge.attachSurface(holder.surface)) {
+                    clearParentFrameRateHint(holder.surface)
+                }
             } else {
+                // UML recovery owns the legacy presenter. Production proroot never
+                // silently switches presentation architecture.
                 VesselWaylandPresenter.attach(holder.surface)
             }
             surfaceAttached = true
@@ -191,7 +195,7 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        val directProroot = VesselProrootDisplayBridge.usesZeroCopyPresentation()
+        val directProroot = VesselProrootDisplayBridge.isActive()
         if (!directProroot) {
             VesselWaylandPresenter.surfaceChanged(width, height)
         }
@@ -222,7 +226,9 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
     private fun detachSurfaceOnce() {
         if (surfaceAttached) {
             surfaceAttached = false
-            if (!VesselProrootDisplayBridge.detachSurface()) {
+            if (VesselProrootDisplayBridge.isActive()) {
+                VesselProrootDisplayBridge.detachSurface()
+            } else {
                 VesselWaylandPresenter.detach()
             }
         }
@@ -236,8 +242,10 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
         post {
             val surface = surfaceView.holder.surface
             if (surfaceAttached && surface.isValid) {
-                if (VesselProrootDisplayBridge.attachSurface(surface)) {
-                    clearParentFrameRateHint(surface)
+                if (VesselProrootDisplayBridge.isActive()) {
+                    if (VesselProrootDisplayBridge.attachSurface(surface)) {
+                        clearParentFrameRateHint(surface)
+                    }
                 } else {
                     VesselWaylandPresenter.attach(surface)
                     if (surfaceView.width > 0 && surfaceView.height > 0) {
@@ -247,23 +255,6 @@ class LinuxDesktopView(context: Context) : FrameLayout(context), SurfaceHolder.C
                         )
                     }
                 }
-            }
-        }
-    }
-
-    fun setProrootFallbackFrameRate(refresh: Float) {
-        if (Build.VERSION.SDK_INT < 30) return
-        post {
-            if (!surfaceAttached ||
-                VesselProrootDisplayBridge.usesZeroCopyPresentation()
-            ) return@post
-            val surface = surfaceView.holder.surface
-            if (!surface.isValid) return@post
-            runCatching {
-                surface.setFrameRate(
-                    refresh.coerceIn(30f, 240f),
-                    Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
-                )
             }
         }
     }
