@@ -275,12 +275,12 @@ public:
 
     void stop(JNIEnv* env) {
         running_.store(false);
-        surface_attached_.store(false);
+        const bool had_surface = surface_attached_.exchange(false);
 
         // Retire every outstanding SurfaceFlinger callback before tearing down the
         // child layer. Buffer-release callbacks are allowed to arrive on any thread.
         generation_.fetch_add(1);
-        if (zero_copy_) vessel_proroot_surfacecontrol_detach();
+        if (zero_copy_ && had_surface) vessel_proroot_surfacecontrol_detach();
 
         // The bridge thread owns listen_fd_ and closes it exactly once. Closing the
         // same descriptor from here and again in loop() can close an unrelated fd if
