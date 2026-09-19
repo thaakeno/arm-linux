@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+REAL=/usr/lib/vessel/xwayland/Xwayland.real
+TRACE=/usr/lib/vessel/xwayland/libvessel-sigsys-trace.so
+
+[ -x "$REAL" ] || {
+  echo "Vessel XWayland real binary is missing: $REAL" >&2
+  exit 127
+}
+
+# Android app seccomp profiles have historically rejected rseq on some releases.
+# Disabling glibc's optional rseq fast path is safe and gives glibc its normal
+# non-rseq fallback. Any remaining SIGSYS is logged by the preload shim with the
+# exact syscall number instead of another useless "Bad system call".
+case "${GLIBC_TUNABLES:-}" in
+  *glibc.pthread.rseq=*) ;;
+  "") export GLIBC_TUNABLES="glibc.pthread.rseq=0" ;;
+  *) export GLIBC_TUNABLES="$GLIBC_TUNABLES:glibc.pthread.rseq=0" ;;
+esac
+
+if [ -s "$TRACE" ]; then
+  if [ -n "${LD_PRELOAD:-}" ]; then
+    export LD_PRELOAD="$TRACE:$LD_PRELOAD"
+  else
+    export LD_PRELOAD="$TRACE"
+  fi
+fi
+
+exec "$REAL" "$@"
