@@ -1062,6 +1062,10 @@ class VmSessionService : Service() {
                     "compat-probe.log",
                     "compat-kernel-probe.log",
                     "compat-session-dbus.log",
+                    "plasma-qml-tmp-preflight.log",
+                    "plasma-qml-repair.log",
+                    "plasma-qml-ksvg-ldd.log",
+                    "plasma-live-probe.log",
                     "desktop.log",
                     "guest-command.log",
                 )
