@@ -108,6 +108,24 @@ class VmSessionService : Service() {
         val diagnostics = MutableStateFlow("No diagnostics collected yet.")
         @Volatile var active: VmSessionService? = null
 
+        val PROROOT_DIAGNOSTIC_LOGS = listOf(
+            "startup-journal.log",
+            "desktop.log",
+            "plasma-watch.log",
+            "proroot.log",
+            "proroot-smoke.log",
+            "proc-self-exe.log",
+            "system-dbus.log",
+            "system-dbus-probe.log",
+            "compat-probe.log",
+            "compat-kernel-probe.log",
+            "compat-session-dbus.log",
+            "plasma-qml-tmp-preflight.log",
+            "plasma-qml-repair.log",
+            "plasma-qml-ksvg-ldd.log",
+            "guest-command.log",
+        )
+
         private val PACKAGE_RE = Regex("[a-z0-9][a-z0-9+.-]{0,127}")
         private val DEFAULT_APPS = linkedMapOf(
             "firefox-esr" to "Firefox",
@@ -1027,6 +1045,17 @@ class VmSessionService : Service() {
                 )
                 appendLine("audio=${VesselAudioBridge.status()}")
                 appendLine("presenter=$activePresenter")
+                if (proroot) {
+                    appendLine("framesPresented=${VesselProrootDisplayBridge.framesPresented()} framesReleased=${VesselProrootDisplayBridge.framesReleased()}")
+                    appendLine("zeroCopy=${VesselProrootDisplayBridge.usesZeroCopyPresentation()} presentationPath=${VesselProrootDisplayBridge.presentationPath()}")
+                    val plasmaReady = File(
+                        filesDir,
+                        "vessel-proroot/volatile/run/user/" +
+                            android.os.Process.myUid() +
+                            "/vessel/plasma-ready",
+                    )
+                    appendLine("plasmaDbusReady=${plasmaReady.isFile}")
+                }
                 appendLine("vcpus=${runtime.processorCount} guestRamMiB=${runtime.guestMemoryMb}")
             }
 
@@ -1052,33 +1081,17 @@ class VmSessionService : Service() {
 
             val persisted = if (proroot) {
                 val dir = File(filesDir, "vessel-proroot/diagnostics")
-                val names = listOf(
-                    "startup-journal.log",
-                    "proroot.log",
-                    "proroot-smoke.log",
-                    "proc-self-exe.log",
-                    "system-dbus.log",
-                    "system-dbus-probe.log",
-                    "compat-probe.log",
-                    "compat-kernel-probe.log",
-                    "compat-session-dbus.log",
-                    "plasma-qml-tmp-preflight.log",
-                    "plasma-qml-repair.log",
-                    "plasma-qml-ksvg-ldd.log",
-                    "plasma-live-probe.log",
-                    "desktop.log",
-                    "guest-command.log",
-                )
                 buildString {
-                    appendLine("=== PROROOT PERSISTED LOGS ===")
-                    names.forEach { name ->
-                        val file = File(dir, name)
-                        if (!file.isFile) return@forEach
+                    appendLine("=== PROROOT LOG SUMMARY ===")
+                    PROROOT_DIAGNOSTIC_LOGS.forEach { name ->
+                        val text = readDiagnosticLog(name)
+                        if (text.isBlank() || text.startsWith("[missing]")) return@forEach
                         appendLine("--- " + name + " ---")
-                        val text = runCatching { file.readText() }
-                            .getOrElse { "[read failed: " + (it.message ?: it.javaClass.simpleName) + "]" }
-                        appendLine(text.takeLast(18_000))
+                        val limit = if (name == "guest-command.log") 8_000 else 48_000
+                        appendLine(text.takeLast(limit))
                     }
+                    appendLine()
+                    appendLine("Use Full runtime logs below to inspect/copy an entire individual log without truncation.")
                 }
             } else {
                 ""
@@ -1090,8 +1103,26 @@ class VmSessionService : Service() {
                     persisted + "\n" +
                     "=== RUNTIME STATE TAIL ===\n" +
                     state.value.console.takeLast(18_000)
-                ).takeLast(120_000)
+                ).takeLast(512_000)
         }
+    }
+
+    fun readDiagnosticLog(name: String): String {
+        if (runtime.kind != VesselRuntimeKind.PROROOT) return "[not available for UML]"
+        if (name !in PROROOT_DIAGNOSTIC_LOGS) return "[unknown log: $name]"
+        val file = if (name == "plasma-watch.log") {
+            File(
+                filesDir,
+                "vessel-proroot/volatile/run/user/" +
+                    android.os.Process.myUid() +
+                    "/vessel/plasma-watch.log",
+            )
+        } else {
+            File(filesDir, "vessel-proroot/diagnostics/" + name)
+        }
+        if (!file.isFile) return "[missing] " + file.absolutePath
+        return runCatching { file.readText() }
+            .getOrElse { "[read failed: " + (it.message ?: it.javaClass.simpleName) + "]" }
     }
 
     private fun hostDiskStats(): Triple<Long, Long, Long> {
