@@ -84,7 +84,7 @@ test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir
 test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/qmldir
 test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so
 ! ldd -r /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so 2>&1 | grep -Eqi 'not found|undefined symbol'
-touch /var/cache/vessel/plasma-qml-proroot-production-v14
+touch /var/cache/vessel/plasma-qml-proroot-production-v15
 
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /tmp/* /var/tmp/*
