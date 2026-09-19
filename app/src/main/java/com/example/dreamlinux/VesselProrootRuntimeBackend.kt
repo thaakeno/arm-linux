@@ -28,7 +28,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v9"
+        const val REVISION = "proroot-production-v10"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -317,6 +317,15 @@ class VesselProrootRuntimeBackend(
         }
         val presenter = VesselWaylandPresenter.status()
         val bridge = VesselProrootDisplayBridge.status()
+        val producerConnected = VesselProrootDisplayBridge.producerConnected()
+        val producerGeneration = VesselProrootDisplayBridge.producerGeneration()
+        val surfaceAttached = VesselProrootDisplayBridge.surfaceAttached()
+        val framesPresented = VesselProrootDisplayBridge.framesPresented()
+        val framesReleased = VesselProrootDisplayBridge.framesReleased()
+        val displayHealthy =
+            running && process?.isAlive() == true && VesselProrootDisplayBridge.displayHealthy()
+        desktopReady = displayHealthy
+        val displayState = VesselProrootDisplayBridge.displayState()
         baseState(storage)
             .put("rootfsReady", layout.rootfsReady())
             .put("runtimeAssetsReady", hostAssetsReady())
@@ -339,8 +348,15 @@ class VesselProrootRuntimeBackend(
             .put("presentationPath", VesselProrootDisplayBridge.presentationPath())
             .put("zeroCopyPresentation", VesselProrootDisplayBridge.usesZeroCopyPresentation())
             .put("effectiveRefreshHz", VesselProrootDisplayBridge.effectiveRefresh().toDouble())
-            .put("framesPresented", VesselProrootDisplayBridge.framesPresented())
-            .put("framesReleased", VesselProrootDisplayBridge.framesReleased())
+            .put("framesPresented", framesPresented)
+            .put("framesReleased", framesReleased)
+            .put("producerConnected", producerConnected)
+            .put("producerGeneration", producerGeneration)
+            .put("producerDisconnectReason", VesselProrootDisplayBridge.disconnectReason())
+            .put("surfaceAttached", surfaceAttached)
+            .put("lastFramePresentedMs", VesselProrootDisplayBridge.lastFramePresentedMs())
+            .put("displayState", displayState)
+            .put("displayHealthy", displayHealthy)
             .put("audioTransport", VesselAudioBridge.status())
             .put("logTail", process?.outputTail().orEmpty())
     }
@@ -501,11 +517,14 @@ class VesselProrootRuntimeBackend(
                     )
                 }
                 bridge = VesselProrootDisplayBridge.status()
-                if (bridge.startsWith("presenting-proroot-")) break
+                if (VesselProrootDisplayBridge.displayHealthy()) break
                 Thread.sleep(50)
             }
-            check(bridge.startsWith("presenting-proroot-")) {
-                "KWin did not reach Vessel's native presentation path: " + bridge
+            check(VesselProrootDisplayBridge.displayHealthy()) {
+                "KWin did not reach a healthy native presentation path: " + bridge +
+                    " producer=" + VesselProrootDisplayBridge.producerConnected() +
+                    " surface=" + VesselProrootDisplayBridge.surfaceAttached() +
+                    " disconnect=" + VesselProrootDisplayBridge.disconnectReason()
             }
 
             desktopReady = true
@@ -694,8 +713,9 @@ class VesselProrootRuntimeBackend(
     private fun baseState(ok: Boolean): JSONObject {
         val presenter = VesselWaylandPresenter.status()
         val bridge = VesselProrootDisplayBridge.status()
+        val prorootFrameReady = VesselProrootDisplayBridge.displayHealthy()
         val frameReady =
-            bridge.startsWith("presenting-proroot-") ||
+            prorootFrameReady ||
                 presenter.startsWith("presenting-native-surface") ||
                 presenter.startsWith("presenting-retained")
         return JSONObject()
@@ -710,9 +730,13 @@ class VesselProrootRuntimeBackend(
             .put("softwareFallback", false)
             .put("running", running)
             .put("guestReady", hostAssetsReady() && layout.rootfsReady())
-            .put("desktopReady", desktopReady)
+            .put("desktopReady", desktopReady && prorootFrameReady)
             .put("frameContentValidated", frameReady)
-            .put("inputConnected", bridge.startsWith("presenting-proroot-"))
+            .put(
+                "inputConnected",
+                VesselProrootDisplayBridge.producerConnected() &&
+                    VesselProrootDisplayBridge.framesPresented() > 0L,
+            )
             .put("machineDir", machineDir.absolutePath)
             .put("guestMemoryMb", 0)
             .put("processorCount", processorCount)
