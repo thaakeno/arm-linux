@@ -305,6 +305,22 @@ class VesselProrootRuntimeBackend(
     private fun prepareRootlessDesktopPolicy(): Boolean = runCatching {
         ensurePinnedKwinOverlay()
 
+        // Keep the production Plasma launcher APK-owned so existing persistent
+        // rootfs installs receive readiness/session fixes without a rootfs
+        // replacement.
+        val starter = File(
+            layout.rootfsDir,
+            VesselProrootDesktopProfile.STARTER.removePrefix("/"),
+        )
+        check(starter.parentFile?.isDirectory == true || starter.parentFile?.mkdirs() == true) {
+            "Could not create Plasma launcher directory"
+        }
+        val starterBytes = appContext.assets.open("vessel/vessel-start-plasma").use { it.readBytes() }
+        if (!starter.isFile || !starter.readBytes().contentEquals(starterBytes)) {
+            starter.writeBytes(starterBytes)
+            Os.chmod(starter.absolutePath, 0x1ED) // 0755
+        }
+
         val xdg = File(layout.rootfsDir, "etc/xdg")
         check(xdg.isDirectory || xdg.mkdirs()) { "Could not create /etc/xdg" }
         val startKdeRc = File(xdg, "startkderc")
@@ -589,6 +605,19 @@ class VesselProrootRuntimeBackend(
             }
         }
         val bridge = VesselProrootDisplayBridge.status()
+        if (running && process != null && process.isAlive() && !desktopReady) {
+            val readyMarker = File(
+                layout.guestRunDir,
+                "user/" + Process.myUid() + "/vessel/plasma-ready",
+            )
+            if (readyMarker.isFile &&
+                runCatching { readyMarker.readText().contains("org.kde.plasmashell") }
+                    .getOrDefault(false)
+            ) {
+                desktopReady = true
+                startupJournal.mark("desktop.ready.async", bridge)
+            }
+        }
         baseState(storage)
             .put("rootfsReady", layout.rootfsReady())
             .put("runtimeAssetsReady", hostAssetsReady())
@@ -613,6 +642,13 @@ class VesselProrootRuntimeBackend(
             .put("effectiveRefreshHz", VesselProrootDisplayBridge.effectiveRefresh().toDouble())
             .put("framesPresented", VesselProrootDisplayBridge.framesPresented())
             .put("framesReleased", VesselProrootDisplayBridge.framesReleased())
+            .put(
+                "plasmaDbusReady",
+                File(
+                    layout.guestRunDir,
+                    "user/" + Process.myUid() + "/vessel/plasma-ready",
+                ).isFile,
+            )
             .put("audioTransport", VesselAudioBridge.status())
             .put("logTail", process?.outputTail().orEmpty())
     }
@@ -785,48 +821,72 @@ class VesselProrootRuntimeBackend(
                 "KWin did not reach Vessel's native presentation path: " + bridge
             }
 
-            // A KWin background buffer is not proof that the desktop is usable.
-            // Wait for the actual Plasma shell and reject known fatal QML failures
-            // before exposing VISIBLE to the Android UI.
-            progress("proroot_plasma_shell", 96, "Validating live Plasma shell and QML")
-            val shellProbe = VesselProrootProcessRunner.run(
-                desktopLaunchPlan(
-                    listOf(
-                        "/bin/sh",
-                        "-lc",
-                        "for i in $(seq 1 100); do " +
-                            "pgrep -x kwin_wayland >/dev/null && " +
-                            "pgrep -x plasmashell >/dev/null && exit 0; " +
-                            "sleep .1; done; exit 1",
-                    ),
-                    includeSharedStorage = false,
-                ),
-                timeoutSeconds = 15,
-                logFile = File(layout.diagnosticsDir, "plasma-live-probe.log"),
+            // KWin has already delivered a native GPU frame. Plasma readiness
+            // is now proven by a marker written from inside the exact
+            // dbus-run-session that owns org.kde.plasmashell. Never start a
+            // second proroot process and never use pgrep/procfs as a liveness
+            // oracle; Android/proroot process identity is not stable enough for
+            // that contract.
+            progress("proroot_plasma_shell", 96, "Waiting for Plasma D-Bus registration")
+            val plasmaReady = File(
+                layout.guestRunDir,
+                "user/" + uid + "/vessel/plasma-ready",
             )
-            check(shellProbe.exitCode == 0) {
-                "Plasma shell did not become live: " + shellProbe.output.takeLast(3000)
+            val plasmaWatch = File(
+                layout.guestRunDir,
+                "user/" + uid + "/vessel/plasma-watch.log",
+            )
+            val readyDeadline = SystemClock.elapsedRealtime() + 15_000L
+            while (SystemClock.elapsedRealtime() < readyDeadline) {
+                if (!process.isAlive()) {
+                    error(
+                        "Plasma session exited while waiting for org.kde.plasmashell: " +
+                            process.outputTail().takeLast(6000),
+                    )
+                }
+                if (plasmaReady.isFile &&
+                    plasmaReady.readText().contains("org.kde.plasmashell")
+                ) {
+                    desktopReady = true
+                    break
+                }
+                Thread.sleep(50)
             }
-            Thread.sleep(250)
+
             val plasmaTail = process.outputTail()
-            val fatalQml = Regex(
+            val qmlWarning = Regex(
                 """(?i)(module\s+["'][^"']+["']\s+is not installed|""" +
                     """KSvg\.SvgItem\s+is not a type|""" +
                     """Type\s+[^\n]+\s+unavailable|""" +
                     """Failed to load overview:)""",
-            )
-            check(!fatalQml.containsMatchIn(plasmaTail)) {
-                "Plasma QML failed after startup:\n" + plasmaTail.takeLast(6000)
+            ).find(plasmaTail)?.value
+            if (qmlWarning != null) {
+                startupJournal.mark("plasma.qml.warning", qmlWarning.take(1000))
             }
 
-            desktopReady = true
-            startupJournal.mark("desktop.ready", bridge)
-            progress(
-                "proroot_ready",
-                100,
-                "Plasma Wayland is using direct KGSL + " +
-                    VesselProrootDisplayBridge.presentationPath(),
-            )
+            if (desktopReady) {
+                startupJournal.mark("desktop.ready", bridge)
+                progress(
+                    "proroot_ready",
+                    100,
+                    "Plasma Wayland is using direct KGSL + " +
+                        VesselProrootDisplayBridge.presentationPath(),
+                )
+            } else {
+                // A diagnostic watcher timeout must never tear down a rendering
+                // compositor. Keep the Linux session alive; status() promotes
+                // desktopReady asynchronously as soon as the same-session D-Bus
+                // marker appears.
+                startupJournal.mark(
+                    "desktop.pending.plasma-dbus",
+                    plasmaWatch.takeIf { it.isFile }?.readText()?.takeLast(2000).orEmpty(),
+                )
+                progress(
+                    "proroot_plasma_shell",
+                    98,
+                    "Native GPU frame is live; Plasma D-Bus registration is still starting",
+                )
+            }
             status()
         } catch (error: Throwable) {
             startupJournal.failure(error)
