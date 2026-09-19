@@ -1,8 +1,11 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 /*
@@ -10,9 +13,12 @@
  * existing SIGSYS behavior, but wrap the installed handler so a seccomp TRAP
  * records the exact syscall/arch/code before Xorg aborts or handles it.
  *
- * This is deliberately diagnostic, not a blanket seccomp bypass.  Once the
- * blocked syscall is known, Vessel can implement the narrow Linux/Android
- * compatibility fallback instead of guessing.
+ * For Linux syscalls that are explicitly designed to have an ENOSYS fallback
+ * (newer optional kernel APIs such as rseq/clone3/close_range/Landlock), the
+ * wrapper converts Android's SECCOMP_RET_TRAP into -ENOSYS on AArch64. That is
+ * the same compatibility signal applications receive on an older Linux kernel;
+ * it does not weaken or bypass Android's seccomp policy. Unknown SIGSYS events
+ * still go to Xorg's original handler after being logged.
  */
 
 typedef int (*sigaction_fn)(int, const struct sigaction *, struct sigaction *);
@@ -61,8 +67,67 @@ static void log_sigsys(const siginfo_t *info) {
     (void)write(STDERR_FILENO, buf, n);
 }
 
+static int syscall_has_safe_enosys_fallback(int nr) {
+#ifdef SYS_rseq
+    if (nr == SYS_rseq) return 1;
+#endif
+#ifdef SYS_clone3
+    if (nr == SYS_clone3) return 1;
+#endif
+#ifdef SYS_close_range
+    if (nr == SYS_close_range) return 1;
+#endif
+#ifdef SYS_openat2
+    if (nr == SYS_openat2) return 1;
+#endif
+#ifdef SYS_faccessat2
+    if (nr == SYS_faccessat2) return 1;
+#endif
+#ifdef SYS_epoll_pwait2
+    if (nr == SYS_epoll_pwait2) return 1;
+#endif
+#ifdef SYS_landlock_create_ruleset
+    if (nr == SYS_landlock_create_ruleset) return 1;
+#endif
+#ifdef SYS_landlock_add_rule
+    if (nr == SYS_landlock_add_rule) return 1;
+#endif
+#ifdef SYS_landlock_restrict_self
+    if (nr == SYS_landlock_restrict_self) return 1;
+#endif
+#ifdef SYS_io_uring_setup
+    if (nr == SYS_io_uring_setup) return 1;
+#endif
+#ifdef SYS_io_uring_enter
+    if (nr == SYS_io_uring_enter) return 1;
+#endif
+#ifdef SYS_io_uring_register
+    if (nr == SYS_io_uring_register) return 1;
+#endif
+    return 0;
+}
+
+static int return_enosys_for_optional_seccomp(siginfo_t *info, void *context) {
+#if defined(__linux__) && defined(__aarch64__)
+    if (!info || !context || info->si_code != SYS_SECCOMP) return 0;
+    if (!syscall_has_safe_enosys_fallback(info->si_syscall)) return 0;
+
+    ucontext_t *uc = (ucontext_t *)context;
+    uc->uc_mcontext.regs[0] = (uint64_t)(-(int64_t)ENOSYS);
+
+    static const char recovered[] = "VESSEL_XWAYLAND_SIGSYS action=return-ENOSYS\n";
+    (void)write(STDERR_FILENO, recovered, sizeof(recovered) - 1);
+    return 1;
+#else
+    (void)info;
+    (void)context;
+    return 0;
+#endif
+}
+
 static void vessel_sigsys_trampoline(int signo, siginfo_t *info, void *context) {
     if (info) log_sigsys(info);
+    if (return_enosys_for_optional_seccomp(info, context)) return;
 
     if (!vessel_sigsys_user_action_valid) return;
 
