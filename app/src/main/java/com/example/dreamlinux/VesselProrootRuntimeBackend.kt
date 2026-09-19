@@ -28,7 +28,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v11"
+        const val REVISION = "proroot-production-v12"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -63,7 +63,7 @@ class VesselProrootRuntimeBackend(
         Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
     override val graphicsSummary =
         "Wayland/KWin → Freedreno/Turnip KGSL → DMA-BUF/native fence → " +
-            "SurfaceControl zero-copy (API 36+) / GPU-blit fallback"
+            "SurfaceControl/AHardwareBuffer zero-copy"
     override val internetSummary = "Android shared kernel · direct sockets/DNS"
 
     override fun hasStorageAccess(): Boolean = layout.prepareHostLayout()
@@ -166,10 +166,8 @@ class VesselProrootRuntimeBackend(
      * replacement for every Android compatibility iteration.
      *
      * Plasma must use its classic non-systemd startup in this rootless session.
-     * Android 16 also SIGSYS-kills the currently pinned Anland XWayland, so the
-     * wrapper strips --xwayland while VESSEL_DISABLE_XWAYLAND=1. Native Wayland
-     * applications continue to work; XWayland can be re-enabled once its blocked
-     * syscall is identified and fixed.
+     * Vessel also installs its Android-seccomp-safe XWayland build into /usr/local
+     * while preserving the pinned Anland KGSL/DRI3 patches.
      */
     private fun prepareRootlessDesktopPolicy(): Boolean = runCatching {
         val xdg = File(layout.rootfsDir, "etc/xdg")
@@ -684,30 +682,51 @@ class VesselProrootRuntimeBackend(
     }
 
     private fun ensurePlasmaQmlCore() {
-        val qmlCore = File(
-            layout.rootfsDir,
-            "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir",
+        val qt6Qml = File(layout.rootfsDir, "usr/lib/aarch64-linux-gnu/qt6/qml")
+        val required = listOf(
+            File(qt6Qml, "org/kde/plasma/core/qmldir"),
+            File(qt6Qml, "org/kde/ksvg/qmldir"),
+            File(qt6Qml, "org/kde/ksvg/libcorebindingsplugin.so"),
         )
-        if (qmlCore.isFile && qmlCore.length() > 0L) return
+
+        fun filesReady(): Boolean =
+            required.all { it.isFile && it.length() > 0L }
+
+        fun pluginLinksReady(): Boolean {
+            if (!filesReady()) return false
+            val probe = VesselProrootProcessRunner.run(
+                shellLaunchPlan(
+                    "ldd /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/" +
+                        "libcorebindingsplugin.so 2>&1",
+                    diagnostics = true,
+                    includeSharedStorage = false,
+                ),
+                timeoutSeconds = 8,
+                logFile = File(layout.diagnosticsDir, "plasma-qml-ksvg-ldd.log"),
+            )
+            return probe.exitCode == 0 &&
+                !probe.output.contains("not found", ignoreCase = true)
+        }
+
+        if (pluginLinksReady()) return
 
         startupJournal.mark("plasma.qml.repair.begin")
         val repair = VesselProrootProcessRunner.run(
             shellLaunchPlan(
-                "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
-                    "DEBIAN_FRONTEND=noninteractive apt-get " +
-                    "-o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --reinstall plasma-desktoptheme",
+                "export DEBIAN_FRONTEND=noninteractive; " +
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 " +
+                    "install -y --reinstall " +
+                    "plasma-desktoptheme qml6-module-org-kde-ksvg " +
+                    "libkf6svg6 libkirigamiplatform6",
                 diagnostics = true,
                 includeSharedStorage = false,
             ),
-            timeoutSeconds = 90,
+            timeoutSeconds = 120,
             logFile = File(layout.diagnosticsDir, "plasma-qml-repair.log"),
         )
-        check(
-            repair.exitCode == 0 &&
-                qmlCore.isFile &&
-                qmlCore.length() > 0L
-        ) {
-            "Plasma QML core is missing and automatic repair failed rc=" +
+        check(repair.exitCode == 0 && pluginLinksReady()) {
+            "Plasma KSvg/QML runtime is incomplete and automatic repair failed rc=" +
                 repair.exitCode + ": " + repair.output.takeLast(6000)
         }
         startupJournal.mark("plasma.qml.repair.ok")
