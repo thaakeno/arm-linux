@@ -173,7 +173,7 @@ jobs:
           grep -F 'Rootfs traversal rejected' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'Recovery is explicit' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
 
-          grep -F 'const val REVISION = "proroot-production-v9"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'const val REVISION = "proroot-production-v10"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
