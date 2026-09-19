@@ -35,6 +35,7 @@ class VesselProrootRuntimeBackend(
     private val appContext = context.applicationContext
     private val layout = VesselProrootLayout(appContext)
     private val procCompat = VesselProcCompat(appContext, layout.procCompatDir)
+    private val startupJournal = VesselStartupJournal(appContext)
     private val lifecycleLock = Any()
 
     @Volatile private var desktopProcess: VesselManagedProrootProcess? = null
@@ -209,7 +210,7 @@ class VesselProrootRuntimeBackend(
             hostWorkingDirectory = layout.baseDir.absolutePath,
             binds = layout.binds(includeSharedStorage),
             command = command,
-            diagnosticsLogPath = if (diagnostics) layout.diagnosticsLog.absolutePath else null,
+            diagnosticsLogPath = layout.diagnosticsLog.absolutePath,
             guestEnvironment = directGpuEnvironment(),
         )
     }
@@ -229,6 +230,7 @@ class VesselProrootRuntimeBackend(
             hostWorkingDirectory = layout.baseDir.absolutePath,
             binds = layout.binds(includeSharedStorage),
             guestArgv = listOf("/bin/bash", "-l"),
+            diagnosticsLogPath = layout.diagnosticsLog.absolutePath,
             guestEnvironment = directGpuEnvironment(),
         )
     }
@@ -267,6 +269,7 @@ class VesselProrootRuntimeBackend(
                 procCompat = procCompat.binds,
             ),
             guestArgv = guestArgv,
+            diagnosticsLogPath = layout.diagnosticsLog.absolutePath,
             guestEnvironment = environment,
         )
     }
@@ -353,31 +356,46 @@ class VesselProrootRuntimeBackend(
             lastError = ""
         }
 
-        val readiness = desktopReadiness(verifyIntegrity = true)
-        check(readiness.ready) { readiness.reason }
-
-        progress("proroot_compat", 72, "Preparing generic Linux ABI/session compatibility")
-        prepareAudioBridge()
-        procCompat.start()
-
-        val uid = Process.myUid()
-        val socket = layout.desktopHostSocket(uid)
-        VesselWaylandPresenter.resetPresentationLatch()
-        check(
-            VesselProrootDisplayBridge.start(
-                context = appContext,
-                socket = socket,
-                width = displayWidth,
-                height = displayHeight,
-                refresh = displayRefresh,
-            ),
-        ) { "Could not start Vessel native compositor display bridge" }
-
+        startupJournal.begin()
         try {
+            startupJournal.mark("readiness.begin")
+            val readiness = desktopReadiness(verifyIntegrity = true)
+            check(readiness.ready) { readiness.reason }
+            startupJournal.mark("readiness.ok", readiness.reason)
+
+            progress("proroot_smoke", 68, "Proving proroot can enter the Linux rootfs")
+            startupJournal.mark("proroot.smoke.begin")
+            val smoke = VesselProrootProcessRunner.run(
+                shellLaunchPlan(
+                    "printf 'VESSEL_PROROOT_SMOKE_OK\\n'; " +
+                        "test -r /proc/self/exe; test -w /dev/shm; " +
+                        "test -e /dev/kgsl-3d0",
+                    diagnostics = true,
+                    includeSharedStorage = false,
+                ),
+                timeoutSeconds = 10,
+                logFile = File(layout.diagnosticsDir, "proroot-smoke.log"),
+            )
+            check(smoke.exitCode == 0 && smoke.output.contains("VESSEL_PROROOT_SMOKE_OK")) {
+                "Proroot smoke test failed rc=" + smoke.exitCode + ": " +
+                    smoke.output.takeLast(5000)
+            }
+            startupJournal.mark("proroot.smoke.ok")
+
+            progress("proroot_compat", 72, "Preparing generic Linux ABI/session compatibility")
+            startupJournal.mark("audio.prepare.begin")
+            prepareAudioBridge()
+            startupJournal.mark("audio.prepare.ok")
+            procCompat.start()
+            startupJournal.mark("proc.compat.ok")
+
             progress("proroot_dbus", 76, "Starting Linux system D-Bus")
+            startupJournal.mark("dbus.begin")
             startSystemBus()
+            startupJournal.mark("dbus.ok")
 
             progress("proroot_probe", 80, "Checking shared memory, procfs, IPC and D-Bus semantics")
+            startupJournal.mark("compat.probe.begin")
             val probePlan = desktopLaunchPlan(listOf(VesselProrootDesktopProfile.PROBE))
             val probe = VesselProrootProcessRunner.run(
                 probePlan,
@@ -385,18 +403,40 @@ class VesselProrootRuntimeBackend(
                 logFile = File(layout.diagnosticsDir, "compat-probe.log"),
             )
             check(probe.exitCode == 0 && probe.output.contains("VESSEL_COMPAT_OK=desktop-runtime")) {
-                "Linux compatibility probe failed: " + probe.output.takeLast(6000)
+                "Linux compatibility probe failed rc=" + probe.exitCode + ": " +
+                    probe.output.takeLast(6000)
             }
+            startupJournal.mark("compat.probe.ok")
+
+            val uid = Process.myUid()
+            val socket = layout.desktopHostSocket(uid)
+            VesselWaylandPresenter.resetPresentationLatch()
+            startupJournal.mark("display.bridge.begin")
+            check(
+                VesselProrootDisplayBridge.start(
+                    context = appContext,
+                    socket = socket,
+                    width = displayWidth,
+                    height = displayHeight,
+                    refresh = displayRefresh,
+                ),
+            ) { "Could not start Vessel native compositor display bridge" }
+            startupJournal.mark(
+                "display.bridge.ok",
+                VesselProrootDisplayBridge.status(),
+            )
 
             progress("proroot_plasma", 86, "Launching optimized normal-user Plasma Wayland session")
+            startupJournal.mark("plasma.spawn.begin")
             val plan = desktopLaunchPlan(listOf(VesselProrootDesktopProfile.STARTER))
-            val process = VesselProrootProcessNative.spawn(plan, layout.desktopLog)
+            val process = VesselProrootProcessHost.spawn(plan, layout.desktopLog)
             synchronized(lifecycleLock) {
                 desktopProcess = process
                 running = true
                 startedAt = SystemClock.elapsedRealtime()
             }
             watchDesktop(process)
+            startupJournal.mark("plasma.spawn.ok", "pid=" + process.pid)
 
             val deadline = SystemClock.elapsedRealtime() + 30_000L
             var bridge = VesselProrootDisplayBridge.status()
@@ -416,6 +456,7 @@ class VesselProrootRuntimeBackend(
             }
 
             desktopReady = true
+            startupJournal.mark("desktop.ready", bridge)
             progress(
                 "proroot_ready",
                 100,
@@ -424,6 +465,7 @@ class VesselProrootRuntimeBackend(
             )
             status()
         } catch (error: Throwable) {
+            startupJournal.failure(error)
             lastError = error.message ?: error.javaClass.simpleName
             synchronized(lifecycleLock) { stopInternal() }
             throw error
@@ -504,8 +546,8 @@ class VesselProrootRuntimeBackend(
             rm -f /run/dbus/system_bus_socket /run/dbus/pid
             exec dbus-daemon --system --nofork --nopidfile
         """.trimIndent()
-        val process = VesselProrootProcessNative.spawn(
-            shellLaunchPlan(command, includeSharedStorage = false),
+        val process = VesselProrootProcessHost.spawn(
+            shellLaunchPlan(command, diagnostics = true, includeSharedStorage = false),
             File(layout.diagnosticsDir, "system-dbus.log"),
         )
         systemBusProcess = process

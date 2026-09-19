@@ -28,7 +28,6 @@ add_library(vessel_wayland_presenter SHARED
     vessel_surface_presenter.cpp
     vessel_proroot_display_bridge.cpp
     vessel_proroot_surfacecontrol.cpp
-    vessel_proroot_process.cpp
     vessel_virtio_input.cpp
 )
 target_compile_features(vessel_wayland_presenter PRIVATE cxx_std_17)

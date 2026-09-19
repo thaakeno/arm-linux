@@ -1,64 +1,116 @@
 package com.example.dreamlinux
 
-import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
-internal object VesselProrootProcessNative {
-    init { System.loadLibrary("vessel_wayland_presenter") }
+/**
+ * Host-process launcher for non-interactive proroot workloads.
+ *
+ * Android's ProcessBuilder is deliberately used instead of forking the ART
+ * process from JNI. /system/bin/setsid provides one isolated session that
+ * Vessel can later reap without relying on a fragile post-fork Java/native
+ * runtime state. This matches the proven proroot app-process launch shape used
+ * by DSHA while keeping Vessel's stricter session ownership checks.
+ */
+internal object VesselProrootProcessHost {
+    const val SETSID = "/system/bin/setsid"
+    private const val START_TOKEN = "VESSEL_START"
 
-    private external fun nativeSpawn(
-        argv: Array<String>,
-        environment: Array<String>,
-        cwd: String,
-        pidFdOut: IntArray,
-    ): String?
+    private val supervisorScript =
+        "IFS= read -r VESSEL_START || exit 125\n" +
+            "[ \"\$VESSEL_START\" = VESSEL_START ] || exit 125\n" +
+            "exec \"\$@\"\n"
 
-    private external fun nativeWait(pid: Int): Int
+    internal fun supervisorCommand(plan: VesselProrootLaunchPlan): List<String> =
+        buildList {
+            add(SETSID)
+            add("/system/bin/sh")
+            add("-c")
+            add(supervisorScript)
+            add("vessel-proroot-supervisor")
+            addAll(plan.argv)
+        }
 
-    fun spawn(plan: VesselProrootLaunchPlan, logFile: File? = null): VesselManagedProrootProcess {
-        val environment = System.getenv().toMutableMap()
-        plan.applyEnvironment(environment)
-        val env = environment.entries
-            .asSequence()
-            .filter { it.key.isNotEmpty() && '\u0000' !in it.key && '\u0000' !in it.value }
-            .sortedBy { it.key }
-            .map { it.key + "=" + it.value }
-            .toList()
-            .toTypedArray()
+    internal fun androidPid(process: Process): Int =
+        androidPid(process.javaClass.name, process.toString())
 
-        val out = IntArray(2) { -1 }
-        val birth = nativeSpawn(
-            plan.argv.toTypedArray(),
-            env,
-            plan.hostWorkingDirectory,
-            out,
-        ) ?: throw IOException("Could not spawn isolated proroot process")
-        val pid = out[0]
-        val fd = out[1]
-        if (pid <= 1 || fd < 0) {
-            if (fd >= 0) runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
-            throw IOException("Native proroot launcher returned an invalid process")
+    internal fun androidPid(type: String, description: String?): Int {
+        if (type != "java.lang.UNIXProcess" &&
+            type != "java.lang.ProcessImpl" &&
+            type != "java.lang.ProcessManager" + "$" + "ProcessImpl"
+        ) {
+            return -1
+        }
+        if (description == null || !description.startsWith("Process[pid=")) return -1
+        val end = description.indexOf(',', startIndex = 12)
+        if (end < 0) return -1
+        val value = description.substring(12, end).trim()
+        if (!value.matches(Regex("[1-9][0-9]{0,9}"))) return -1
+        return value.toIntOrNull()?.takeIf { it > 1 } ?: -1
+    }
+
+    fun spawn(
+        plan: VesselProrootLaunchPlan,
+        logFile: File? = null,
+    ): VesselManagedProrootProcess {
+        val setsid = File(SETSID)
+        check(setsid.isFile && setsid.canExecute()) {
+            "Android setsid helper is unavailable: " + SETSID
+        }
+
+        val builder = ProcessBuilder(supervisorCommand(plan))
+            .directory(File(plan.hostWorkingDirectory))
+            .redirectErrorStream(true)
+        plan.applyEnvironment(builder.environment())
+
+        val process = try {
+            builder.start()
+        } catch (error: Throwable) {
+            throw IOException("Could not start proroot host process", error)
+        }
+
+        val pid = androidPid(process)
+        if (pid <= 1) {
+            runCatching { process.destroyForcibly() }
+            throw IOException(
+                "Could not identify Android proroot child: " +
+                    process.javaClass.name + " " + process,
+            )
         }
 
         val identity = try {
-            VesselSessionProcessCloser.captureLeader(pid, birth)
+            VesselSessionProcessCloser.captureSpawnedLeader(pid, 2500)
         } catch (error: Throwable) {
-            runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
-            throw error
+            runCatching { process.destroyForcibly() }
+            runCatching { process.waitFor(1, TimeUnit.SECONDS) }
+            throw IOException("Could not establish isolated proroot session", error)
         }
+
+        try {
+            process.outputStream.use { input ->
+                input.write((START_TOKEN + "\n").toByteArray(StandardCharsets.US_ASCII))
+                input.flush()
+            }
+        } catch (error: Throwable) {
+            runCatching { VesselSessionProcessCloser.close(identity, 1500) }
+            runCatching { process.destroyForcibly() }
+            throw IOException("Could not release proroot startup handshake", error)
+        }
+
         return VesselManagedProrootProcess(
             pid = pid,
-            outputFd = fd,
+            output = process.inputStream,
             identity = identity,
             logFile = logFile,
-            waiter = { nativeWait(pid) },
+            waiter = { process.waitFor() },
         )
     }
 }
@@ -70,7 +122,7 @@ internal data class VesselProcessResult(
 
 internal class VesselManagedProrootProcess(
     val pid: Int,
-    outputFd: Int,
+    output: InputStream,
     private val identity: VesselProcessIdentity,
     private val logFile: File?,
     waiter: () -> Int,
@@ -85,7 +137,6 @@ internal class VesselManagedProrootProcess(
     private val outputLatch = CountDownLatch(1)
     private val tailLock = Any()
     private val tail = StringBuilder()
-    private val outputPfd = ParcelFileDescriptor.adoptFd(outputFd)
     private val lastReaderError = AtomicReference<String?>(null)
 
     init {
@@ -100,7 +151,7 @@ internal class VesselManagedProrootProcess(
                     }
                     fileOut = FileOutputStream(logFile, true)
                 }
-                ParcelFileDescriptor.AutoCloseInputStream(outputPfd).use { input ->
+                output.use { input ->
                     val buffer = ByteArray(16 * 1024)
                     while (true) {
                         val n = input.read(buffer)
@@ -153,8 +204,6 @@ internal class VesselManagedProrootProcess(
         if (!exitLatch.await(timeoutMs.coerceAtLeast(1L), TimeUnit.MILLISECONDS)) {
             return null
         }
-        // EOF follows process exit; give the output reader a short bounded drain
-        // so one-shot compatibility probes never lose their final success line.
         outputLatch.await(1000L, TimeUnit.MILLISECONDS)
         return exitCodeOrNull()
     }
@@ -185,7 +234,7 @@ internal object VesselProrootProcessRunner {
         timeoutSeconds: Int,
         logFile: File? = null,
     ): VesselProcessResult {
-        val process = VesselProrootProcessNative.spawn(plan, logFile)
+        val process = VesselProrootProcessHost.spawn(plan, logFile)
         val timeoutMs = timeoutSeconds.coerceIn(1, 3600) * 1000L
         val rc = process.await(timeoutMs)
         if (rc != null) {

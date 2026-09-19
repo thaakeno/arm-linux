@@ -39,6 +39,37 @@ internal data class VesselProcessIdentity(
  * UID, session and /proc starttime so PID reuse cannot redirect cleanup.
  */
 internal object VesselSessionProcessCloser {
+    fun captureSpawnedLeader(pid: Int, timeoutMs: Long): VesselProcessIdentity {
+        require(pid > 1) { "Invalid spawned pid=" + pid }
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs.coerceIn(100L, 5000L)
+        var last: VesselProcessIdentity? = null
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val current = read(pid)
+            if (current != null) {
+                last = current
+                if (current.ownsIsolatedSession(Process.myPid())) {
+                    // Re-read once so PID/session reuse or a transient pre-setsid
+                    // observation cannot be accepted as the runtime leader.
+                    val confirmed = read(pid)
+                    if (current.sameProcess(confirmed) &&
+                        confirmed?.ownsIsolatedSession(Process.myPid()) == true
+                    ) {
+                        return confirmed
+                    }
+                }
+            }
+            Thread.sleep(5)
+        }
+        throw IOException(
+            "Spawned process did not enter its isolated session: pid=" + pid +
+                (last?.let {
+                    " ppid=" + it.stat.parent +
+                        " pgrp=" + it.stat.processGroup +
+                        " sid=" + it.stat.session
+                } ?: " process-not-visible"),
+        )
+    }
+
     fun captureLeader(pid: Int, birthStat: String): VesselProcessIdentity {
         val stat = VesselProcStatParser.parse(birthStat, pid)
             ?: throw IOException("Vessel child returned an invalid birth identity")

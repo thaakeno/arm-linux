@@ -969,22 +969,31 @@ class VmSessionService : Service() {
         scope.launch(Dispatchers.IO) {
             val memory = ActivityManager.MemoryInfo()
             getSystemService(ActivityManager::class.java)?.getMemoryInfo(memory)
+            val proroot = runtime.kind == VesselRuntimeKind.PROROOT
+            val activePresenter = if (proroot) {
+                VesselProrootDisplayBridge.status()
+            } else {
+                VesselWaylandPresenter.status()
+            }
             val host = buildString {
                 appendLine("=== VESSEL HOST ===")
                 appendLine("app=${BuildConfig.VERSION_NAME} commit=${BuildConfig.GIT_COMMIT}")
                 appendLine("device=${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} sdk=${android.os.Build.VERSION.SDK_INT}")
+                appendLine("backend=${runtime.id} stage=${state.value.stage} running=${state.value.running} busy=${state.value.busy}")
+                appendLine("lastError=${state.value.lastError.ifBlank { "(none)" }}")
                 appendLine("hostAvailMiB=${memory.availMem / (1024 * 1024)} lowMemory=${memory.lowMemory} thresholdMiB=${memory.threshold / (1024 * 1024)}")
                 appendLine(
-                    "control=" + if (runtime.kind == VesselRuntimeKind.PROROOT) {
+                    "control=" + if (proroot) {
                         "direct-proroot"
                     } else {
                         VesselGuestAgent.status()
                     },
                 )
                 appendLine("audio=${VesselAudioBridge.status()}")
-                appendLine("presenter=${VesselWaylandPresenter.status()}")
+                appendLine("presenter=$activePresenter")
                 appendLine("vcpus=${runtime.processorCount} guestRamMiB=${runtime.guestMemoryMb}")
             }
+
             val guest = if (state.value.running && state.value.guestReady && controlReady()) {
                 runCatching {
                     runtime.guest(
@@ -992,17 +1001,52 @@ class VmSessionService : Service() {
                         printf '=== GUEST LOAD ===\\n'; cat /proc/loadavg; free -m
                         printf '\\n=== PROCESSES ===\\n'; ps -eo pid,ppid,stat,pcpu,pmem,comm --sort=-pcpu | head -35
                         printf '\\n=== AUDIO ===\\n'; su -l vessel -c 'pactl info; pactl list short sinks' 2>&1 || true
-                        printf '\\n=== KERNEL ERRORS ===\\n'; dmesg 2>&1 | grep -Ei 'oom|out of memory|killed process|segfault|drm|virtio|virgl|gpu|rcu|napi|stall' | tail -160
+                        printf '\\n=== KERNEL ERRORS ===\\n'; dmesg 2>&1 | grep -Ei 'oom|out of memory|killed process|segfault|drm|kgsl|gpu|rcu|napi|stall' | tail -160
                         printf '\\n=== PLASMA ===\\n'; tail -220 /tmp/vessel-plasma.log 2>/dev/null || true
                         printf '\\n=== FIREFOX CRASH ARTIFACTS ===\\n'; find /home/vessel/.mozilla -type f \\( -path '*/minidumps/*' -o -path '*/Crash Reports/*' \\) -printf '%TY-%Tm-%Td %TT %p\\n' 2>/dev/null | sort | tail -80 || true
                         """.trimIndent(),
                         30,
                     ).optString("output")
                 }.getOrElse { "Guest diagnostics failed: ${it.message}" }
+            } else if (proroot) {
+                "Proroot desktop is not running; live guest diagnostics skipped."
             } else {
-                "Guest control service is not connected."
+                "UML guest control service is not connected."
             }
-            diagnostics.value = (host + "\n" + guest + "\n\n=== RUNTIME LOG TAIL ===\n" + state.value.console.takeLast(18_000)).takeLast(80_000)
+
+            val persisted = if (proroot) {
+                val dir = File(filesDir, "vessel-proroot/diagnostics")
+                val names = listOf(
+                    "startup-journal.log",
+                    "proroot.log",
+                    "proroot-smoke.log",
+                    "system-dbus.log",
+                    "compat-probe.log",
+                    "desktop.log",
+                    "guest-command.log",
+                )
+                buildString {
+                    appendLine("=== PROROOT PERSISTED LOGS ===")
+                    names.forEach { name ->
+                        val file = File(dir, name)
+                        if (!file.isFile) return@forEach
+                        appendLine("--- " + name + " ---")
+                        val text = runCatching { file.readText() }
+                            .getOrElse { "[read failed: " + (it.message ?: it.javaClass.simpleName) + "]" }
+                        appendLine(text.takeLast(18_000))
+                    }
+                }
+            } else {
+                ""
+            }
+
+            diagnostics.value = (
+                host + "\n" +
+                    guest + "\n\n" +
+                    persisted + "\n" +
+                    "=== RUNTIME STATE TAIL ===\n" +
+                    state.value.console.takeLast(18_000)
+                ).takeLast(120_000)
         }
     }
 
