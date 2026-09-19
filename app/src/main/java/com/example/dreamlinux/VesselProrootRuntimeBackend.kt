@@ -223,6 +223,28 @@ class VesselProrootRuntimeBackend(
             }
         }
 
+        // The stock Anland Xwayland package is built for normal Linux syscall
+        // policy. Vessel packages a binary from the same pinned source with only
+        // Android-app-seccomp compatibility changes. Install it in /usr/local/bin
+        // so KWin's QStandardPaths lookup selects it before /usr/bin/Xwayland.
+        val xwaylandTarget = File(layout.rootfsDir, "usr/local/bin/Xwayland")
+        check(xwaylandTarget.parentFile?.isDirectory == true || xwaylandTarget.parentFile?.mkdirs() == true) {
+            "Could not create /usr/local/bin for patched Xwayland"
+        }
+        val xwaylandStage = File(xwaylandTarget.parentFile, ".Xwayland.vessel-staging")
+        appContext.assets.open("vessel/Xwayland.arm64").use { input ->
+            xwaylandStage.outputStream().buffered().use { output ->
+                input.copyTo(output)
+            }
+        }
+        Os.chmod(xwaylandStage.absolutePath, 0x1ED) // 0755
+        if (xwaylandTarget.exists()) check(xwaylandTarget.delete()) {
+            "Could not replace patched Xwayland"
+        }
+        check(xwaylandStage.renameTo(xwaylandTarget)) {
+            "Could not install patched Xwayland"
+        }
+
         // Plasma 6 still performs a handful of org.freedesktop.systemd1 calls
         // even in classic (systemdBoot=false) mode. Debian ships a D-Bus
         // activation file for systemd --user, which cannot work in Vessel's
