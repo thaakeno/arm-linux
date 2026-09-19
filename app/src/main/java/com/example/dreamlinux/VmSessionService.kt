@@ -1024,6 +1024,8 @@ class VmSessionService : Service() {
                     "system-dbus.log",
                     "system-dbus-probe.log",
                     "compat-probe.log",
+                    "compat-kernel-probe.log",
+                    "compat-session-dbus.log",
                     "desktop.log",
                     "guest-command.log",
                 )

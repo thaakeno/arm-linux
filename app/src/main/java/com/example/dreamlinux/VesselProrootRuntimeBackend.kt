@@ -28,7 +28,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v8"
+        const val REVISION = "proroot-production-v9"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -423,17 +423,41 @@ class VesselProrootRuntimeBackend(
             startSystemBus()
             startupJournal.mark("dbus.ok")
 
-            progress("proroot_probe", 80, "Checking shared memory, procfs, IPC and D-Bus semantics")
+            progress("proroot_probe", 80, "Checking procfs, shared memory, IPC and session D-Bus")
             startupJournal.mark("compat.probe.begin")
-            val probePlan = desktopLaunchPlan(listOf(VesselProrootDesktopProfile.PROBE))
-            val probe = VesselProrootProcessRunner.run(
-                probePlan,
+
+            val kernelProbe = VesselProrootProcessRunner.run(
+                desktopLaunchPlan(
+                    VesselProrootCompatibilityProbe.kernelArgv(),
+                    includeSharedStorage = false,
+                ),
                 timeoutSeconds = 20,
-                logFile = File(layout.diagnosticsDir, "compat-probe.log"),
+                logFile = File(layout.diagnosticsDir, "compat-kernel-probe.log"),
             )
-            check(probe.exitCode == 0 && probe.output.contains("VESSEL_COMPAT_OK=desktop-runtime")) {
-                "Linux compatibility probe failed rc=" + probe.exitCode + ": " +
-                    probe.output.takeLast(6000)
+            check(
+                kernelProbe.exitCode == 0 &&
+                    kernelProbe.output.contains("VESSEL_COMPAT_OK=proc-self-exe:") &&
+                    kernelProbe.output.contains("VESSEL_COMPAT_OK=kernel-ipc")
+            ) {
+                "Linux kernel compatibility probe failed rc=" + kernelProbe.exitCode + ": " +
+                    kernelProbe.output.takeLast(6000)
+            }
+            startupJournal.mark("compat.kernel.ok")
+
+            val sessionBusProbe = VesselProrootProcessRunner.run(
+                desktopLaunchPlan(
+                    VesselProrootCompatibilityProbe.sessionBusArgv(),
+                    includeSharedStorage = false,
+                ),
+                timeoutSeconds = 12,
+                logFile = File(layout.diagnosticsDir, "compat-session-dbus.log"),
+            )
+            check(
+                sessionBusProbe.exitCode == 0 &&
+                    sessionBusProbe.output.contains("VESSEL_COMPAT_OK=dbus-session")
+            ) {
+                "Linux session D-Bus probe failed rc=" + sessionBusProbe.exitCode + ": " +
+                    sessionBusProbe.output.takeLast(6000)
             }
             startupJournal.mark("compat.probe.ok")
 

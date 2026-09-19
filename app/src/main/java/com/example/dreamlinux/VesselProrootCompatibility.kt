@@ -33,7 +33,9 @@ object VesselProrootDesktopProfile {
         )
 
     fun readiness(rootfs: File): VesselDesktopReadiness {
-        for (path in listOf(MARKER, STARTER, PROBE)) {
+        // The compatibility probe is APK-owned at runtime so an old large
+        // rootfs cannot pin Vessel to stale Android/procfs assumptions.
+        for (path in listOf(MARKER, STARTER)) {
             val file = guestFile(rootfs, path)
             if (!file.isFile || file.length() <= 0L) {
                 return VesselDesktopReadiness(false, "Desktop runtime file is missing: " + path)

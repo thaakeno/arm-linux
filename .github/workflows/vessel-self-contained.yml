@@ -160,7 +160,7 @@ jobs:
           grep -F 'Rootfs traversal rejected' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'Recovery is explicit' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
 
-          grep -F 'const val REVISION = "proroot-production-v8"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'const val REVISION = "proroot-production-v9"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
@@ -197,6 +197,17 @@ jobs:
           grep -F 'proc.self-exe.begin' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F '"/usr/bin/readlink", "/proc/self/exe"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'proc-self-exe.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+
+          # Compatibility semantics are APK-owned so a stale 1.4 GiB rootfs
+          # cannot reintroduce obsolete Android procfs assumptions.
+          grep -F 'object VesselProrootCompatibilityProbe' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibilityProbe.kt
+          grep -F 'os.readlink("/proc/self/exe")' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibilityProbe.kt
+          ! grep -Fq 'os.access("/proc/self/exe"' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibilityProbe.kt
+          grep -F 'VesselProrootCompatibilityProbe.kernelArgv()' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'VesselProrootCompatibilityProbe.sessionBusArgv()' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          ! grep -Fq 'VesselProrootDesktopProfile.PROBE' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'compat-kernel-probe.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'compat-session-dbus.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
 
           bash -n tools/vessel_proroot/fetch_official_proroot.sh
           bash -n tools/vessel_proroot/build_prebuilt_rootfs.sh
@@ -303,7 +314,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.2.2"' app/build.gradle.kts
+          grep -F 'versionName = "2.2.3"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
           grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
