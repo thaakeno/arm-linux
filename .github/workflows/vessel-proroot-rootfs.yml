@@ -27,7 +27,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends             debootstrap zstd curl jq unzip dpkg-dev acl
+          sudo apt-get install -y --no-install-recommends             debootstrap zstd curl jq unzip dpkg-dev acl gcc
 
       - name: Build verified Debian 13 proroot workstation
         shell: bash
@@ -62,6 +62,9 @@ jobs:
           assert h.hexdigest() == x['archiveSha256']
           assert x['entryCount'] > 1000
           assert x['extractedBytes'] > 0
+          assert 'var/cache/vessel/proroot-session-v2' in x['requiredPaths']
+          assert 'usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir' in x['requiredPaths']
+          assert 'usr/bin/pipewire' in x['requiredPaths']
           PY
 
           # Android app sandboxes cannot recreate Linux hard links. Consume the
