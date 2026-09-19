@@ -447,7 +447,6 @@ class VesselProrootRuntimeBackend(
                 if (rc != 0 && lastError.isBlank()) lastError = "Plasma session exited rc=" + rc
             }
         }
-        val presenter = VesselWaylandPresenter.status()
         val bridge = VesselProrootDisplayBridge.status()
         baseState(storage)
             .put("rootfsReady", layout.rootfsReady())
@@ -467,7 +466,7 @@ class VesselProrootRuntimeBackend(
                 File(layout.rootfsDir, "var/cache/vessel/proroot-production-v1").isFile,
             )
             .put("displayBridge", bridge)
-            .put("presenter", presenter)
+            .put("presenter", bridge)
             .put("presentationPath", VesselProrootDisplayBridge.presentationPath())
             .put("zeroCopyPresentation", VesselProrootDisplayBridge.usesZeroCopyPresentation())
             .put("effectiveRefreshHz", VesselProrootDisplayBridge.effectiveRefresh().toDouble())
@@ -601,7 +600,6 @@ class VesselProrootRuntimeBackend(
 
             val uid = Process.myUid()
             val socket = layout.desktopHostSocket(uid)
-            VesselWaylandPresenter.resetPresentationLatch()
             startupJournal.mark("display.bridge.begin")
             check(
                 VesselProrootDisplayBridge.start(
@@ -893,7 +891,6 @@ class VesselProrootRuntimeBackend(
     }
 
     private fun baseState(ok: Boolean): JSONObject {
-        val presenter = VesselWaylandPresenter.status()
         val bridge = VesselProrootDisplayBridge.status()
         // For the production proroot backend the native bridge is authoritative.
         // A stale retained presenter or a one-time successful startup must never
