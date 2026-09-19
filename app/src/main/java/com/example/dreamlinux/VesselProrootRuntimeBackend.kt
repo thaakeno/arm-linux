@@ -5,11 +5,15 @@ import android.net.ConnectivityManager
 import android.os.Process
 import android.os.SystemClock
 import android.system.Os
+import com.github.luben.zstd.ZstdInputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.json.JSONObject
+import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.security.MessageDigest
 
 /**
@@ -28,7 +32,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v12"
+        const val REVISION = "proroot-production-v13"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -162,6 +166,112 @@ class VesselProrootRuntimeBackend(
         }
 
     /**
+     * Materialize the exact direct-transport KWin payload shipped inside this APK.
+     *
+     * This is a versioned runtime overlay, not a fallback path: old persistent
+     * rootfs installs keep /home and installed applications while the compositor
+     * files are upgraded to the same pinned build used by clean rootfs images.
+     */
+    private fun ensurePinnedKwinOverlay() {
+        val marker = File(
+            layout.rootfsDir,
+            "usr/lib/vessel/desktop/direct-kwin-build.txt",
+        )
+        if (marker.isFile &&
+            marker.readText().trim() == VesselProrootDesktopProfile.RELEASE
+        ) {
+            return
+        }
+
+        startupJournal.mark("kwin.overlay.begin", VesselProrootDesktopProfile.RELEASE)
+        extractTrustedDesktopOverlay("vessel/kwin-direct-overlay.tar.zst")
+
+        check(
+            marker.isFile &&
+                marker.readText().trim() == VesselProrootDesktopProfile.RELEASE
+        ) {
+            "Pinned direct KWin overlay did not install correctly"
+        }
+
+        val sessionEnv = File(layout.rootfsDir, "usr/lib/vessel/desktop/session.env")
+        check(sessionEnv.parentFile?.isDirectory == true || sessionEnv.parentFile?.mkdirs() == true) {
+            "Could not create desktop runtime metadata directory"
+        }
+        sessionEnv.writeText(
+            "release=" + VesselProrootDesktopProfile.RELEASE + "\n" +
+                "kwin_sha256=" + VesselProrootDesktopProfile.KWIN_SHA256 + "\n" +
+                "xwayland_sha256=" + VesselProrootDesktopProfile.XWAYLAND_SHA256 + "\n" +
+                "session=vessel-proroot-wayland-v2\n",
+        )
+        Os.chmod(sessionEnv.absolutePath, 0x1A4) // 0644
+        startupJournal.mark("kwin.overlay.ok", VesselProrootDesktopProfile.RELEASE)
+    }
+
+    private fun extractTrustedDesktopOverlay(assetName: String) {
+        val rootCanonical = layout.rootfsDir.canonicalPath
+        appContext.assets.open(assetName).use { raw ->
+            ZstdInputStream(BufferedInputStream(raw, 256 * 1024)).use { zstd ->
+                TarArchiveInputStream(BufferedInputStream(zstd, 256 * 1024)).use { tar ->
+                    while (true) {
+                        val entry = tar.nextTarEntry ?: break
+                        var relative = entry.name.replace('\\', '/')
+                        while (relative.startsWith("./")) relative = relative.removePrefix("./")
+                        val parts = relative.split('/').filter { it.isNotEmpty() && it != "." }
+                        check(relative.isNotBlank() && !relative.startsWith('/') && parts.none { it == ".." }) {
+                            "Unsafe KWin overlay path: " + entry.name
+                        }
+
+                        val target = File(layout.rootfsDir, parts.joinToString("/"))
+                        val parent = target.parentFile
+                        check(parent != null) { "KWin overlay path has no parent: " + relative }
+                        check(parent.isDirectory || parent.mkdirs()) {
+                            "Could not create KWin overlay directory: " + parent.absolutePath
+                        }
+                        val parentCanonical = parent.canonicalPath
+                        check(
+                            parentCanonical == rootCanonical ||
+                                parentCanonical.startsWith(rootCanonical + File.separator)
+                        ) {
+                            "KWin overlay path escapes rootfs: " + relative
+                        }
+
+                        when {
+                            entry.isDirectory -> {
+                                check(target.isDirectory || target.mkdirs()) {
+                                    "Could not create KWin overlay directory: " + relative
+                                }
+                                val mode = entry.mode and 0xFFF
+                                if (mode != 0) runCatching { Os.chmod(target.absolutePath, mode) }
+                            }
+                            entry.isSymbolicLink -> {
+                                if (target.exists() || target.isSymbolicLink()) {
+                                    check(target.delete()) { "Could not replace KWin symlink: " + relative }
+                                }
+                                check('\u0000' !in entry.linkName) { "KWin symlink target contains NUL" }
+                                Os.symlink(entry.linkName, target.absolutePath)
+                            }
+                            entry.isLink -> {
+                                error("KWin overlay contains unsupported hard link: " + relative)
+                            }
+                            entry.isFile -> {
+                                if (target.isSymbolicLink()) {
+                                    check(target.delete()) { "Could not replace KWin file symlink: " + relative }
+                                }
+                                FileOutputStream(target, false).buffered(256 * 1024).use { output ->
+                                    tar.copyTo(output, 256 * 1024)
+                                }
+                                val mode = entry.mode and 0xFFF
+                                if (mode != 0) runCatching { Os.chmod(target.absolutePath, mode) }
+                            }
+                            else -> error("Unsupported KWin overlay entry: " + relative)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Patch session policy from the APK rather than requiring a 1.4 GiB rootfs
      * replacement for every Android compatibility iteration.
      *
@@ -170,6 +280,8 @@ class VesselProrootRuntimeBackend(
      * while preserving the pinned Anland KGSL/DRI3 patches.
      */
     private fun prepareRootlessDesktopPolicy(): Boolean = runCatching {
+        ensurePinnedKwinOverlay()
+
         val xdg = File(layout.rootfsDir, "etc/xdg")
         check(xdg.isDirectory || xdg.mkdirs()) { "Could not create /etc/xdg" }
         val startKdeRc = File(xdg, "startkderc")
@@ -728,7 +840,7 @@ class VesselProrootRuntimeBackend(
         )
         val repairedMarker = File(
             layout.rootfsDir,
-            "var/cache/vessel/plasma-qml-proroot-production-v12",
+            "var/cache/vessel/plasma-qml-proroot-production-v13",
         )
 
         fun filesReady(): Boolean =
@@ -751,16 +863,51 @@ class VesselProrootRuntimeBackend(
                 !probe.output.contains("undefined symbol", ignoreCase = true)
         }
 
-        // v11 only validated plasma.core, so an already-installed workstation may
-        // carry a partial KSvg module. Refresh the exact Debian packages once on v12
-        // even when the files exist, then use the marker on later cold starts.
-        if (repairedMarker.isFile && pluginLinksReady()) return
+        fun markReady() {
+            check(repairedMarker.parentFile?.isDirectory == true || repairedMarker.parentFile?.mkdirs() == true) {
+                "Could not create Plasma QML marker directory"
+            }
+            repairedMarker.writeText("ok\n")
+        }
+
+        // A clean v13 rootfs already contains a complete KSvg stack. Do not turn
+        // every cold boot into a network-dependent apt transaction.
+        if (pluginLinksReady()) {
+            markReady()
+            return
+        }
+
+        // The user's v12 failure was not a Debian signature problem. APT had
+        // already downloaded InRelease, then mkstemp(/tmp/apt.sig.XXXXXX) got
+        // ENOENT. Repair the generic Linux temp/apt directory invariants first
+        // and prove them before invoking apt.
+        check(layout.prepareHostLayout() && layout.prepareGuestMountPointsIfReady()) {
+            "Could not prepare Linux temporary directories"
+        }
+        startupJournal.mark("plasma.qml.tmp.begin")
+        val tmpProbe = VesselProrootProcessRunner.run(
+            shellLaunchPlan(
+                "install -d -m 1777 /tmp /var/tmp; " +
+                    "install -d -m 0755 /var/lib/apt/lists/partial /var/cache/apt/archives/partial; " +
+                    "test -d /tmp && test -w /tmp && " +
+                    "f=\$(mktemp /tmp/vessel-apt.XXXXXX) && rm -f \"\$f\"",
+                diagnostics = true,
+                includeSharedStorage = false,
+            ),
+            timeoutSeconds = 10,
+            logFile = File(layout.diagnosticsDir, "plasma-qml-tmp-preflight.log"),
+        )
+        check(tmpProbe.exitCode == 0) {
+            "Linux /tmp is not usable for package management rc=" +
+                tmpProbe.exitCode + ": " + tmpProbe.output.takeLast(3000)
+        }
+        startupJournal.mark("plasma.qml.tmp.ok")
 
         startupJournal.mark("plasma.qml.repair.begin")
         val repair = VesselProrootProcessRunner.run(
             shellLaunchPlan(
                 "export DEBIAN_FRONTEND=noninteractive; " +
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 -o Acquire::Retries=3 update && " +
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 " +
                     "install -y --reinstall " +
                     "plasma-desktoptheme qml6-module-org-kde-ksvg " +
@@ -768,17 +915,14 @@ class VesselProrootRuntimeBackend(
                 diagnostics = true,
                 includeSharedStorage = false,
             ),
-            timeoutSeconds = 120,
+            timeoutSeconds = 180,
             logFile = File(layout.diagnosticsDir, "plasma-qml-repair.log"),
         )
         check(repair.exitCode == 0 && pluginLinksReady()) {
-            "Plasma KSvg/QML runtime is incomplete and automatic repair failed rc=" +
+            "Plasma KSvg/QML runtime repair failed rc=" +
                 repair.exitCode + ": " + repair.output.takeLast(6000)
         }
-        check(repairedMarker.parentFile?.isDirectory == true || repairedMarker.parentFile?.mkdirs() == true) {
-            "Could not create Plasma QML repair marker directory"
-        }
-        repairedMarker.writeText("ok\n")
+        markReady()
         startupJournal.mark("plasma.qml.repair.ok")
     }
 
