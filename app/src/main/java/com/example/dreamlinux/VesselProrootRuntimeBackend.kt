@@ -222,6 +222,51 @@ class VesselProrootRuntimeBackend(
                 Os.chmod(target.absolutePath, 0x1ED) // 0755
             }
         }
+
+        // Plasma 6 still performs a handful of org.freedesktop.systemd1 calls
+        // even in classic (systemdBoot=false) mode. Debian ships a D-Bus
+        // activation file for systemd --user, which cannot work in Vessel's
+        // rootless Android process tree. Remove only the activation entry so
+        // those calls fail fast instead of spawning a doomed user manager.
+        listOf(
+            "usr/share/dbus-1/services/org.freedesktop.systemd1.service",
+            // xdg-document-portal always requires a FUSE mount at
+            // /run/user/$UID/doc. Android's app sandbox denies /dev/fuse, so
+            // activating it can only fail and delays the session.
+            "usr/share/dbus-1/services/org.freedesktop.portal.Documents.service",
+        ).forEach { relative ->
+            val service = File(layout.rootfsDir, relative)
+            if (service.isFile) {
+                val disabled = File(service.parentFile, service.name + ".vessel-disabled")
+                if (disabled.exists()) disabled.delete()
+                check(service.renameTo(disabled)) {
+                    "Could not disable unsupported rootless D-Bus activation: /" + relative
+                }
+            }
+        }
+
+        // Force the KDE portal backend and explicitly disable interfaces that
+        // require PipeWire/FUSE in this runtime. Normal Wayland/KDE operation
+        // and Android AudioTrack remain independent of these portals.
+        val portalConfig = File(
+            layout.rootfsDir,
+            "home/vessel/.config/xdg-desktop-portal/portals.conf",
+        )
+        check(portalConfig.parentFile?.isDirectory == true || portalConfig.parentFile?.mkdirs() == true) {
+            "Could not create rootless portal config directory"
+        }
+        val portalPolicy = """
+            [preferred]
+            default=kde
+            org.freedesktop.impl.portal.ScreenCast=none
+            org.freedesktop.impl.portal.RemoteDesktop=none
+            org.freedesktop.impl.portal.Lockdown=none
+        """.trimIndent() + "\n"
+        if (!portalConfig.isFile || portalConfig.readText() != portalPolicy) {
+            portalConfig.writeText(portalPolicy)
+            Os.chmod(portalConfig.absolutePath, 0x1A4) // 0644
+        }
+
         true
     }.getOrDefault(false)
 
@@ -528,6 +573,12 @@ class VesselProrootRuntimeBackend(
             }
             startupJournal.mark("compat.probe.ok")
 
+            // The on-device log showed org.kde.plasma.core missing. Debian
+            // provides it in plasma-desktoptheme; repair stale production
+            // rootfs installs in-place instead of forcing a 1.4 GiB redownload.
+            progress("proroot_plasma_qml", 82, "Validating Plasma 6 QML runtime")
+            ensurePlasmaQmlCore()
+
             val uid = Process.myUid()
             val socket = layout.desktopHostSocket(uid)
             VesselWaylandPresenter.resetPresentationLatch()
@@ -608,6 +659,36 @@ class VesselProrootRuntimeBackend(
     override suspend fun stop(): JSONObject = withContext(Dispatchers.IO) {
         synchronized(lifecycleLock) { stopInternal() }
         status()
+    }
+
+    private fun ensurePlasmaQmlCore() {
+        val qmlCore = File(
+            layout.rootfsDir,
+            "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir",
+        )
+        if (qmlCore.isFile && qmlCore.length() > 0L) return
+
+        startupJournal.mark("plasma.qml.repair.begin")
+        val repair = VesselProrootProcessRunner.run(
+            shellLaunchPlan(
+                "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
+                    "DEBIAN_FRONTEND=noninteractive apt-get " +
+                    "-o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --reinstall plasma-desktoptheme",
+                diagnostics = true,
+                includeSharedStorage = false,
+            ),
+            timeoutSeconds = 90,
+            logFile = File(layout.diagnosticsDir, "plasma-qml-repair.log"),
+        )
+        check(
+            repair.exitCode == 0 &&
+                qmlCore.isFile &&
+                qmlCore.length() > 0L
+        ) {
+            "Plasma QML core is missing and automatic repair failed rc=" +
+                repair.exitCode + ": " + repair.output.takeLast(6000)
+        }
+        startupJournal.mark("plasma.qml.repair.ok")
     }
 
     private fun prepareAudioBridge() {
