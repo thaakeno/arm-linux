@@ -162,7 +162,8 @@ object VesselProrootDisplayBridge {
         lastGuestClipboard = ""
         touchDown = false
         if (started) {
-            if (zeroCopy) runCatching { nativeDetachSurface() }
+            // nativeStop owns the complete SurfaceControl + transport teardown.
+            // Do not detach once here and then immediately detach again in native.
             runCatching { nativeStop() }
         }
         started = false
