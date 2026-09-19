@@ -683,7 +683,9 @@ private:
             ctrl_fd_.store(-1);
             close(client);
             cleanup_resources();
-            if (running_.load()) set_status("waiting-for-kwin");
+            // serve_producer records the concrete disconnect/error reason.
+            // Preserve it until a producer reconnects instead of collapsing
+            // every failure back to the misleading "waiting-for-kwin".
         }
 
         const int expected = server;
@@ -725,13 +727,22 @@ private:
             if (rc < 0 && errno == EINTR) continue;
             if (rc < 0) return;
 
-            if (pfds[0].revents & (POLLHUP | POLLERR)) return;
+            if (pfds[0].revents & (POLLHUP | POLLERR)) {
+                set_status("disconnected:control-hup-or-error");
+                return;
+            }
             if (pfds[0].revents & POLLIN) {
                 CtrlMsg msg{};
-                if (!recv_all(ctrl, &msg, sizeof(msg))) return;
+                if (!recv_all(ctrl, &msg, sizeof(msg))) {
+                    set_status("disconnected:control-read");
+                    return;
+                }
                 if (msg.size > 0) {
                     std::vector<uint8_t> discard(msg.size);
-                    if (!recv_all(ctrl, discard.data(), discard.size())) return;
+                    if (!recv_all(ctrl, discard.data(), discard.size())) {
+                        set_status("disconnected:control-payload");
+                        return;
+                    }
                 }
                 if (msg.type == CTRL_PICKUP_FDS) {
                     if (!setup_resources(ctrl)) {
@@ -741,14 +752,26 @@ private:
                 }
             }
 
-            if (pfds[1].fd >= 0 && (pfds[1].revents & (POLLHUP | POLLERR))) return;
+            if (pfds[1].fd >= 0 && (pfds[1].revents & (POLLHUP | POLLERR))) {
+                set_status("disconnected:fence-hup-or-error");
+                return;
+            }
             if (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN)) {
-                if (!handle_frame_done()) return;
+                if (!handle_frame_done()) {
+                    if (status().rfind("error:", 0) != 0) set_status("disconnected:frame-done");
+                    return;
+                }
             }
 
-            if (pfds[2].fd >= 0 && (pfds[2].revents & (POLLHUP | POLLERR))) return;
+            if (pfds[2].fd >= 0 && (pfds[2].revents & (POLLHUP | POLLERR))) {
+                set_status("disconnected:data-hup-or-error");
+                return;
+            }
             if (pfds[2].fd >= 0 && (pfds[2].revents & POLLIN)) {
-                if (!handle_output_event()) return;
+                if (!handle_output_event()) {
+                    set_status("disconnected:data-read");
+                    return;
+                }
             }
 
             if (pfds[3].fd >= 0 && (pfds[3].revents & (POLLIN | POLLERR))) {
@@ -902,9 +925,9 @@ private:
         }
         set_status(zero_copy_
             ? (surface_attached_.load()
-                ? "presenting-proroot-surfacecontrol-zero-copy"
+                ? "producer-ready-waiting-for-first-frame-zero-copy"
                 : "zero-copy-ready-waiting-for-surface")
-            : "presenting-proroot-gpu-blit-fallback");
+            : "producer-ready-waiting-for-first-frame-gpu-blit");
         return true;
     }
 
@@ -1033,6 +1056,7 @@ private:
             return false;
         }
         frames_presented_.fetch_add(1);
+        set_status("presenting-proroot-gpu-blit-fallback");
         return request_next_frame();
     }
 
