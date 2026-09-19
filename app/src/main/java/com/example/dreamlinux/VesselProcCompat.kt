@@ -150,8 +150,13 @@ class VesselProcCompat(
 
     private fun syntheticCpuInfo(): String {
         val cpus = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        val socModel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Build.SOC_MODEL.takeIf { it.isNotBlank() }
+        } else {
+            null
+        }
         val model = listOfNotNull(
-            Build.SOC_MODEL.takeIf { it.isNotBlank() },
+            socModel,
             Build.HARDWARE.takeIf { it.isNotBlank() },
         ).joinToString(" / ").ifBlank { "ARM64" }
         return buildString {
