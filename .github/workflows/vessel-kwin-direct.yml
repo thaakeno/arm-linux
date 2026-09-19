@@ -46,6 +46,10 @@ jobs:
           # lfdevs/kwin is Debian packaging with pristine upstream source tarballs.
           # Materialize the upstream tree before applying the quilt series.
           origtargz
+          # Match lfdevs' own package CI: materialize the pristine upstream tree
+          # into git so gbp sees a complete, clean source package.
+          git add .
+          git commit -m "Materialize KWin upstream source"
 
       - name: Apply Vessel direct-transport patch
         shell: bash
@@ -63,8 +67,14 @@ jobs:
           quilt refresh
           grep -Fqx '0006-vessel-direct-transport-no-fallback.patch' debian/patches/series || \
             printf '%s\n' '0006-vessel-direct-transport-no-fallback.patch' >> debian/patches/series
+          # Store the delta as a real Debian quilt patch, then return the source
+          # tree to pristine state before gbp builds it.
+          quilt pop -a
+          rm -rf .pc
           git add debian/patches/series debian/patches/0006-vessel-direct-transport-no-fallback.patch
           git commit -m "vessel: require direct Android display transport"
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
 
       - name: Build KWin packages
         shell: bash
