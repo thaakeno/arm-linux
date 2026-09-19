@@ -246,8 +246,17 @@ object VesselProrootDisplayBridge {
     fun disconnectReason(): String =
         if (!started) "stopped" else runCatching { nativeDisconnectReason() }.getOrDefault("unknown")
 
+    fun producerReady(): Boolean {
+        if (!started || !producerConnected()) return false
+        val current = status()
+        return current.startsWith("presenting-proroot-") ||
+            current == "zero-copy-ready-waiting-for-surface" ||
+            current == "zero-copy-surface-attached" ||
+            current == "zero-copy-surface-detached"
+    }
+
     fun displayHealthy(): Boolean {
-        if (!started || !producerConnected() || framesPresented() <= 0L) return false
+        if (!producerReady() || framesPresented() <= 0L) return false
         return !zeroCopy || surfaceAttached()
     }
 
