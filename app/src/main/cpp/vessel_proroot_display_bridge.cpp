@@ -55,12 +55,6 @@ constexpr uint32_t INPUT_TEXT = 9;
 
 constexpr uint32_t OUTPUT_CLIPBOARD = 1;
 
-constexpr uint32_t SURFACE_MAGIC = 0x42484156u;
-constexpr uint32_t SURFACE_VERSION = 3;
-constexpr uint32_t SURFACE_REGISTER = 1;
-constexpr uint32_t SURFACE_FRAME = 2;
-constexpr uint8_t SURFACE_FENCE_TAG = 0xF3;
-
 constexpr uint32_t PIXEL_FORMAT_RGBA_8888 = 1;
 constexpr int BUFFER_COUNT = 3;
 constexpr size_t MAX_CLIPBOARD = 1024 * 1024;
@@ -108,24 +102,6 @@ struct OutputEvent {
         struct { uint32_t size; uint32_t pad[3]; } clipboard;
         uint32_t padding[4];
     };
-};
-struct SurfaceMsg {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t type;
-    uint32_t scanout_id;
-    uint32_t slot;
-    uint32_t serial;
-    uint32_t width;
-    uint32_t height;
-};
-struct SurfaceAck {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t scanout_id;
-    uint32_t slot;
-    uint32_t serial;
-    uint32_t ok;
 };
 #pragma pack(pop)
 
@@ -253,34 +229,6 @@ int extract_first_dmabuf(AHardwareBuffer* buffer) {
     return result;
 }
 
-int connect_abstract_presenter() {
-    const std::string name = "vessel-ahb-" + std::to_string(getuid());
-    for (int attempt = 0; attempt < 40; ++attempt) {
-        const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        if (fd < 0) return -1;
-        sockaddr_un addr{};
-        addr.sun_family = AF_UNIX;
-        if (name.size() + 1 >= sizeof(addr.sun_path)) {
-            close(fd);
-            return -1;
-        }
-        addr.sun_path[0] = '\0';
-        std::memcpy(addr.sun_path + 1, name.data(), name.size());
-        const socklen_t len = static_cast<socklen_t>(
-            offsetof(sockaddr_un, sun_path) + 1 + name.size());
-        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), len) == 0) return fd;
-        close(fd);
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    }
-    return -1;
-}
-
-bool send_surface_fence(int fd, int fence_fd) {
-    uint8_t tag = SURFACE_FENCE_TAG;
-    if (fence_fd < 0) return send_all(fd, &tag, 1);
-    return send_fds(fd, &tag, 1, &fence_fd, 1);
-}
-
 class Bridge {
 public:
     bool start(JNIEnv* env, jobject callback, const std::string& socket_path,
@@ -307,13 +255,18 @@ public:
                 AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY;
             zero_copy_ = AHardwareBuffer_isSupported(&probe);
         }
-        if (zero_copy_) {
-            release_event_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-            if (release_event_fd_ < 0) {
-                env->DeleteGlobalRef(callback_);
-                callback_ = nullptr;
-                return false;
-            }
+        if (!zero_copy_) {
+            env->DeleteGlobalRef(callback_);
+            callback_ = nullptr;
+            set_status("error:zero-copy-required");
+            return false;
+        }
+        release_event_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        if (release_event_fd_ < 0) {
+            env->DeleteGlobalRef(callback_);
+            callback_ = nullptr;
+            set_status("error:release-eventfd");
+            return false;
         }
         running_.store(true);
         thread_ = std::thread([this] { loop(); });
@@ -322,11 +275,19 @@ public:
 
     void stop(JNIEnv* env) {
         running_.store(false);
-        surface_attached_.store(false);
-        if (zero_copy_) vessel_proroot_surfacecontrol_detach();
-        const int listen = listen_fd_.exchange(-1);
-        if (listen >= 0) close(listen);
-        const int ctrl = ctrl_fd_.exchange(-1);
+        const bool had_surface = surface_attached_.exchange(false);
+
+        // Retire every outstanding SurfaceFlinger callback before tearing down the
+        // child layer. Buffer-release callbacks are allowed to arrive on any thread.
+        generation_.fetch_add(1);
+        if (zero_copy_ && had_surface) vessel_proroot_surfacecontrol_detach();
+
+        // The bridge thread owns listen_fd_ and closes it exactly once. Closing the
+        // same descriptor from here and again in loop() can close an unrelated fd if
+        // Android reuses the number in between, which explains stop-time app crashes.
+        // poll() wakes by itself within 250 ms. Only shutdown the connected producer
+        // socket so its blocking operations return immediately.
+        const int ctrl = ctrl_fd_.load();
         if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
         wake_release_loop();
         if (thread_.joinable()) thread_.join();
@@ -393,13 +354,8 @@ public:
             height_.load(),
             refresh_mhz_.load() / 1000.0f);
         if (!ok) {
-            // Capability was present but this concrete Surface could not host the
-            // child layer. Permanently downgrade this run to the Phase-4 GPU path
-            // and reconnect KWin after Java starts the fallback presenter.
-            zero_copy_ = false;
             surface_attached_.store(false);
-            const int ctrl = ctrl_fd_.load();
-            if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
+            set_status("error:surfacecontrol-attach");
             return false;
         }
         surface_attached_.store(true);
@@ -544,10 +500,6 @@ private:
     std::atomic<uint64_t> frames_presented_{0};
     std::atomic<uint64_t> frames_released_{0};
 
-    // Android 30-35 compatibility fallback keeps the Phase-4 GPU-blit presenter.
-    std::array<bool, BUFFER_COUNT> presenter_registered_{{false, false, false}};
-    int presenter_fd_ = -1;
-    uint32_t serial_ = 1;
     uint32_t next_slot_ = 0;
     bool resources_ready_ = false;
     std::mutex data_write_lock_;
@@ -756,33 +708,54 @@ private:
                     }
                 }
                 if (msg.type == CTRL_PICKUP_FDS) {
-                    if (!setup_resources(ctrl)) {
-                        set_status("error:consumer-resources");
-                        return;
+                    // The upstream Anland producer uses a 100 ms pickup timeout because
+                    // its normal consumer pre-deposits fds in the daemon. Vessel creates
+                    // AHardwareBuffers on demand, which can exceed that first timeout on
+                    // real phones. A retry may therefore arrive after the first reply.
+                    // Never tear down a live generation for a duplicate pickup.
+                    if (!resources_ready_) {
+                        if (!setup_resources(ctrl)) {
+                            set_status("error:consumer-resources");
+                            return;
+                        }
                     }
                 }
             }
 
+            bool resource_lost = false;
             if (pfds[1].fd >= 0 && (pfds[1].revents & (POLLHUP | POLLERR))) {
-                set_status("disconnected:fence-hup-or-error");
-                return;
-            }
-            if (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN)) {
+                set_status("transport-recovering:fence-channel");
+                resource_lost = true;
+            } else if (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN)) {
                 if (!handle_frame_done()) {
-                    if (status().rfind("error:", 0) != 0) set_status("disconnected:frame-done");
-                    return;
+                    if (status().rfind("error:", 0) != 0) {
+                        set_status("transport-recovering:frame-done");
+                    }
+                    resource_lost = true;
                 }
             }
 
-            if (pfds[2].fd >= 0 && (pfds[2].revents & (POLLHUP | POLLERR))) {
-                set_status("disconnected:data-hup-or-error");
-                return;
-            }
-            if (pfds[2].fd >= 0 && (pfds[2].revents & POLLIN)) {
+            if (!resource_lost &&
+                pfds[2].fd >= 0 &&
+                (pfds[2].revents & (POLLHUP | POLLERR))) {
+                set_status("transport-recovering:data-channel");
+                resource_lost = true;
+            } else if (!resource_lost &&
+                       pfds[2].fd >= 0 &&
+                       (pfds[2].revents & POLLIN)) {
                 if (!handle_output_event()) {
-                    set_status("disconnected:data-read");
-                    return;
+                    set_status("transport-recovering:data-read");
+                    resource_lost = true;
                 }
+            }
+
+            if (resource_lost) {
+                // Match the real Anland daemon contract: a data/fence generation can
+                // be replaced without dropping the producer control connection. KWin
+                // keeps the same ctrl fd and requests a fresh generation on its next
+                // reconnect tick.
+                cleanup_resources();
+                continue;
             }
 
             if (pfds[3].fd >= 0 && (pfds[3].revents & (POLLIN | POLLERR))) {
@@ -824,7 +797,7 @@ private:
             desc.usage =
                 AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER |
                 AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-                (zero_copy_ ? AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY : 0);
+                AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY;
             if (!AHardwareBuffer_isSupported(&desc) ||
                 AHardwareBuffer_allocate(&desc, &buffers_[i]) != 0 ||
                 !buffers_[i]) {
@@ -901,44 +874,29 @@ private:
         close(fence_pair[1]);
         close(data_pair[1]);
         close(audio_pair[1]);
-        // Vessel keeps its existing Pulse/ALSA -> Android AudioTrack bridge.
-        // Close the unused Anland audio peer immediately so KWin's optional
-        // PipeWire transport cannot accumulate PCM in an unread socket buffer.
-        if (audio_fd_ >= 0) {
-            close(audio_fd_);
-            audio_fd_ = -1;
-        }
+        // Keep the peer alive for the whole resource generation. KWin owns an audio
+        // source bound to this fd; closing our peer immediately creates a permanent
+        // HUP/EPIPE state. Vessel still uses its own Android AudioTrack bridge for
+        // playback, so unread Anland PCM is simply dropped by the producer once the
+        // non-blocking socket buffer is full.
         if (!sent_fds || !send_buffer_set()) {
             cleanup_resources();
             return false;
         }
 
-        presenter_registered_.fill(false);
-        serial_ = 1;
         next_slot_ = 0;
         render_inflight_ = false;
         slot_states_.fill(SlotState::FREE);
         resources_ready_ = true;
-
-        if (!zero_copy_) {
-            presenter_fd_ = connect_abstract_presenter();
-            if (presenter_fd_ < 0) {
-                cleanup_resources();
-                set_status("error:presenter-connect");
-                return false;
-            }
-        }
 
         send_refresh();
         if (!request_next_frame()) {
             cleanup_resources();
             return false;
         }
-        set_status(zero_copy_
-            ? (surface_attached_.load()
-                ? "producer-ready-waiting-for-first-frame-zero-copy"
-                : "zero-copy-ready-waiting-for-surface")
-            : "producer-ready-waiting-for-first-frame-gpu-blit");
+        set_status(surface_attached_.load()
+            ? "producer-ready-waiting-for-first-frame-zero-copy"
+            : "zero-copy-ready-waiting-for-surface");
         return true;
     }
 
@@ -968,40 +926,33 @@ private:
         std::lock_guard<std::mutex> guard(resource_lock_);
         if (!resources_ready_ || !selected_ || buf_ready_fd_ < 0) return false;
 
-        if (zero_copy_) {
-            if (!surface_attached_.load()) return true;
-            if (render_inflight_) return true;
+        if (!surface_attached_.load()) return true;
+        if (render_inflight_) return true;
 
-            int chosen = -1;
-            for (int step = 0; step < BUFFER_COUNT; ++step) {
-                const int candidate =
-                    static_cast<int>((next_slot_ + step) % BUFFER_COUNT);
-                if (slot_states_[candidate] == SlotState::FREE) {
-                    chosen = candidate;
-                    break;
-                }
+        int chosen = -1;
+        for (int step = 0; step < BUFFER_COUNT; ++step) {
+            const int candidate =
+                static_cast<int>((next_slot_ + step) % BUFFER_COUNT);
+            if (slot_states_[candidate] == SlotState::FREE) {
+                chosen = candidate;
+                break;
             }
-            if (chosen < 0) return true;
-
-            *selected_ = static_cast<uint32_t>(chosen);
-            next_slot_ = static_cast<uint32_t>((chosen + 1) % BUFFER_COUNT);
-            slot_states_[chosen] = SlotState::RENDERING;
-            render_inflight_ = true;
-        } else {
-            *selected_ = next_slot_ % BUFFER_COUNT;
-            ++next_slot_;
         }
+        if (chosen < 0) return true;
+
+        *selected_ = static_cast<uint32_t>(chosen);
+        next_slot_ = static_cast<uint32_t>((chosen + 1) % BUFFER_COUNT);
+        slot_states_[chosen] = SlotState::RENDERING;
+        render_inflight_ = true;
 
         uint64_t one = 1;
         if (write(buf_ready_fd_, &one, sizeof(one)) ==
             static_cast<ssize_t>(sizeof(one))) {
             return true;
         }
-        if (zero_copy_) {
-            const uint32_t slot = *selected_;
-            if (slot < BUFFER_COUNT) slot_states_[slot] = SlotState::FREE;
-            render_inflight_ = false;
-        }
+        const uint32_t slot = *selected_;
+        if (slot < BUFFER_COUNT) slot_states_[slot] = SlotState::FREE;
+        render_inflight_ = false;
         return false;
     }
 
@@ -1021,103 +972,56 @@ private:
                 if (fence >= 0) close(fence);
                 return false;
             }
-            if (zero_copy_) {
-                if (!render_inflight_ ||
-                    slot_states_[slot] != SlotState::RENDERING) {
-                    if (fence >= 0) close(fence);
-                    return false;
-                }
-                render_inflight_ = false;
-                slot_states_[slot] = SlotState::PRESENTED;
-            }
-        }
-
-        if (zero_copy_) {
-            const uint64_t generation = generation_.load();
-
-            // A render completion can race an Android Surface detach. That is not
-            // a producer error. Drop the completed frame, free the slot, and wait
-            // for attach_surface() to request another frame.
-            if (!surface_attached_.load()) {
+            if (!render_inflight_ ||
+                slot_states_[slot] != SlotState::RENDERING) {
                 if (fence >= 0) close(fence);
-                {
-                    std::lock_guard<std::mutex> guard(resource_lock_);
-                    if (generation == generation_.load()) {
-                        slot_states_[slot] = SlotState::FREE;
-                    }
-                }
-                set_status("zero-copy-ready-waiting-for-surface");
-                return true;
-            }
-
-            const bool ok =
-                vessel_proroot_surfacecontrol_present(
-                    buffers_[slot],
-                    fence,
-                    slot,
-                    generation,
-                    &Bridge::surface_release_callback,
-                    this);
-            if (!ok) {
-                if (fence >= 0) close(fence);
-                {
-                    std::lock_guard<std::mutex> guard(resource_lock_);
-                    if (generation == generation_.load()) {
-                        slot_states_[slot] = SlotState::FREE;
-                    }
-                }
-                set_status("error:surfacecontrol-submit");
                 return false;
             }
-            // ASurfaceTransaction owns the acquire fence after a successful
-            // setBufferWithRelease call. Reuse waits for its release callback.
-            frames_presented_.fetch_add(1);
-            set_status("presenting-proroot-surfacecontrol-zero-copy");
-            return request_next_frame();
+            render_inflight_ = false;
+            slot_states_[slot] = SlotState::PRESENTED;
         }
 
-        const bool ok = submit_surface(slot, fence);
-        if (fence >= 0) close(fence);
+        const uint64_t generation = generation_.load();
+
+        // A render completion can race an Android Surface detach. That is not
+        // a producer error. Drop the completed frame, free the slot, and wait
+        // for attach_surface() to request another frame.
+        if (!surface_attached_.load()) {
+            if (fence >= 0) close(fence);
+            {
+                std::lock_guard<std::mutex> guard(resource_lock_);
+                if (generation == generation_.load()) {
+                    slot_states_[slot] = SlotState::FREE;
+                }
+            }
+            set_status("zero-copy-ready-waiting-for-surface");
+            return true;
+        }
+
+        const bool ok =
+            vessel_proroot_surfacecontrol_present(
+                buffers_[slot],
+                fence,
+                slot,
+                generation,
+                &Bridge::surface_release_callback,
+                this);
         if (!ok) {
-            set_status("error:surface-submit");
-            return false;
-        }
-        frames_presented_.fetch_add(1);
-        set_status("presenting-proroot-gpu-blit-fallback");
-        return request_next_frame();
-    }
-
-    bool submit_surface(uint32_t slot, int fence) {
-        if (presenter_fd_ < 0) return false;
-        SurfaceMsg msg{};
-        msg.magic = SURFACE_MAGIC;
-        msg.version = SURFACE_VERSION;
-        msg.type = presenter_registered_[slot] ? SURFACE_FRAME : SURFACE_REGISTER;
-        msg.scanout_id = 0;
-        msg.slot = slot;
-        msg.serial = serial_++;
-        msg.width = width_.load();
-        msg.height = height_.load();
-
-        if (!send_all(presenter_fd_, &msg, sizeof(msg))) return false;
-        if (!presenter_registered_[slot]) {
-            if (AHardwareBuffer_sendHandleToUnixSocket(buffers_[slot], presenter_fd_) != 0) {
-                return false;
+            if (fence >= 0) close(fence);
+            {
+                std::lock_guard<std::mutex> guard(resource_lock_);
+                if (generation == generation_.load()) {
+                    slot_states_[slot] = SlotState::FREE;
+                }
             }
-        }
-        if (!send_surface_fence(presenter_fd_, fence)) return false;
-
-        SurfaceAck ack{};
-        if (!recv_all(presenter_fd_, &ack, sizeof(ack))) return false;
-        if (ack.magic != SURFACE_MAGIC ||
-            ack.version != SURFACE_VERSION ||
-            ack.slot != slot ||
-            ack.serial != msg.serial ||
-            ack.ok == 0) {
+            set_status("error:surfacecontrol-submit");
             return false;
         }
-        presenter_registered_[slot] = true;
-        return true;
+        // ASurfaceTransaction owns the acquire fence after a successful
+        // setBufferWithRelease call. Reuse waits for its release callback.
+        frames_presented_.fetch_add(1);
+        set_status("presenting-proroot-surfacecontrol-zero-copy");
+        return request_next_frame();
     }
 
     bool handle_output_event() {
@@ -1206,13 +1110,12 @@ private:
         render_inflight_ = false;
         if (selected_ && selected_ != MAP_FAILED) munmap(selected_, sizeof(uint32_t));
         selected_ = nullptr;
-        if (presenter_fd_ >= 0) close(presenter_fd_);
         if (data_fd_ >= 0) close(data_fd_);
         if (fence_fd_ >= 0) close(fence_fd_);
         if (buf_ready_fd_ >= 0) close(buf_ready_fd_);
         if (shm_fd_ >= 0) close(shm_fd_);
         if (audio_fd_ >= 0) close(audio_fd_);
-        presenter_fd_ = data_fd_ = fence_fd_ = buf_ready_fd_ = shm_fd_ = audio_fd_ = -1;
+        data_fd_ = fence_fd_ = buf_ready_fd_ = shm_fd_ = audio_fd_ = -1;
         for (int i = 0; i < BUFFER_COUNT; ++i) {
             if (release_fds_[i] >= 0) close(release_fds_[i]);
             release_fds_[i] = -1;
@@ -1222,7 +1125,6 @@ private:
             if (buffers_[i]) AHardwareBuffer_release(buffers_[i]);
             buffers_[i] = nullptr;
         }
-        presenter_registered_.fill(false);
     }
 };
 

@@ -26,7 +26,7 @@ export UCF_FORCE_CONFFOLD=1
 export NEEDRESTART_MODE=a
 
 apt-get update
-apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y   bash ca-certificates curl git locales sudo   dbus dbus-x11 python3 python3-dbus python3-gi   kde-plasma-desktop plasma-workspace plasma-desktop plasma-desktoptheme kwin-wayland   xwayland qt6-wayland wayland-utils systemsettings   libinput-tools mesa-utils   breeze breeze-icon-theme hicolor-icon-theme   desktop-file-utils xdg-user-dirs shared-mime-info menu   appstream packagekit packagekit-tools polkitd pkexec plasma-discover   xdg-desktop-portal xdg-desktop-portal-kde   pulseaudio pulseaudio-utils alsa-utils   fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation   firefox-esr konsole dolphin ark kcalc okular gwenview kate
+apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y   bash ca-certificates curl git locales sudo   dbus dbus-x11 python3 python3-dbus python3-gi   kde-plasma-desktop plasma-workspace plasma-desktop plasma-desktoptheme qml6-module-org-kde-ksvg libkf6svg6 libkirigamiplatform6 kwin-wayland   xwayland qt6-wayland wayland-utils systemsettings   libinput-tools mesa-utils   breeze breeze-icon-theme hicolor-icon-theme   desktop-file-utils xdg-user-dirs shared-mime-info menu   appstream packagekit packagekit-tools polkitd pkexec plasma-discover   xdg-desktop-portal xdg-desktop-portal-kde   pulseaudio pulseaudio-utils alsa-utils   fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation   firefox-esr konsole dolphin ark kcalc okular gwenview kate
 
 dpkg --configure -a
 id -u vessel >/dev/null 2>&1 || useradd -m -s /bin/bash vessel
@@ -71,6 +71,10 @@ chown vessel:vessel /home/vessel/.config/xdg-desktop-portal/portals.conf
 chmod 0600 /home/vessel/.config/xdg-desktop-portal/portals.conf
 
 test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir
+test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/qmldir
+test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so
+! ldd -r /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so 2>&1 | grep -Eqi 'not found|undefined symbol'
+touch /var/cache/vessel/plasma-qml-proroot-production-v12
 
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /tmp/* /var/tmp/*
@@ -132,6 +136,8 @@ data={
     "usr/local/libexec/vessel-compat-probe",
     "usr/lib/vessel/direct-gpu/mesa.env",
     "usr/lib/vessel/desktop/session.env",
+    "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/qmldir",
+    "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so",
     "var/cache/vessel/proroot-production-v1"
   ]
 }

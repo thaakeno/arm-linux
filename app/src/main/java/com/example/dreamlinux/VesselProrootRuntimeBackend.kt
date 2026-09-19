@@ -28,7 +28,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v11"
+        const val REVISION = "proroot-production-v12"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -63,7 +63,7 @@ class VesselProrootRuntimeBackend(
         Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
     override val graphicsSummary =
         "Wayland/KWin → Freedreno/Turnip KGSL → DMA-BUF/native fence → " +
-            "SurfaceControl zero-copy (API 36+) / GPU-blit fallback"
+            "SurfaceControl/AHardwareBuffer zero-copy"
     override val internetSummary = "Android shared kernel · direct sockets/DNS"
 
     override fun hasStorageAccess(): Boolean = layout.prepareHostLayout()
@@ -166,10 +166,8 @@ class VesselProrootRuntimeBackend(
      * replacement for every Android compatibility iteration.
      *
      * Plasma must use its classic non-systemd startup in this rootless session.
-     * Android 16 also SIGSYS-kills the currently pinned Anland XWayland, so the
-     * wrapper strips --xwayland while VESSEL_DISABLE_XWAYLAND=1. Native Wayland
-     * applications continue to work; XWayland can be re-enabled once its blocked
-     * syscall is identified and fixed.
+     * Vessel also installs its Android-seccomp-safe XWayland build into /usr/local
+     * while preserving the pinned Anland KGSL/DRI3 patches.
      */
     private fun prepareRootlessDesktopPolicy(): Boolean = runCatching {
         val xdg = File(layout.rootfsDir, "etc/xdg")
@@ -409,10 +407,16 @@ class VesselProrootRuntimeBackend(
     }
 
     override fun configureDisplay(width: Int, height: Int, dpi: Int, refresh: Float) {
-        displayWidth = width.coerceIn(640, 3840)
-        displayHeight = height.coerceIn(480, 2160)
-        displayDpi = dpi.coerceIn(72, 480)
-        displayRefresh = refresh.coerceIn(30f, 240f)
+        val nextRefresh = refresh.coerceIn(30f, 240f)
+        if (!running) {
+            // Anland's producer receives monitor geometry during its control
+            // handshake. Keep that mode stable for the lifetime of the compositor;
+            // Android SurfaceView resizes are presentation-only.
+            displayWidth = width.coerceIn(640, 3840)
+            displayHeight = height.coerceIn(480, 2160)
+            displayDpi = dpi.coerceIn(72, 480)
+        }
+        displayRefresh = nextRefresh
         if (running) {
             VesselProrootDisplayBridge.configure(displayWidth, displayHeight, displayRefresh)
         }
@@ -449,7 +453,6 @@ class VesselProrootRuntimeBackend(
                 if (rc != 0 && lastError.isBlank()) lastError = "Plasma session exited rc=" + rc
             }
         }
-        val presenter = VesselWaylandPresenter.status()
         val bridge = VesselProrootDisplayBridge.status()
         baseState(storage)
             .put("rootfsReady", layout.rootfsReady())
@@ -469,7 +472,7 @@ class VesselProrootRuntimeBackend(
                 File(layout.rootfsDir, "var/cache/vessel/proroot-production-v1").isFile,
             )
             .put("displayBridge", bridge)
-            .put("presenter", presenter)
+            .put("presenter", bridge)
             .put("presentationPath", VesselProrootDisplayBridge.presentationPath())
             .put("zeroCopyPresentation", VesselProrootDisplayBridge.usesZeroCopyPresentation())
             .put("effectiveRefreshHz", VesselProrootDisplayBridge.effectiveRefresh().toDouble())
@@ -603,7 +606,6 @@ class VesselProrootRuntimeBackend(
 
             val uid = Process.myUid()
             val socket = layout.desktopHostSocket(uid)
-            VesselWaylandPresenter.resetPresentationLatch()
             startupJournal.mark("display.bridge.begin")
             check(
                 VesselProrootDisplayBridge.start(
@@ -648,6 +650,40 @@ class VesselProrootRuntimeBackend(
                 "KWin did not reach Vessel's native presentation path: " + bridge
             }
 
+            // A KWin background buffer is not proof that the desktop is usable.
+            // Wait for the actual Plasma shell and reject known fatal QML failures
+            // before exposing VISIBLE to the Android UI.
+            progress("proroot_plasma_shell", 96, "Validating live Plasma shell and QML")
+            val shellProbe = VesselProrootProcessRunner.run(
+                desktopLaunchPlan(
+                    listOf(
+                        "/bin/sh",
+                        "-lc",
+                        "for i in $(seq 1 100); do " +
+                            "pgrep -x kwin_wayland >/dev/null && " +
+                            "pgrep -x plasmashell >/dev/null && exit 0; " +
+                            "sleep .1; done; exit 1",
+                    ),
+                    includeSharedStorage = false,
+                ),
+                timeoutSeconds = 15,
+                logFile = File(layout.diagnosticsDir, "plasma-live-probe.log"),
+            )
+            check(shellProbe.exitCode == 0) {
+                "Plasma shell did not become live: " + shellProbe.output.takeLast(3000)
+            }
+            Thread.sleep(250)
+            val plasmaTail = process.outputTail()
+            val fatalQml = Regex(
+                """(?i)(module\s+["'][^"']+["']\s+is not installed|""" +
+                    """KSvg\.SvgItem\s+is not a type|""" +
+                    """Type\s+[^\n]+\s+unavailable|""" +
+                    """Failed to load overview:)""",
+            )
+            check(!fatalQml.containsMatchIn(plasmaTail)) {
+                "Plasma QML failed after startup:\n" + plasmaTail.takeLast(6000)
+            }
+
             desktopReady = true
             startupJournal.mark("desktop.ready", bridge)
             progress(
@@ -684,32 +720,65 @@ class VesselProrootRuntimeBackend(
     }
 
     private fun ensurePlasmaQmlCore() {
-        val qmlCore = File(
-            layout.rootfsDir,
-            "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir",
+        val qt6Qml = File(layout.rootfsDir, "usr/lib/aarch64-linux-gnu/qt6/qml")
+        val required = listOf(
+            File(qt6Qml, "org/kde/plasma/core/qmldir"),
+            File(qt6Qml, "org/kde/ksvg/qmldir"),
+            File(qt6Qml, "org/kde/ksvg/libcorebindingsplugin.so"),
         )
-        if (qmlCore.isFile && qmlCore.length() > 0L) return
+        val repairedMarker = File(
+            layout.rootfsDir,
+            "var/cache/vessel/plasma-qml-proroot-production-v12",
+        )
+
+        fun filesReady(): Boolean =
+            required.all { it.isFile && it.length() > 0L }
+
+        fun pluginLinksReady(): Boolean {
+            if (!filesReady()) return false
+            val probe = VesselProrootProcessRunner.run(
+                shellLaunchPlan(
+                    "ldd -r /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/" +
+                        "libcorebindingsplugin.so 2>&1",
+                    diagnostics = true,
+                    includeSharedStorage = false,
+                ),
+                timeoutSeconds = 8,
+                logFile = File(layout.diagnosticsDir, "plasma-qml-ksvg-ldd.log"),
+            )
+            return probe.exitCode == 0 &&
+                !probe.output.contains("not found", ignoreCase = true) &&
+                !probe.output.contains("undefined symbol", ignoreCase = true)
+        }
+
+        // v11 only validated plasma.core, so an already-installed workstation may
+        // carry a partial KSvg module. Refresh the exact Debian packages once on v12
+        // even when the files exist, then use the marker on later cold starts.
+        if (repairedMarker.isFile && pluginLinksReady()) return
 
         startupJournal.mark("plasma.qml.repair.begin")
         val repair = VesselProrootProcessRunner.run(
             shellLaunchPlan(
-                "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
-                    "DEBIAN_FRONTEND=noninteractive apt-get " +
-                    "-o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --reinstall plasma-desktoptheme",
+                "export DEBIAN_FRONTEND=noninteractive; " +
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 update && " +
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 " +
+                    "install -y --reinstall " +
+                    "plasma-desktoptheme qml6-module-org-kde-ksvg " +
+                    "libkf6svg6 libkirigamiplatform6",
                 diagnostics = true,
                 includeSharedStorage = false,
             ),
-            timeoutSeconds = 90,
+            timeoutSeconds = 120,
             logFile = File(layout.diagnosticsDir, "plasma-qml-repair.log"),
         )
-        check(
-            repair.exitCode == 0 &&
-                qmlCore.isFile &&
-                qmlCore.length() > 0L
-        ) {
-            "Plasma QML core is missing and automatic repair failed rc=" +
+        check(repair.exitCode == 0 && pluginLinksReady()) {
+            "Plasma KSvg/QML runtime is incomplete and automatic repair failed rc=" +
                 repair.exitCode + ": " + repair.output.takeLast(6000)
         }
+        check(repairedMarker.parentFile?.isDirectory == true || repairedMarker.parentFile?.mkdirs() == true) {
+            "Could not create Plasma QML repair marker directory"
+        }
+        repairedMarker.writeText("ok\n")
         startupJournal.mark("plasma.qml.repair.ok")
     }
 
@@ -862,7 +931,6 @@ class VesselProrootRuntimeBackend(
     }
 
     private fun baseState(ok: Boolean): JSONObject {
-        val presenter = VesselWaylandPresenter.status()
         val bridge = VesselProrootDisplayBridge.status()
         // For the production proroot backend the native bridge is authoritative.
         // A stale retained presenter or a one-time successful startup must never
