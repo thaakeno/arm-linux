@@ -644,6 +644,40 @@ class VesselProrootRuntimeBackend(
                 "KWin did not reach Vessel's native presentation path: " + bridge
             }
 
+            // A KWin background buffer is not proof that the desktop is usable.
+            // Wait for the actual Plasma shell and reject known fatal QML failures
+            // before exposing VISIBLE to the Android UI.
+            progress("proroot_plasma_shell", 96, "Validating live Plasma shell and QML")
+            val shellProbe = VesselProrootProcessRunner.run(
+                desktopLaunchPlan(
+                    listOf(
+                        "/bin/sh",
+                        "-lc",
+                        "for i in $(seq 1 100); do " +
+                            "pgrep -x kwin_wayland >/dev/null && " +
+                            "pgrep -x plasmashell >/dev/null && exit 0; " +
+                            "sleep .1; done; exit 1",
+                    ),
+                    includeSharedStorage = false,
+                ),
+                timeoutSeconds = 15,
+                logFile = File(layout.diagnosticsDir, "plasma-live-probe.log"),
+            )
+            check(shellProbe.exitCode == 0) {
+                "Plasma shell did not become live: " + shellProbe.output.takeLast(3000)
+            }
+            Thread.sleep(250)
+            val plasmaTail = process.outputTail()
+            val fatalQml = Regex(
+                """(?i)(module\s+["'][^"']+["']\s+is not installed|""" +
+                    """KSvg\.SvgItem\s+is not a type|""" +
+                    """Type\s+[^\n]+\s+unavailable|""" +
+                    """Failed to load overview:)""",
+            )
+            check(!fatalQml.containsMatchIn(plasmaTail)) {
+                "Plasma QML failed after startup:\n" + plasmaTail.takeLast(6000)
+            }
+
             desktopReady = true
             startupJournal.mark("desktop.ready", bridge)
             progress(
