@@ -275,9 +275,14 @@ class VesselProrootRuntimeBackend(
     }
 
     override fun configureDisplay(width: Int, height: Int, dpi: Int, refresh: Float) {
-        displayWidth = width.coerceIn(640, 3840)
-        displayHeight = height.coerceIn(480, 2160)
-        displayDpi = dpi.coerceIn(72, 480)
+        // Anland negotiates monitor geometry during the producer handshake.
+        // Android SurfaceView geometry is presentation geometry, not a request
+        // to renegotiate the live Linux output.
+        if (!VesselProrootDisplayBridge.producerConnected()) {
+            displayWidth = width.coerceIn(640, 3840)
+            displayHeight = height.coerceIn(480, 2160)
+            displayDpi = dpi.coerceIn(72, 480)
+        }
         displayRefresh = refresh.coerceIn(30f, 240f)
         if (running) {
             VesselProrootDisplayBridge.configure(displayWidth, displayHeight, displayRefresh)
