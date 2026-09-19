@@ -15,6 +15,7 @@ install -d -m 0700 "$XDG_RUNTIME_DIR"
 install -d -m 0700 "$XDG_RUNTIME_DIR/vessel"
 install -d -m 01777 /tmp/.X11-unix
 rm -f "$XDG_RUNTIME_DIR"/wayland-* "$XDG_RUNTIME_DIR"/plasma-* 2>/dev/null || true
+rm -f   "$XDG_RUNTIME_DIR/vessel/plasma-ready"   "$XDG_RUNTIME_DIR/vessel/plasma-ready-timeout"   "$XDG_RUNTIME_DIR/vessel/session-bus-address"   "$XDG_RUNTIME_DIR/vessel/plasma-watch.log" 2>/dev/null || true
 
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=KDE
@@ -26,12 +27,8 @@ export ANLAND_SOCKET="$VESSEL_DISPLAY_SOCKET"
 export ANLAND=1
 export ANLAND_NO_DRM_DEVICE=1
 unset DISPLAY
-# Never leak a surfaceless EGL default into normal Linux applications. The
-# KWin wrapper scopes EGL_PLATFORM=surfaceless to the compositor process only.
 unset EGL_PLATFORM
 
-# startplasma resolves KWin from PATH. Shadow only the compositor executables so
-# surfaceless/Anland settings do not leak into normal applications.
 export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"
 
 if [[ ! -s /etc/machine-id ]] && command -v dbus-uuidgen >/dev/null 2>&1; then
@@ -47,7 +44,31 @@ if ! command -v startplasma-wayland >/dev/null 2>&1; then
   exit 73
 fi
 
+# The readiness watcher runs inside the exact D-Bus session that owns Plasma.
+# Do not discover plasmashell through /proc/pgrep: Android/proroot process
+# identity is not a reliable Linux desktop liveness primitive.
 exec dbus-run-session -- /bin/sh -c '
+  set -eu
+  install -d -m 0700 "$XDG_RUNTIME_DIR/vessel"
+  printf "%s\n" "$DBUS_SESSION_BUS_ADDRESS" >"$XDG_RUNTIME_DIR/vessel/session-bus-address"
+  chmod 0600 "$XDG_RUNTIME_DIR/vessel/session-bus-address"
+
+  (
+    i=0
+    while [ "$i" -lt 600 ]; do
+      if dbus-send --session           --dest=org.freedesktop.DBus           --type=method_call           --print-reply           / org.freedesktop.DBus.NameHasOwner           string:org.kde.plasmashell 2>/dev/null           | grep -Fq "boolean true"; then
+        tmp="$XDG_RUNTIME_DIR/vessel/.plasma-ready.$$"
+        printf "org.kde.plasmashell\n" >"$tmp"
+        chmod 0600 "$tmp"
+        mv -f "$tmp" "$XDG_RUNTIME_DIR/vessel/plasma-ready"
+        exit 0
+      fi
+      i=$((i + 1))
+      sleep .1
+    done
+    printf "org.kde.plasmashell was not registered after 60s\n"       >"$XDG_RUNTIME_DIR/vessel/plasma-ready-timeout"
+  ) >>"$XDG_RUNTIME_DIR/vessel/plasma-watch.log" 2>&1 &
+
   if command -v pulseaudio >/dev/null 2>&1; then
     pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
   fi
