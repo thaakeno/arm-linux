@@ -173,7 +173,7 @@ jobs:
           grep -F 'Rootfs traversal rejected' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'Recovery is explicit' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
 
-          grep -F 'const val REVISION = "proroot-production-v10"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'const val REVISION = "proroot-production-v11"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
@@ -327,7 +327,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.2.4"' app/build.gradle.kts
+          grep -F 'versionName = "2.2.5"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
           grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
