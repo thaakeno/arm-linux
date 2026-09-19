@@ -98,8 +98,10 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class VesselActivity : ComponentActivity() {
     @Volatile private var fullscreenRequested = false
@@ -660,7 +662,16 @@ class VesselActivity : ComponentActivity() {
         var expDesktop by remember { mutableStateOf(VesselExperimentConfig.desktopBackend(this@VesselActivity)) }
         var expHostGl by remember { mutableStateOf(VesselExperimentConfig.hostGl(this@VesselActivity)) }
         var expFirefoxDmabuf by remember { mutableStateOf(VesselExperimentConfig.firefoxDmabuf(this@VesselActivity)) }
+        var selectedDiagnosticLog by remember { mutableStateOf("desktop.log") }
+        var selectedDiagnosticText by remember { mutableStateOf("Loading desktop.log…") }
+        var diagnosticRefresh by remember { mutableIntStateOf(0) }
         LaunchedEffect(state.guestReady, state.running) { VmSessionService.active?.refreshSystemStats() }
+        LaunchedEffect(selectedDiagnosticLog, diagnostics, diagnosticRefresh) {
+            selectedDiagnosticText = withContext(Dispatchers.IO) {
+                VmSessionService.active?.readDiagnosticLog(selectedDiagnosticLog)
+                    ?: "[Vessel runtime service is not connected]"
+            }
+        }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("System", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -703,19 +714,31 @@ class VesselActivity : ComponentActivity() {
                         )
                         FilterChip(
                             selected = expRuntime == VesselRuntimeFactory.RECOVERY_BACKEND_ID,
-                            enabled = !state.running && !state.busy && umlRecoveryAvailable,
+                            enabled = !state.running && !state.busy,
                             onClick = {
-                                if (VmSessionService.active?.switchRuntimeBackend(VesselRuntimeFactory.RECOVERY_BACKEND_ID) == true) {
-                                    expRuntime = VesselRuntimeFactory.RECOVERY_BACKEND_ID
+                                if (umlRecoveryAvailable) {
+                                    if (VmSessionService.active?.switchRuntimeBackend(VesselRuntimeFactory.RECOVERY_BACKEND_ID) == true) {
+                                        expRuntime = VesselRuntimeFactory.RECOVERY_BACKEND_ID
+                                    }
+                                } else {
+                                    // UML is explicit recovery only. If its old sparse disk is
+                                    // not present, open the existing workstation installer on
+                                    // direct user action; never fall back automatically.
+                                    startActivity(Intent(this@VesselActivity, VesselBootstrapActivityV2::class.java))
                                 }
                             },
-                            label = { Text("UML · recovery") },
+                            label = { Text(if (umlRecoveryAvailable) "UML · recovery" else "Install UML recovery") },
                         )
                     }
-                    Text("Stop Linux before changing runtime backend.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (!umlRecoveryAvailable) {
-                        Text("No retained UML disk is available on this install.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    Text(
+                        when {
+                            state.running || state.busy -> "Stop Linux before changing runtime backend."
+                            umlRecoveryAvailable -> "Both runtimes are installed. Switching is manual only."
+                            else -> "The UML recovery disk is not installed. Tap Install UML recovery to add it explicitly."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
 
                     if (expRuntime == VesselRuntimeFactory.RECOVERY_BACKEND_ID) {
                         Text("UML vCPU", style = MaterialTheme.typography.labelMedium)
@@ -850,8 +873,80 @@ class VesselActivity : ComponentActivity() {
                         OutlinedButton(onClick = { VmSessionService.active?.runGpuDiagnostics() }, enabled = state.guestReady) { Text("GPU + input") }
                     }
                     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = Color(0xff050706)) {
+                        val summaryVertical = rememberScrollState()
+                        val summaryHorizontal = rememberScrollState()
                         SelectionContainer {
-                            Text(diagnostics.takeLast(6_000), Modifier.padding(12.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, maxLines = 18, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                diagnostics,
+                                Modifier
+                                    .height(260.dp)
+                                    .verticalScroll(summaryVertical)
+                                    .horizontalScroll(summaryHorizontal)
+                                    .padding(12.dp),
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.labelSmall,
+                                softWrap = false,
+                            )
+                        }
+                    }
+                }
+            }
+            if (state.runtimeBackend == VesselRuntimeFactory.ACTIVE_BACKEND_ID) {
+                ElevatedCard(shape = RoundedCornerShape(22.dp)) {
+                    Column(
+                        Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Full runtime logs", fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "Named proroot/Plasma logs · full selected file · no 6 KB / 18-line UI truncation",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = { copyText(selectedDiagnosticLog, selectedDiagnosticText) },
+                                enabled = selectedDiagnosticText.isNotBlank(),
+                            ) { Text("Copy full") }
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            VmSessionService.PROROOT_DIAGNOSTIC_LOGS.forEach { name ->
+                                FilterChip(
+                                    selected = selectedDiagnosticLog == name,
+                                    onClick = { selectedDiagnosticLog = name },
+                                    label = { Text(name.removeSuffix(".log")) },
+                                )
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { diagnosticRefresh++ }) { Text("Refresh log") }
+                            OutlinedButton(onClick = { VmSessionService.active?.collectCrashDiagnostics() }) { Text("Refresh bundle") }
+                        }
+                        val logVertical = rememberScrollState()
+                        val logHorizontal = rememberScrollState()
+                        Surface(
+                            Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color(0xff050706),
+                        ) {
+                            SelectionContainer {
+                                Text(
+                                    selectedDiagnosticText,
+                                    Modifier
+                                        .height(420.dp)
+                                        .verticalScroll(logVertical)
+                                        .horizontalScroll(logHorizontal)
+                                        .padding(12.dp),
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    softWrap = false,
+                                )
+                            }
                         }
                     }
                 }
