@@ -529,6 +529,8 @@ jobs:
           grep -Fq 'assets/vessel/Xwayland.arm64' /tmp/release-apk-files.txt
           grep -Fq 'assets/vessel/kwin-direct-overlay.tar.zst' /tmp/apk-files.txt
           grep -Fq 'assets/vessel/kwin-direct-overlay.tar.zst' /tmp/release-apk-files.txt
+          grep -Fq 'assets/vessel/vessel-start-plasma' /tmp/apk-files.txt
+          grep -Fq 'assets/vessel/vessel-start-plasma' /tmp/release-apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
