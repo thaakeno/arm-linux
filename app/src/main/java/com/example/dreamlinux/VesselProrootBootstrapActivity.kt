@@ -134,7 +134,7 @@ class VesselProrootBootstrapActivity : ComponentActivity() {
         // Bootstrap only answers one question: can the existing persistent
         // Debian rootfs be reused? KWin/Xwayland/QML drift is migrated later by
         // the runtime and must not trigger a full rootfs replacement.
-        VesselRuntimeFactory.createProroot(this).bootstrapReadiness(verifyIntegrity = true).ready
+        VesselRuntimeFactory.createProroot(this).installedRootfsReadiness().ready
     }.getOrDefault(false)
 
     private fun refreshAvailability() {
