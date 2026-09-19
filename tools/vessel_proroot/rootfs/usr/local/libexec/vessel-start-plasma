@@ -56,7 +56,7 @@ exec dbus-run-session -- /bin/sh -c '
   (
     i=0
     while [ "$i" -lt 600 ]; do
-      if dbus-send --session           --dest=org.freedesktop.DBus           --type=method_call           --print-reply           / org.freedesktop.DBus.NameHasOwner           string:org.kde.plasmashell 2>/dev/null           | grep -Fq "boolean true"; then
+      if dbus-send --session           --dest=org.freedesktop.DBus           --type=method_call           --print-reply           /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner           string:org.kde.plasmashell 2>/dev/null           | grep -Fq "boolean true"; then
         tmp="$XDG_RUNTIME_DIR/vessel/.plasma-ready.$$"
         printf "org.kde.plasmashell\n" >"$tmp"
         chmod 0600 "$tmp"
