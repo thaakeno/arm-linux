@@ -346,28 +346,38 @@ public:
     void configure(uint32_t width, uint32_t height, float refresh) {
         const uint32_t next_width = std::clamp(width, 320u, 4096u);
         const uint32_t next_height = std::clamp(height, 240u, 4096u);
+        const uint32_t next_refresh =
+            static_cast<uint32_t>(std::clamp(refresh, 1.0f, 240.0f) * 1000.0f + 0.5f);
         const bool size_changed =
             next_width != width_.load() || next_height != height_.load();
+
+        refresh_mhz_.store(next_refresh);
+
+        // Android can resize/recreate the SurfaceView while KWin is already
+        // connected. The Anland backend treats a control-socket shutdown as a
+        // consumer failure and enters fallback, which is exactly the black-screen
+        // sequence seen on device. Keep the producer alive and let SurfaceControl
+        // scale the current guest buffer until the next compositor session.
+        if (size_changed && ctrl_fd_.load() >= 0) {
+            if (zero_copy_) {
+                vessel_proroot_surfacecontrol_configure(
+                    width_.load(),
+                    height_.load(),
+                    next_refresh / 1000.0f);
+            }
+            send_refresh();
+            return;
+        }
+
         width_.store(next_width);
         height_.store(next_height);
-        refresh_mhz_.store(
-            static_cast<uint32_t>(std::clamp(refresh, 1.0f, 240.0f) * 1000.0f + 0.5f));
         if (zero_copy_) {
             vessel_proroot_surfacecontrol_configure(
                 next_width,
                 next_height,
-                refresh_mhz_.load() / 1000.0f);
+                next_refresh / 1000.0f);
         }
-
-        if (size_changed) {
-            // KWin receives screen geometry only during producer handshake.
-            // Break only the current control connection; its reconnect path
-            // immediately receives the new geometry and a fresh AHB pool.
-            const int ctrl = ctrl_fd_.load();
-            if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
-        } else {
-            send_refresh();
-        }
+        send_refresh();
     }
 
     bool zero_copy_available() const {
@@ -402,9 +412,10 @@ public:
         if (!zero_copy_) return;
         surface_attached_.store(false);
         vessel_proroot_surfacecontrol_detach();
-        const int ctrl = ctrl_fd_.load();
-        if (ctrl >= 0) shutdown(ctrl, SHUT_RDWR);
-        set_status("zero-copy-surface-detached");
+
+        // Surface lifecycle is host UI state, not a Linux display transport
+        // failure. Do not disconnect KWin when Compose/SurfaceView is detached.
+        set_status("zero-copy-ready-waiting-for-surface");
     }
 
     void set_refresh(float refresh) {
@@ -1023,7 +1034,23 @@ private:
 
         if (zero_copy_) {
             const uint64_t generation = generation_.load();
-            const bool ok = surface_attached_.load() &&
+
+            // A render completion can race an Android Surface detach. That is not
+            // a producer error. Drop the completed frame, free the slot, and wait
+            // for attach_surface() to request another frame.
+            if (!surface_attached_.load()) {
+                if (fence >= 0) close(fence);
+                {
+                    std::lock_guard<std::mutex> guard(resource_lock_);
+                    if (generation == generation_.load()) {
+                        slot_states_[slot] = SlotState::FREE;
+                    }
+                }
+                set_status("zero-copy-ready-waiting-for-surface");
+                return true;
+            }
+
+            const bool ok =
                 vessel_proroot_surfacecontrol_present(
                     buffers_[slot],
                     fence,
