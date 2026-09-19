@@ -160,7 +160,7 @@ jobs:
           grep -F 'Rootfs traversal rejected' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
           grep -F 'Recovery is explicit' app/src/main/java/com/example/dreamlinux/VesselProrootBootstrapActivity.kt
 
-          grep -F 'const val REVISION = "proroot-production-v6"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'const val REVISION = "proroot-production-v7"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
@@ -177,6 +177,18 @@ jobs:
           grep -F 'proroot.smoke.begin' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'display.bridge.begin' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'startup-journal.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+
+          # Rootless system D-Bus must never use Debian's stock <user>messagebus
+          # privilege drop. The runtime actively proves RequestName before Plasma.
+          grep -F 'object VesselRootlessSystemBus' app/src/main/java/com/example/dreamlinux/VesselRootlessSystemBus.kt
+          grep -F '<type>system</type>' app/src/main/java/com/example/dreamlinux/VesselRootlessSystemBus.kt
+          grep -F '<auth>EXTERNAL</auth>' app/src/main/java/com/example/dreamlinux/VesselRootlessSystemBus.kt
+          grep -F 'getElementsByTagName("user").length' app/src/test/java/com/example/dreamlinux/VesselRootlessSystemBusTest.kt
+          grep -F 'org.freedesktop.DBus.RequestName' app/src/main/java/com/example/dreamlinux/VesselRootlessSystemBus.kt
+          grep -F 'VESSEL_SYSTEM_DBUS_OK' app/src/main/java/com/example/dreamlinux/VesselRootlessSystemBus.kt
+          grep -F 'system-dbus-probe.log' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'DBUS_SYSTEM_BUS_ADDRESS' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibility.kt
+          grep -F 'ok "dbus-system"' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-compat-probe
 
           bash -n tools/vessel_proroot/fetch_official_proroot.sh
           bash -n tools/vessel_proroot/build_prebuilt_rootfs.sh

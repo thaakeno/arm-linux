@@ -28,7 +28,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v6"
+        const val REVISION = "proroot-production-v7"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -540,14 +540,17 @@ class VesselProrootRuntimeBackend(
 
     private fun startSystemBus() {
         systemBusProcess?.takeIf { it.isAlive() }?.let { return }
-        val command = """
-            set -e
-            install -d -m 755 /run/dbus
-            rm -f /run/dbus/system_bus_socket /run/dbus/pid
-            exec dbus-daemon --system --nofork --nopidfile
-        """.trimIndent()
+
+        val config = VesselRootlessSystemBus.writeConfig(layout.guestRunDir)
+        runCatching { Os.chmod(config.absolutePath, 0x1A4) } // 0644
+        startupJournal.mark("dbus.config.ok", config.absolutePath)
+
         val process = VesselProrootProcessHost.spawn(
-            shellLaunchPlan(command, diagnostics = true, includeSharedStorage = false),
+            shellLaunchPlan(
+                VesselRootlessSystemBus.launchCommand(),
+                diagnostics = true,
+                includeSharedStorage = false,
+            ),
             File(layout.diagnosticsDir, "system-dbus.log"),
         )
         systemBusProcess = process
@@ -556,12 +559,36 @@ class VesselProrootRuntimeBackend(
         val deadline = SystemClock.elapsedRealtime() + 5000L
         while (SystemClock.elapsedRealtime() < deadline) {
             if (!process.isAlive()) {
-                error("System D-Bus exited: " + process.outputTail().takeLast(3000))
+                error(
+                    "Rootless system D-Bus exited: " +
+                        process.outputTail().takeLast(4000),
+                )
             }
-            if (socket.exists()) return
+            if (socket.exists()) break
             Thread.sleep(25)
         }
-        error("System D-Bus socket did not become ready")
+        check(socket.exists()) {
+            "Rootless system D-Bus socket did not become ready"
+        }
+
+        val probe = VesselProrootProcessRunner.run(
+            shellLaunchPlan(
+                VesselRootlessSystemBus.probeCommand(),
+                diagnostics = true,
+                includeSharedStorage = false,
+            ),
+            timeoutSeconds = 8,
+            logFile = File(layout.diagnosticsDir, "system-dbus-probe.log"),
+        )
+        check(
+            probe.exitCode == 0 &&
+                probe.output.contains("VESSEL_SYSTEM_DBUS_OK") &&
+                process.isAlive()
+        ) {
+            "Rootless system D-Bus probe failed rc=" + probe.exitCode + ": " +
+                probe.output.takeLast(4000) + "\n[daemon]\n" +
+                process.outputTail().takeLast(3000)
+        }
     }
 
     private fun watchDesktop(process: VesselManagedProrootProcess) {
@@ -608,6 +635,7 @@ class VesselProrootRuntimeBackend(
         VesselProrootDisplayBridge.stop()
         procCompat.stop()
         File(layout.guestRunDir, "dbus/system_bus_socket").delete()
+        File(layout.guestRunDir, "vessel-system-bus.conf").delete()
     }
 
     private fun baseState(ok: Boolean): JSONObject {

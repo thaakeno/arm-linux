@@ -82,6 +82,17 @@ except Exception as exc:
 print("VESSEL_COMPAT_OK=kernel-ipc")
 PY
 
+system_reply=$(dbus-send --system --print-reply \
+  --dest=org.freedesktop.DBus \
+  /org/freedesktop/DBus \
+  org.freedesktop.DBus.RequestName \
+  string:org.vessel.CompatibilityProbe uint32:0 2>&1) || {
+    echo "$system_reply" >&2
+    fail "dbus-system"
+  }
+printf '%s\n' "$system_reply" | grep -Eq 'uint32[[:space:]]+1' || fail "dbus-system-own"
+ok "dbus-system"
+
 dbus-run-session -- sh -c 'test -n "$DBUS_SESSION_BUS_ADDRESS"' || fail "dbus-session"
 ok "dbus-session"
 

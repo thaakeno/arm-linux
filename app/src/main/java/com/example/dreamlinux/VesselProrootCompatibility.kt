@@ -46,6 +46,7 @@ object VesselProrootDesktopProfile {
             "/usr/bin/Xwayland",
             "/usr/bin/dbus-daemon",
             "/usr/bin/dbus-run-session",
+            "/usr/bin/dbus-send",
             "/usr/bin/python3",
             "/usr/bin/pulseaudio",
         )
@@ -72,6 +73,7 @@ object VesselProrootDesktopProfile {
             "ANLAND" to "1",
             "ANLAND_NO_DRM_DEVICE" to "1",
             "VESSEL_AUDIO_HOST" to "127.0.0.1",
+            "DBUS_SYSTEM_BUS_ADDRESS" to "unix:path=" + VesselRootlessSystemBus.GUEST_SOCKET,
         )
 
     private fun guestFile(rootfs: File, guestPath: String): File =
