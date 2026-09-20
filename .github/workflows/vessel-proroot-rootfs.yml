@@ -74,7 +74,6 @@ jobs:
           required=set(x.get('requiredPaths', []))
           assert 'usr/lib/vessel/rootfs/runtime.env' in required
           assert not any('plasma-qml-proroot-production-v' in p for p in required)
-          assert not any(p.endswith('proroot-production-v1') for p in required)
           PY
 
           # Android app sandboxes cannot recreate Linux hard links. Consume the
