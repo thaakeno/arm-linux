@@ -235,12 +235,12 @@ jobs:
           grep -F 'Plasma QML runtime is incomplete: org.kde.plasma.core / org.kde.ksvg not found' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'VESSEL_QML_IMPORT_PATH=' app/src/main/assets/vessel/vessel-start-plasma
           grep -F 'find /usr/lib /usr/local/lib -type f' app/src/main/assets/vessel/vessel-start-plasma
-          ! grep -Fq '/usr/lib/aarch64-linux-gnu/qt6/qml' app/src/main/assets/vessel/vessel-start-plasma
+          ! grep -Eq '^export QML(2)?_IMPORT_PATH=/usr/' app/src/main/assets/vessel/vessel-start-plasma
           ! grep -Fq 'plasma.qml.repair.begin' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           ! grep -Fq 'apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --reinstall' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F '"qmlImportPaths":' tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F '"capabilities":' tools/vessel_proroot/build_prebuilt_rootfs.sh
-          ! grep -Fq '/usr/lib/aarch64-linux-gnu/qt6/qml' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          ! grep -Eq 'QML(2)?_IMPORT_PATH=/usr/[^"$]+' tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F 'stat -c' tools/vessel_proroot/build_prebuilt_rootfs.sh | grep -F '"$ROOTFS/tmp"'
           ! grep -Fq 'export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
           ! grep -Fq 'export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"' app/src/main/assets/vessel/vessel-start-plasma
