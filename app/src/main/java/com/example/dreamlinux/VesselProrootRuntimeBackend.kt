@@ -33,7 +33,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v18"
+        const val REVISION = "proroot-production-v19"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -351,39 +351,85 @@ class VesselProrootRuntimeBackend(
             runCatching { Os.chmod(startKdeRc.absolutePath, 0x1A4) } // 0644
         }
 
-        // Keep KDE's real kwin_wayland_wrapper intact. It creates the Wayland
-        // socket and supervises KWin. Intercept only /usr/bin/kwin_wayland so
-        // the compositor gets Vessel's Anland environment without poisoning PATH
-        // for unrelated commands such as dbus-daemon/startplasma-wayland.
+        // Restore the exact launch shape that already reached real native KWin
+        // frames in proroot-production-v13. The v16-v18 regression moved the
+        // kwin_wayland ELF out of /usr/bin and replaced it with a shell wrapper;
+        // KWin's private QPA plugin was then discovered but failed to initialize.
+        // Keep the KWin ELF at its packaged path and wrap only the supervisor
+        // executable that startplasma-wayland invokes.
         val kwinBinary = File(layout.rootfsDir, "usr/bin/kwin_wayland")
-        val realKwinBinary = File(
+        val savedKwinBinary = File(
             layout.rootfsDir,
             "usr/lib/vessel/desktop/kwin_wayland.real",
         )
-        check(kwinBinary.isFile) { "KWin Wayland binary is missing" }
-        check(realKwinBinary.parentFile?.isDirectory == true || realKwinBinary.parentFile?.mkdirs() == true) {
-            "Could not create Vessel desktop runtime directory"
-        }
-        val wrapperMarker = "# VESSEL_KWIN_BINARY_V16"
-        val prefix = runCatching {
+        check(kwinBinary.exists()) { "KWin Wayland binary is missing" }
+
+        val kwinPrefix = runCatching {
             kwinBinary.inputStream().buffered().use { input ->
                 val buffer = ByteArray(256)
                 val count = input.read(buffer).coerceAtLeast(0)
                 String(buffer, 0, count, Charsets.UTF_8)
             }
         }.getOrDefault("")
-        if (!prefix.contains(wrapperMarker)) {
-            kwinBinary.inputStream().use { input ->
-                realKwinBinary.outputStream().use { output -> input.copyTo(output) }
+        if (kwinPrefix.contains("# VESSEL_KWIN_BINARY_V16")) {
+            check(savedKwinBinary.isFile && savedKwinBinary.length() > 0L) {
+                "Cannot restore KWin ELF from the v16-v18 launcher migration"
             }
-            Os.chmod(realKwinBinary.absolutePath, 0x1ED) // 0755
+            val restoreStage = File(kwinBinary.parentFile, ".kwin_wayland.vessel-restore")
+            savedKwinBinary.inputStream().use { input ->
+                restoreStage.outputStream().use { output -> input.copyTo(output) }
+            }
+            Os.chmod(restoreStage.absolutePath, 0x1ED) // 0755
+            if (kwinBinary.exists()) check(kwinBinary.delete()) {
+                "Could not remove migrated KWin wrapper"
+            }
+            check(restoreStage.renameTo(kwinBinary)) {
+                "Could not restore packaged KWin ELF"
+            }
         }
-        check(realKwinBinary.isFile && realKwinBinary.length() > 0L) {
-            "Original KWin Wayland binary could not be preserved"
+
+        val restoredPrefix = runCatching {
+            kwinBinary.inputStream().buffered().use { input ->
+                val buffer = ByteArray(4)
+                val count = input.read(buffer).coerceAtLeast(0)
+                buffer.copyOf(count)
+            }
+        }.getOrDefault(byteArrayOf())
+        check(restoredPrefix.size >= 4 &&
+            restoredPrefix[0] == 0x7f.toByte() &&
+            restoredPrefix[1] == 'E'.code.toByte() &&
+            restoredPrefix[2] == 'L'.code.toByte() &&
+            restoredPrefix[3] == 'F'.code.toByte()) {
+            "KWin executable is not the packaged ELF"
         }
-        val wrapper = listOf(
+
+        val kwinSupervisor = File(layout.rootfsDir, "usr/bin/kwin_wayland_wrapper")
+        val savedSupervisor = File(
+            layout.rootfsDir,
+            "usr/lib/vessel/desktop/kwin_wayland_wrapper.stock",
+        )
+        check(kwinSupervisor.exists()) { "KWin Wayland supervisor is missing" }
+        check(savedSupervisor.parentFile?.isDirectory == true || savedSupervisor.parentFile?.mkdirs() == true) {
+            "Could not create Vessel desktop runtime directory"
+        }
+        val supervisorMarker = "# VESSEL_KWIN_SUPERVISOR_V19"
+        val supervisorPrefix = runCatching {
+            kwinSupervisor.inputStream().buffered().use { input ->
+                val buffer = ByteArray(256)
+                val count = input.read(buffer).coerceAtLeast(0)
+                String(buffer, 0, count, Charsets.UTF_8)
+            }
+        }.getOrDefault("")
+        if (!supervisorPrefix.contains(supervisorMarker) && !savedSupervisor.exists()) {
+            kwinSupervisor.inputStream().use { input ->
+                savedSupervisor.outputStream().use { output -> input.copyTo(output) }
+            }
+            Os.chmod(savedSupervisor.absolutePath, 0x1ED) // 0755
+        }
+
+        val supervisor = listOf(
             "#!/bin/bash",
-            wrapperMarker,
+            supervisorMarker,
             "set -euo pipefail",
             ": \"\${VESSEL_DISPLAY_SOCKET:?VESSEL_DISPLAY_SOCKET is required}\"",
             "export ANLAND=1",
@@ -397,16 +443,14 @@ class VesselProrootRuntimeBackend(
             "  fi",
             "  args+=(\"\$arg\")",
             "done",
-            "exec /usr/lib/vessel/desktop/kwin_wayland.real \"\${args[@]}\"",
+            "exec /usr/bin/kwin_wayland \"\${args[@]}\"",
         ).joinToString("\n", postfix = "\n")
-        val needsWrite = !prefix.contains(wrapperMarker) ||
-            runCatching { kwinBinary.readText() != wrapper }.getOrDefault(true)
-        if (needsWrite) {
-            if (Files.isSymbolicLink(kwinBinary.toPath())) {
-                check(kwinBinary.delete()) { "Could not replace KWin binary symlink" }
-            }
-            kwinBinary.writeText(wrapper)
-            Os.chmod(kwinBinary.absolutePath, 0x1ED) // 0755
+        if (Files.isSymbolicLink(kwinSupervisor.toPath())) {
+            check(kwinSupervisor.delete()) { "Could not replace KWin supervisor symlink" }
+        }
+        if (!kwinSupervisor.isFile || kwinSupervisor.readText() != supervisor) {
+            kwinSupervisor.writeText(supervisor)
+            Os.chmod(kwinSupervisor.absolutePath, 0x1ED) // 0755
         }
 
         // The device logs proved KWin still executed /usr/bin/Xwayland, so the
