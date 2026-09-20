@@ -177,7 +177,7 @@ jobs:
           grep -F 'fun rootfsReadiness(rootfs: File)' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
           grep -F 'fun baseReadiness(rootfs: File)' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibility.kt
 
-          grep -F 'const val REVISION = "proroot-production-v16"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'const val REVISION = "proroot-production-v17"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
@@ -214,9 +214,19 @@ jobs:
           grep -F 'readAllDiagnosticLogs()' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'Copy all' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'plasma-qml-runtime-probe.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          ! grep -Fq 'VesselProrootBind(guestTmpDir.absolutePath, "/tmp")' app/src/main/java/com/example/dreamlinux/VesselProrootLayout.kt
+          grep -F 'qmlscene6 /var/cache/vessel/vessel-qml-probe.qml' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'plasma-qml-proroot-production-v17' tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F 'VESSEL_KWIN_BINARY_V16' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'File(layout.rootfsDir, "usr/bin/Xwayland")' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
-          grep -F '/usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'timeout 5s /usr/bin/qmlscene6' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'VESSEL_QML_PROBE_OK' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'CI-verified Plasma QML runtime failed on device' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'Installed rootfs predates the CI-verified Plasma QML runtime v17' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          ! grep -Fq 'plasma.qml.repair.begin' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          ! grep -Fq 'apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --reinstall' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F '"var/cache/vessel/plasma-qml-proroot-production-v17",' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'stat -c' tools/vessel_proroot/build_prebuilt_rootfs.sh | grep -F '"$ROOTFS/tmp"'
           ! grep -Fq 'export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
           ! grep -Fq 'export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"' app/src/main/assets/vessel/vessel-start-plasma
           grep -F 'Install UML recovery' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
@@ -458,7 +468,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.2.10"' app/build.gradle.kts
+          grep -F 'versionName = "2.2.11"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
           grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
@@ -541,7 +551,7 @@ jobs:
           grep -Fq 'assets/vessel/kwin-direct-overlay.tar.zst' /tmp/release-apk-files.txt
           grep -Fq 'assets/vessel/vessel-start-plasma' /tmp/apk-files.txt
           grep -Fq 'assets/vessel/vessel-start-plasma' /tmp/release-apk-files.txt
-          grep -Fq 'proroot-production-v16' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -Fq 'proroot-production-v17' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
