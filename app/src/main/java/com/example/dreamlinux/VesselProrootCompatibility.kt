@@ -97,11 +97,9 @@ object VesselProrootDesktopProfile {
             "XDG_SESSION_DESKTOP" to "KDE",
             "DESKTOP_SESSION" to "plasma",
             "QT_QPA_PLATFORM" to "wayland",
-            // The Anland KWin bundle is overlaid onto Debian's multiarch Qt6 tree.
-            // Make that tree explicit so effects such as Overview can resolve
-            // org.kde.plasma.core from plasma-desktoptheme.
-            "QML_IMPORT_PATH" to "/usr/lib/aarch64-linux-gnu/qt6/qml",
-            "QML2_IMPORT_PATH" to "/usr/lib/aarch64-linux-gnu/qt6/qml",
+            // QML/Qt plugin roots are discovered from the installed rootfs by
+            // VesselProrootRuntimeBackend. Do not bake a Debian multiarch path
+            // into the APK.
             "GDK_BACKEND" to "wayland,x11",
             "VESSEL_DISPLAY_SOCKET" to guestSocketPath,
             "ANLAND_SOCKET" to guestSocketPath,
