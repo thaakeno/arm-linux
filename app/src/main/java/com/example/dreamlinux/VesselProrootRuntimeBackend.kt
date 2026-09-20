@@ -104,6 +104,16 @@ class VesselProrootRuntimeBackend(
         if (!File(layout.rootfsDir, "var/cache/vessel/proroot-production-v1").isFile) {
             return VesselDesktopReadiness(false, "Phase-6 production rootfs marker is missing")
         }
+        if (!File(
+                layout.rootfsDir,
+                "var/cache/vessel/plasma-qml-proroot-production-v17",
+            ).isFile
+        ) {
+            return VesselDesktopReadiness(
+                false,
+                "Installed rootfs predates the CI-verified Plasma QML runtime v17",
+            )
+        }
 
         val gpuRootfs = VesselDirectGpuProfile.rootfsReadiness(layout.rootfsDir)
         if (!gpuRootfs.ready) {
@@ -942,6 +952,14 @@ class VesselProrootRuntimeBackend(
     }
 
     private fun ensurePlasmaQmlCore() {
+        val verifiedMarker = File(
+            layout.rootfsDir,
+            "var/cache/vessel/plasma-qml-proroot-production-v17",
+        )
+        check(verifiedMarker.isFile) {
+            "Installed rootfs is not the CI-verified Plasma QML v17 image"
+        }
+
         val qt6Qml = File(layout.rootfsDir, "usr/lib/aarch64-linux-gnu/qt6/qml")
         val required = listOf(
             File(qt6Qml, "org/kde/plasma/core/qmldir"),
@@ -950,123 +968,55 @@ class VesselProrootRuntimeBackend(
             File(qt6Qml, "org/kde/ksvg/libcorebindingsplugin.so"),
             File(layout.rootfsDir, "usr/bin/qmlscene6"),
         )
-        val repairedMarker = File(
-            layout.rootfsDir,
-            "var/cache/vessel/plasma-qml-proroot-production-v17",
-        )
+        check(required.all { it.isFile && it.length() > 0L }) {
+            "CI-verified Plasma QML payload is incomplete"
+        }
+
         val probeFile = File(layout.rootfsDir, "var/cache/vessel/vessel-qml-probe.qml")
-
-        fun writeProbe() {
-            check(probeFile.parentFile?.isDirectory == true || probeFile.parentFile?.mkdirs() == true) {
-                "Could not create Plasma QML probe directory"
+        probeFile.writeText(
+            """
+            import QtQuick
+            import org.kde.ksvg as KSvg
+            import org.kde.plasma.core as PlasmaCore
+            Item {
+                width: 8
+                height: 8
+                KSvg.SvgItem { width: 1; height: 1 }
+                Component.onCompleted: console.log("VESSEL_QML_PROBE_OK")
             }
-            probeFile.writeText(
-                """
-                import QtQuick
-                import org.kde.ksvg as KSvg
-                import org.kde.plasma.core as PlasmaCore
-                Item {
-                    width: 8
-                    height: 8
-                    KSvg.SvgItem { width: 1; height: 1 }
-                    Component.onCompleted: console.log("VESSEL_QML_PROBE_OK")
-                }
-                """.trimIndent() + "\n",
-            )
-            Os.chmod(probeFile.absolutePath, 0x1A4)
-        }
+            """.trimIndent() + "\n",
+        )
+        Os.chmod(probeFile.absolutePath, 0x1A4)
 
-        fun runtimeProbe(): Boolean {
-            if (required.any { !it.isFile || it.length() <= 0L }) return false
-            writeProbe()
-            val probe = VesselProrootProcessRunner.run(
-                shellLaunchPlan(
-                    "export QT_QPA_PLATFORM=offscreen; " +
-                        "export QT_QUICK_BACKEND=software; " +
-                        "export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
-                        "export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
-                        "rc=0; timeout 5s /usr/bin/qmlscene6 " +
-                        "/var/cache/vessel/vessel-qml-probe.qml || rc=\$?; " +
-                        "printf 'VESSEL_QMLSCENE_RC=%s\\n' \"\$rc\"; exit 0",
-                    diagnostics = true,
-                    includeSharedStorage = false,
-                ),
-                timeoutSeconds = 15,
-                logFile = File(layout.diagnosticsDir, "plasma-qml-runtime-probe.log"),
-            )
-            return probe.exitCode == 0 &&
+        val probe = VesselProrootProcessRunner.run(
+            shellLaunchPlan(
+                "export QT_QPA_PLATFORM=offscreen; " +
+                    "export QT_QUICK_BACKEND=software; " +
+                    "export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
+                    "export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
+                    "rc=0; timeout 5s /usr/bin/qmlscene6 " +
+                    "/var/cache/vessel/vessel-qml-probe.qml || rc=\$?; " +
+                    "printf 'VESSEL_QMLSCENE_RC=%s\\n' \"\$rc\"; exit 0",
+                diagnostics = true,
+                includeSharedStorage = false,
+            ),
+            timeoutSeconds = 15,
+            logFile = File(layout.diagnosticsDir, "plasma-qml-runtime-probe.log"),
+        )
+        val badQml =
+            probe.output.contains("is not installed", ignoreCase = true) ||
+                probe.output.contains("is not a type", ignoreCase = true) ||
+                probe.output.contains("plugin cannot be loaded", ignoreCase = true)
+        check(
+            probe.exitCode == 0 &&
                 probe.output.contains("VESSEL_QML_PROBE_OK") &&
-                !probe.output.contains("is not installed", ignoreCase = true) &&
-                !probe.output.contains("is not a type", ignoreCase = true) &&
-                !probe.output.contains("plugin cannot be loaded", ignoreCase = true)
+                !badQml
+        ) {
+            "CI-verified Plasma QML runtime failed on device; " +
+                "automatic package repair/fallback is intentionally disabled. " +
+                "See plasma-qml-runtime-probe.log"
         }
-
-        fun markReady() {
-            check(repairedMarker.parentFile?.isDirectory == true || repairedMarker.parentFile?.mkdirs() == true) {
-                "Could not create Plasma QML marker directory"
-            }
-            repairedMarker.writeText("ok\n")
-        }
-
-        // File existence + ldd was too weak: the device had every shared library
-        // while the QML engine still rejected org.kde.plasma.core / KSvg.SvgItem.
-        if (repairedMarker.isFile && runtimeProbe()) return
-
-        check(layout.prepareHostLayout() && layout.prepareGuestMountPointsIfReady()) {
-            "Could not prepare Linux temporary directories"
-        }
-        startupJournal.mark("plasma.qml.tmp.begin")
-        val tmpProbe = VesselProrootProcessRunner.run(
-            shellLaunchPlan(
-                "install -d -m 1777 /tmp /var/tmp; " +
-                    "install -d -m 0755 /var/lib/apt/lists/partial /var/cache/apt/archives/partial; " +
-                    "test -d /tmp && test -w /tmp && " +
-                    "f=\$(mktemp /tmp/vessel-apt.XXXXXX) && rm -f \"\$f\" && " +
-                    "/usr/bin/python3 - <<'PY'\n" +
-                    "import os,tempfile\n" +
-                    "fd,p=tempfile.mkstemp(prefix='vessel-python-',dir='/tmp')\n" +
-                    "os.close(fd); os.unlink(p)\n" +
-                    "PY",
-                diagnostics = true,
-                includeSharedStorage = false,
-            ),
-            timeoutSeconds = 10,
-            logFile = File(layout.diagnosticsDir, "plasma-qml-tmp-preflight.log"),
-        )
-        check(tmpProbe.exitCode == 0) {
-            "Linux /tmp is not usable for package management rc=" +
-                tmpProbe.exitCode + ": " + tmpProbe.output.takeLast(3000)
-        }
-        startupJournal.mark("plasma.qml.tmp.ok")
-
-        startupJournal.mark("plasma.qml.repair.begin")
-        val repair = VesselProrootProcessRunner.run(
-            shellLaunchPlan(
-                "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
-                    "printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; " +
-                    "chmod 0755 /usr/sbin/policy-rc.d; " +
-                    "trap 'rm -f /usr/sbin/policy-rc.d' EXIT; " +
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 -o Acquire::Retries=3 update && " +
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --reinstall " +
-                    "plasma-workspace plasma-desktop plasma-desktoptheme " +
-                    "qml6-module-org-kde-ksvg libkf6svg6 libkirigamiplatform6 qmlscene-qt6",
-                diagnostics = true,
-                includeSharedStorage = false,
-            ),
-            timeoutSeconds = 300,
-            logFile = File(layout.diagnosticsDir, "plasma-qml-repair.log"),
-        )
-        check(repair.exitCode == 0) {
-            "Plasma QML package repair failed rc=" +
-                repair.exitCode + ": " + repair.output.takeLast(8000)
-        }
-
-        check(runtimeProbe()) {
-            "Plasma QML runtime probe still fails after coherent Debian reinstall; " +
-                "see plasma-qml-runtime-probe.log"
-        }
-        markReady()
-        startupJournal.mark("plasma.qml.repair.ok")
+        startupJournal.mark("plasma.qml.verified", "ci-rootfs-v17")
     }
 
     private fun prepareAudioBridge() {

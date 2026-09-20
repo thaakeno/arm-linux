@@ -130,6 +130,16 @@ if ! sudo grep -Fq 'VESSEL_QML_PROBE_OK' "$ROOTFS/var/cache/vessel/plasma-qml-bu
 fi
 sudo touch "$ROOTFS/var/cache/vessel/plasma-qml-proroot-production-v17"
 
+# /tmp stays inside the rootfs. Prove the final image retains normal Linux
+# sticky-directory semantics after every overlay; Android must not replace it.
+test "$(sudo stat -c '%a' "$ROOTFS/tmp")" = "1777"
+sudo chroot "$ROOTFS" /bin/bash -lc '
+  set -e
+  f="$(mktemp /tmp/vessel-final.XXXXXX)"
+  test -f "$f"
+  rm -f "$f"
+'
+
 sudo test -s "$ROOTFS/usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so"
 sudo test -s "$ROOTFS/usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so"
 sudo test -s "$ROOTFS/usr/local/libexec/vessel-start-plasma"
@@ -187,6 +197,7 @@ data={
     "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/qmldir",
     "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so",
     "usr/bin/qmlscene6",
+    "var/cache/vessel/plasma-qml-proroot-production-v17",
     "var/cache/vessel/proroot-production-v1"
   ]
 }

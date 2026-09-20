@@ -221,6 +221,12 @@ jobs:
           grep -F 'File(layout.rootfsDir, "usr/bin/Xwayland")' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'timeout 5s /usr/bin/qmlscene6' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'VESSEL_QML_PROBE_OK' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'CI-verified Plasma QML runtime failed on device' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'Installed rootfs predates the CI-verified Plasma QML runtime v17' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          ! grep -Fq 'plasma.qml.repair.begin' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          ! grep -Fq 'apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --reinstall' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F '"var/cache/vessel/plasma-qml-proroot-production-v17",' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'stat -c' tools/vessel_proroot/build_prebuilt_rootfs.sh | grep -F '"$ROOTFS/tmp"'
           ! grep -Fq 'export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
           ! grep -Fq 'export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"' app/src/main/assets/vessel/vessel-start-plasma
           grep -F 'Install UML recovery' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
