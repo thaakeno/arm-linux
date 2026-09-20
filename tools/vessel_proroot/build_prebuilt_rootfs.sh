@@ -108,14 +108,21 @@ Item {
     Component.onCompleted: Qt.quit()
 }
 QML
-sudo chroot "$ROOTFS" /bin/bash -lc '
+if ! sudo chroot "$ROOTFS" /bin/bash -lc '
   set -e
   export QT_QPA_PLATFORM=offscreen
   export QT_QUICK_BACKEND=software
   export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml
   export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml
   /usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml     >/var/cache/vessel/plasma-qml-build-probe.log 2>&1
-'
+'; then
+  echo "post-overlay Plasma QML runtime probe failed" >&2
+  sudo cat "$ROOTFS/var/cache/vessel/plasma-qml-build-probe.log" >&2 || true
+  sudo ls -la "$ROOTFS/usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core" >&2 || true
+  sudo cat "$ROOTFS/usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir" >&2 || true
+  sudo ldd -r "$ROOTFS/usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/libcorebindingsplugin.so" >&2 || true
+  exit 1
+fi
 sudo touch "$ROOTFS/var/cache/vessel/plasma-qml-proroot-production-v17"
 
 sudo test -s "$ROOTFS/usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so"
