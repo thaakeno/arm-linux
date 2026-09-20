@@ -969,7 +969,7 @@ class VesselProrootRuntimeBackend(
                     width: 8
                     height: 8
                     KSvg.SvgItem { width: 1; height: 1 }
-                    Component.onCompleted: Qt.quit()
+                    Component.onCompleted: console.log("VESSEL_QML_PROBE_OK")
                 }
                 """.trimIndent() + "\n",
             )
@@ -985,7 +985,9 @@ class VesselProrootRuntimeBackend(
                         "export QT_QUICK_BACKEND=software; " +
                         "export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
                         "export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
-                        "/usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml",
+                        "rc=0; timeout 5s /usr/bin/qmlscene6 " +
+                        "/var/cache/vessel/vessel-qml-probe.qml || rc=\$?; " +
+                        "printf 'VESSEL_QMLSCENE_RC=%s\\n' \"\$rc\"; exit 0",
                     diagnostics = true,
                     includeSharedStorage = false,
                 ),
@@ -993,8 +995,10 @@ class VesselProrootRuntimeBackend(
                 logFile = File(layout.diagnosticsDir, "plasma-qml-runtime-probe.log"),
             )
             return probe.exitCode == 0 &&
+                probe.output.contains("VESSEL_QML_PROBE_OK") &&
                 !probe.output.contains("is not installed", ignoreCase = true) &&
-                !probe.output.contains("is not a type", ignoreCase = true)
+                !probe.output.contains("is not a type", ignoreCase = true) &&
+                !probe.output.contains("plugin cannot be loaded", ignoreCase = true)
         }
 
         fun markReady() {
