@@ -67,6 +67,14 @@ jobs:
           assert h.hexdigest() == x['archiveSha256']
           assert x['entryCount'] > 1000
           assert x['extractedBytes'] > 0
+          caps=set(x.get('capabilities', []))
+          assert {'rootless-proroot','plasma-wayland','plasma-qml-core','ksvg-qml','direct-kgsl','native-surfacecontrol'} <= caps
+          qml=x.get('qmlImportPaths', [])
+          assert qml and all(isinstance(p,str) and p.startswith('/') for p in qml)
+          required=set(x.get('requiredPaths', []))
+          assert 'usr/lib/vessel/rootfs/runtime.env' in required
+          assert not any('plasma-qml-proroot-production-v' in p for p in required)
+          assert not any(p.endswith('proroot-production-v1') for p in required)
           PY
 
           # Android app sandboxes cannot recreate Linux hard links. Consume the
