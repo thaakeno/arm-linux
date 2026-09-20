@@ -1089,9 +1089,12 @@ class VesselProrootRuntimeBackend(
                             file.invariantSeparatorsPath.endsWith("/org/kde/plasma/core/qmldir")
                     }
                     .forEach { qmldir ->
-                        var root = qmldir
-                        repeat(5) { root = root.parentFile ?: return@forEach }
-                        consider(root)
+                        val qmlRoot = qmldir.parentFile
+                            ?.parentFile
+                            ?.parentFile
+                            ?.parentFile
+                            ?.parentFile
+                        if (qmlRoot != null) consider(qmlRoot)
                     }
             }
         }
