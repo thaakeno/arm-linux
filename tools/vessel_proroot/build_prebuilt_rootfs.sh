@@ -105,17 +105,22 @@ Item {
     width: 8
     height: 8
     KSvg.SvgItem { width: 1; height: 1 }
-    Component.onCompleted: Qt.quit()
+    Component.onCompleted: console.log("VESSEL_QML_PROBE_OK")
 }
 QML
-if ! sudo chroot "$ROOTFS" /bin/bash -lc '
+sudo chroot "$ROOTFS" /bin/bash -lc '
   set -e
   export QT_QPA_PLATFORM=offscreen
   export QT_QUICK_BACKEND=software
   export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml
   export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml
-  timeout 20s /usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml     >/var/cache/vessel/plasma-qml-build-probe.log 2>&1
-'; then
+  rc=0
+  timeout 5s /usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml \
+    >/var/cache/vessel/plasma-qml-build-probe.log 2>&1 || rc=$?
+  printf "VESSEL_QMLSCENE_RC=%s\\n" "$rc" >>/var/cache/vessel/plasma-qml-build-probe.log
+'
+if ! sudo grep -Fq 'VESSEL_QML_PROBE_OK' "$ROOTFS/var/cache/vessel/plasma-qml-build-probe.log" || \
+   sudo grep -Eqi 'is not installed|is not a type|plugin cannot be loaded' "$ROOTFS/var/cache/vessel/plasma-qml-build-probe.log"; then
   echo "post-overlay Plasma QML runtime probe failed" >&2
   sudo cat "$ROOTFS/var/cache/vessel/plasma-qml-build-probe.log" >&2 || true
   sudo ls -la "$ROOTFS/usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core" >&2 || true
