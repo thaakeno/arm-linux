@@ -345,12 +345,9 @@ class VesselProrootRuntimeBackend(
             runCatching { Os.chmod(startKdeRc.absolutePath, 0x1A4) } // 0644
         }
 
-        // Restore the exact launch shape that already reached real native KWin
-        // frames in proroot-production-v13. The v16-v18 regression moved the
-        // kwin_wayland ELF out of /usr/bin and replaced it with a shell wrapper;
-        // KWin's private QPA plugin was then discovered but failed to initialize.
-        // Keep the KWin ELF at its packaged path and wrap only the supervisor
-        // executable that startplasma-wayland invokes.
+        // Keep the packaged KWin ELF at /usr/bin/kwin_wayland. If an older
+        // Vessel build replaced it with a script, recover the preserved ELF by
+        // inspecting file type/content rather than matching a historical version.
         val kwinBinary = File(layout.rootfsDir, "usr/bin/kwin_wayland")
         val savedKwinBinary = File(
             layout.rootfsDir,
@@ -358,16 +355,21 @@ class VesselProrootRuntimeBackend(
         )
         check(kwinBinary.exists()) { "KWin Wayland binary is missing" }
 
-        val kwinPrefix = runCatching {
-            kwinBinary.inputStream().buffered().use { input ->
-                val buffer = ByteArray(256)
-                val count = input.read(buffer).coerceAtLeast(0)
-                String(buffer, 0, count, Charsets.UTF_8)
+        fun isElf(file: File): Boolean = runCatching {
+            if (!file.isFile || file.length() < 4L) return@runCatching false
+            file.inputStream().use { input ->
+                val magic = ByteArray(4)
+                input.read(magic) == 4 &&
+                    magic[0] == 0x7f.toByte() &&
+                    magic[1] == 'E'.code.toByte() &&
+                    magic[2] == 'L'.code.toByte() &&
+                    magic[3] == 'F'.code.toByte()
             }
-        }.getOrDefault("")
-        if (kwinPrefix.contains("# VESSEL_KWIN_BINARY_V16")) {
-            check(savedKwinBinary.isFile && savedKwinBinary.length() > 0L) {
-                "Cannot restore KWin ELF from the v16-v18 launcher migration"
+        }.getOrDefault(false)
+
+        if (!isElf(kwinBinary)) {
+            check(isElf(savedKwinBinary)) {
+                "KWin executable is not an ELF and no preserved packaged ELF is available"
             }
             val restoreStage = File(kwinBinary.parentFile, ".kwin_wayland.vessel-restore")
             savedKwinBinary.inputStream().use { input ->
@@ -375,27 +377,13 @@ class VesselProrootRuntimeBackend(
             }
             Os.chmod(restoreStage.absolutePath, 0x1ED) // 0755
             if (kwinBinary.exists()) check(kwinBinary.delete()) {
-                "Could not remove migrated KWin wrapper"
+                "Could not remove non-ELF KWin launcher"
             }
             check(restoreStage.renameTo(kwinBinary)) {
                 "Could not restore packaged KWin ELF"
             }
         }
-
-        val restoredPrefix = runCatching {
-            kwinBinary.inputStream().buffered().use { input ->
-                val buffer = ByteArray(4)
-                val count = input.read(buffer).coerceAtLeast(0)
-                buffer.copyOf(count)
-            }
-        }.getOrDefault(byteArrayOf())
-        check(restoredPrefix.size >= 4 &&
-            restoredPrefix[0] == 0x7f.toByte() &&
-            restoredPrefix[1] == 'E'.code.toByte() &&
-            restoredPrefix[2] == 'L'.code.toByte() &&
-            restoredPrefix[3] == 'F'.code.toByte()) {
-            "KWin executable is not the packaged ELF"
-        }
+        check(isElf(kwinBinary)) { "KWin executable is not the packaged ELF" }
 
         val kwinSupervisor = File(layout.rootfsDir, "usr/bin/kwin_wayland_wrapper")
         val savedSupervisor = File(
@@ -406,7 +394,7 @@ class VesselProrootRuntimeBackend(
         check(savedSupervisor.parentFile?.isDirectory == true || savedSupervisor.parentFile?.mkdirs() == true) {
             "Could not create Vessel desktop runtime directory"
         }
-        val supervisorMarker = "# VESSEL_KWIN_SUPERVISOR_V19"
+        val supervisorMarker = "# VESSEL_KWIN_SUPERVISOR"
         val supervisorPrefix = runCatching {
             kwinSupervisor.inputStream().buffered().use { input ->
                 val buffer = ByteArray(256)
