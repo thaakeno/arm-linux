@@ -217,7 +217,7 @@ jobs:
           ! grep -Fq 'VesselProrootBind(guestTmpDir.absolutePath, "/tmp")' app/src/main/java/com/example/dreamlinux/VesselProrootLayout.kt
           grep -F 'qmlscene6 /var/cache/vessel/vessel-qml-probe.qml' tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F 'plasma-qml-proroot-production-v17' tools/vessel_proroot/build_prebuilt_rootfs.sh
-          grep -F 'VESSEL_KWIN_BINARY_V17' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'VESSEL_KWIN_BINARY_V16' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'File(layout.rootfsDir, "usr/bin/Xwayland")' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F '/usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           ! grep -Fq 'export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
