@@ -1177,9 +1177,7 @@ class VmSessionService : Service() {
     }
 
     fun readAllDiagnosticLogs(): String {
-        if (runtime.kind != VesselRuntimeKind.PROROOT) {
-            return "[not available for UML]"
-        }
+        if (runtime.kind != VesselRuntimeKind.PROROOT) return "[not available for UML]"
         return buildString {
             appendLine("=== VESSEL COMPLETE PROROOT LOG BUNDLE ===")
             appendLine("app=" + BuildConfig.VERSION_NAME + " commit=" + BuildConfig.GIT_COMMIT)
@@ -1196,7 +1194,6 @@ class VmSessionService : Service() {
             appendLine(state.value.console)
         }
     }
-
 
     private fun hostDiskStats(): Triple<Long, Long, Long> {
         val freeMb = runtime.machineDir.usableSpace / (1024L * 1024L)
