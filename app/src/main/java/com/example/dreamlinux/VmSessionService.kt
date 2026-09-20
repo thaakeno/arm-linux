@@ -123,6 +123,7 @@ class VmSessionService : Service() {
             "plasma-qml-tmp-preflight.log",
             "plasma-qml-repair.log",
             "plasma-qml-ksvg-ldd.log",
+            "plasma-qml-runtime-probe.log",
             "guest-command.log",
         )
 
@@ -1009,7 +1010,11 @@ class VmSessionService : Service() {
                     df -Pk / | awk 'NR==2 {printf "VESSEL_DF=%s,%s\n",${'$'}3,${'$'}4}'
                     free -m | awk '/^Mem:/ {printf "VESSEL_MEM=%s,%s\n",${'$'}3,${'$'}2}'
                     printf 'VESSEL_PKGS='; dpkg-query -W -f='${'$'}{binary:Package}\n' 2>/dev/null | wc -l
-                    awk '{printf "VESSEL_UPTIME=%d\n",${'$'}1}' /proc/uptime
+                    if [ -r /proc/uptime ]; then
+                      awk '{printf "VESSEL_UPTIME=%d\\n",${'$'}1}' /proc/uptime
+                    else
+                      printf 'VESSEL_UPTIME=0\\n'
+                    fi
                     """.trimIndent(),
                     12,
                 )
@@ -1172,6 +1177,25 @@ class VmSessionService : Service() {
         if (!file.isFile) return "[missing] " + file.absolutePath
         return runCatching { file.readText() }
             .getOrElse { "[read failed: " + (it.message ?: it.javaClass.simpleName) + "]" }
+    }
+
+    fun readAllDiagnosticLogs(): String {
+        if (runtime.kind != VesselRuntimeKind.PROROOT) return "[not available for UML]"
+        return buildString {
+            appendLine("=== VESSEL COMPLETE PROROOT LOG BUNDLE ===")
+            appendLine("app=" + BuildConfig.VERSION_NAME + " commit=" + BuildConfig.GIT_COMMIT)
+            appendLine("runtime=" + runtime.revision)
+            appendLine("stage=" + state.value.stage + " running=" + state.value.running)
+            appendLine("lastError=" + state.value.lastError.ifBlank { "(none)" })
+            appendLine()
+            PROROOT_DIAGNOSTIC_LOGS.forEach { name ->
+                appendLine("===== " + name + " =====")
+                appendLine(readDiagnosticLog(name))
+                appendLine()
+            }
+            appendLine("===== RUNTIME CONSOLE =====")
+            appendLine(state.value.console)
+        }
     }
 
     private fun hostDiskStats(): Triple<Long, Long, Long> {

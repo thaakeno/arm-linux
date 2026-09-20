@@ -33,7 +33,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v15"
+        const val REVISION = "proroot-production-v16"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -341,8 +341,39 @@ class VesselProrootRuntimeBackend(
             runCatching { Os.chmod(startKdeRc.absolutePath, 0x1A4) } // 0644
         }
 
+        // Keep KDE's real kwin_wayland_wrapper intact. It creates the Wayland
+        // socket and supervises KWin. Intercept only /usr/bin/kwin_wayland so
+        // the compositor gets Vessel's Anland environment without poisoning PATH
+        // for unrelated commands such as dbus-daemon/startplasma-wayland.
+        val kwinBinary = File(layout.rootfsDir, "usr/bin/kwin_wayland")
+        val realKwinBinary = File(
+            layout.rootfsDir,
+            "usr/lib/vessel/desktop/kwin_wayland.real",
+        )
+        check(kwinBinary.isFile) { "KWin Wayland binary is missing" }
+        check(realKwinBinary.parentFile?.isDirectory == true || realKwinBinary.parentFile?.mkdirs() == true) {
+            "Could not create Vessel desktop runtime directory"
+        }
+        val wrapperMarker = "# VESSEL_KWIN_BINARY_V16"
+        val prefix = runCatching {
+            kwinBinary.inputStream().buffered().use { input ->
+                val buffer = ByteArray(256)
+                val count = input.read(buffer).coerceAtLeast(0)
+                String(buffer, 0, count, Charsets.UTF_8)
+            }
+        }.getOrDefault("")
+        if (!prefix.contains(wrapperMarker)) {
+            kwinBinary.inputStream().use { input ->
+                realKwinBinary.outputStream().use { output -> input.copyTo(output) }
+            }
+            Os.chmod(realKwinBinary.absolutePath, 0x1ED) // 0755
+        }
+        check(realKwinBinary.isFile && realKwinBinary.length() > 0L) {
+            "Original KWin Wayland binary could not be preserved"
+        }
         val wrapper = listOf(
             "#!/bin/bash",
+            wrapperMarker,
             "set -euo pipefail",
             ": \"\${VESSEL_DISPLAY_SOCKET:?VESSEL_DISPLAY_SOCKET is required}\"",
             "export ANLAND=1",
@@ -356,29 +387,25 @@ class VesselProrootRuntimeBackend(
             "  fi",
             "  args+=(\"\$arg\")",
             "done",
-            "exec /usr/bin/kwin_wayland \"\${args[@]}\"",
+            "exec /usr/lib/vessel/desktop/kwin_wayland.real \"\${args[@]}\"",
         ).joinToString("\n", postfix = "\n")
-        listOf(
-            "usr/local/lib/vessel/kwin-wrapper/kwin_wayland",
-            "usr/local/lib/vessel/kwin-wrapper/kwin_wayland_wrapper",
-        ).forEach { relative ->
-            val target = File(layout.rootfsDir, relative)
-            check(target.parentFile?.isDirectory == true || target.parentFile?.mkdirs() == true) {
-                "Could not create KWin wrapper directory"
+        val needsWrite = !prefix.contains(wrapperMarker) ||
+            runCatching { kwinBinary.readText() != wrapper }.getOrDefault(true)
+        if (needsWrite) {
+            if (Files.isSymbolicLink(kwinBinary.toPath())) {
+                check(kwinBinary.delete()) { "Could not replace KWin binary symlink" }
             }
-            if (!target.isFile || target.readText() != wrapper) {
-                target.writeText(wrapper)
-                Os.chmod(target.absolutePath, 0x1ED) // 0755
-            }
+            kwinBinary.writeText(wrapper)
+            Os.chmod(kwinBinary.absolutePath, 0x1ED) // 0755
         }
 
-        // The stock Anland Xwayland package is built for normal Linux syscall
-        // policy. Vessel packages a binary from the same pinned source with only
-        // Android-app-seccomp compatibility changes. Install it in /usr/local/bin
-        // so KWin's QStandardPaths lookup selects it before /usr/bin/Xwayland.
-        val xwaylandTarget = File(layout.rootfsDir, "usr/local/bin/Xwayland")
-        check(xwaylandTarget.parentFile?.isDirectory == true || xwaylandTarget.parentFile?.mkdirs() == true) {
-            "Could not create /usr/local/bin for patched Xwayland"
+        // The device logs proved KWin still executed /usr/bin/Xwayland, so the
+        // old /usr/local/bin shadow never reached the process that crashed with
+        // SIGSYS. Install the APK-owned Android-seccomp-safe binary at the exact
+        // path KWin executes.
+        val xwaylandTarget = File(layout.rootfsDir, "usr/bin/Xwayland")
+        check(xwaylandTarget.parentFile?.isDirectory == true) {
+            "Could not access /usr/bin for patched Xwayland"
         }
         val xwaylandStage = File(xwaylandTarget.parentFile, ".Xwayland.vessel-staging")
         appContext.assets.open("vessel/Xwayland.arm64").use { input ->
@@ -918,32 +945,56 @@ class VesselProrootRuntimeBackend(
         val qt6Qml = File(layout.rootfsDir, "usr/lib/aarch64-linux-gnu/qt6/qml")
         val required = listOf(
             File(qt6Qml, "org/kde/plasma/core/qmldir"),
+            File(qt6Qml, "org/kde/plasma/core/libcorebindingsplugin.so"),
             File(qt6Qml, "org/kde/ksvg/qmldir"),
             File(qt6Qml, "org/kde/ksvg/libcorebindingsplugin.so"),
+            File(layout.rootfsDir, "usr/bin/qmlscene6"),
         )
         val repairedMarker = File(
             layout.rootfsDir,
-            "var/cache/vessel/plasma-qml-proroot-production-v15",
+            "var/cache/vessel/plasma-qml-proroot-production-v16",
         )
+        val probeFile = File(layout.rootfsDir, "var/cache/vessel/vessel-qml-probe.qml")
 
-        fun filesReady(): Boolean =
-            required.all { it.isFile && it.length() > 0L }
+        fun writeProbe() {
+            check(probeFile.parentFile?.isDirectory == true || probeFile.parentFile?.mkdirs() == true) {
+                "Could not create Plasma QML probe directory"
+            }
+            probeFile.writeText(
+                """
+                import QtQuick
+                import org.kde.ksvg as KSvg
+                import org.kde.plasma.core as PlasmaCore
+                Item {
+                    width: 8
+                    height: 8
+                    KSvg.SvgItem { width: 1; height: 1 }
+                    Component.onCompleted: Qt.quit()
+                }
+                """.trimIndent() + "\n",
+            )
+            Os.chmod(probeFile.absolutePath, 0x1A4)
+        }
 
-        fun pluginLinksReady(): Boolean {
-            if (!filesReady()) return false
+        fun runtimeProbe(): Boolean {
+            if (required.any { !it.isFile || it.length() <= 0L }) return false
+            writeProbe()
             val probe = VesselProrootProcessRunner.run(
                 shellLaunchPlan(
-                    "ldd -r /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/" +
-                        "libcorebindingsplugin.so 2>&1",
+                    "export QT_QPA_PLATFORM=offscreen; " +
+                        "export QT_QUICK_BACKEND=software; " +
+                        "export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
+                        "export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
+                        "/usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml",
                     diagnostics = true,
                     includeSharedStorage = false,
                 ),
-                timeoutSeconds = 8,
-                logFile = File(layout.diagnosticsDir, "plasma-qml-ksvg-ldd.log"),
+                timeoutSeconds = 15,
+                logFile = File(layout.diagnosticsDir, "plasma-qml-runtime-probe.log"),
             )
             return probe.exitCode == 0 &&
-                !probe.output.contains("not found", ignoreCase = true) &&
-                !probe.output.contains("undefined symbol", ignoreCase = true)
+                !probe.output.contains("is not installed", ignoreCase = true) &&
+                !probe.output.contains("is not a type", ignoreCase = true)
         }
 
         fun markReady() {
@@ -953,17 +1004,10 @@ class VesselProrootRuntimeBackend(
             repairedMarker.writeText("ok\n")
         }
 
-        // A clean v13 rootfs already contains a complete KSvg stack. Do not turn
-        // every cold boot into a network-dependent apt transaction.
-        if (pluginLinksReady()) {
-            markReady()
-            return
-        }
+        // File existence + ldd was too weak: the device had every shared library
+        // while the QML engine still rejected org.kde.plasma.core / KSvg.SvgItem.
+        if (repairedMarker.isFile && runtimeProbe()) return
 
-        // The user's v12 failure was not a Debian signature problem. APT had
-        // already downloaded InRelease, then mkstemp(/tmp/apt.sig.XXXXXX) got
-        // ENOENT. Repair the generic Linux temp/apt directory invariants first
-        // and prove them before invoking apt.
         check(layout.prepareHostLayout() && layout.prepareGuestMountPointsIfReady()) {
             "Could not prepare Linux temporary directories"
         }
@@ -989,21 +1033,28 @@ class VesselProrootRuntimeBackend(
         startupJournal.mark("plasma.qml.repair.begin")
         val repair = VesselProrootProcessRunner.run(
             shellLaunchPlan(
-                "export DEBIAN_FRONTEND=noninteractive; " +
+                "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
+                    "printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; " +
+                    "chmod 0755 /usr/sbin/policy-rc.d; " +
+                    "trap 'rm -f /usr/sbin/policy-rc.d' EXIT; " +
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 -o Acquire::Retries=3 update && " +
-                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 " +
-                    "install -y --reinstall " +
-                    "plasma-desktoptheme qml6-module-org-kde-ksvg " +
-                    "libkf6svg6 libkirigamiplatform6",
+                    "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --reinstall " +
+                    "plasma-workspace plasma-desktop plasma-desktoptheme " +
+                    "qml6-module-org-kde-ksvg libkf6svg6 libkirigamiplatform6 qmlscene-qt6",
                 diagnostics = true,
                 includeSharedStorage = false,
             ),
-            timeoutSeconds = 180,
+            timeoutSeconds = 300,
             logFile = File(layout.diagnosticsDir, "plasma-qml-repair.log"),
         )
-        check(repair.exitCode == 0 && pluginLinksReady()) {
-            "Plasma KSvg/QML runtime repair failed rc=" +
-                repair.exitCode + ": " + repair.output.takeLast(6000)
+        check(repair.exitCode == 0) {
+            "Plasma QML package repair failed rc=" +
+                repair.exitCode + ": " + repair.output.takeLast(8000)
+        }
+
+        check(runtimeProbe()) {
+            "Plasma QML runtime probe still fails after coherent Debian reinstall; " +
+                "see plasma-qml-runtime-probe.log"
         }
         markReady()
         startupJournal.mark("plasma.qml.repair.ok")

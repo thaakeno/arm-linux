@@ -29,8 +29,11 @@ export ANLAND_NO_DRM_DEVICE=1
 unset DISPLAY
 unset EGL_PLATFORM
 
-export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"
-
+# Keep the normal Debian PATH. Prepending a directory that contains only
+# KWin wrappers makes execvp() probe nonexistent wrapper/dbus-daemon,
+# wrapper/startplasma-wayland, etc. Under coderredlab/proroot that failed-path
+# probing can crash the bridge itself. KWin is wrapped surgically at
+# /usr/bin/kwin_wayland_wrapper instead.
 if [[ ! -s /etc/machine-id ]] && command -v dbus-uuidgen >/dev/null 2>&1; then
   dbus-uuidgen --ensure=/etc/machine-id
 fi
