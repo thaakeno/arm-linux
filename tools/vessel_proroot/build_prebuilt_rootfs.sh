@@ -84,7 +84,6 @@ test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir
 test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/qmldir
 test -s /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so
 ! ldd -r /usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so 2>&1 | grep -Eqi 'not found|undefined symbol'
-touch /var/cache/vessel/plasma-qml-proroot-production-v16
 
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /tmp/* /var/tmp/*
@@ -95,6 +94,29 @@ CHROOT
 # Overlay the exact direct-GPU and compositor builds pinned by Vessel.
 sudo -E tools/vessel_proroot/install_direct_gpu_mesa.sh "$ROOTFS"
 sudo -E tools/vessel_proroot/install_desktop_runtime.sh "$ROOTFS"
+
+# Prove the exact post-overlay rootfs can actually import the QML modules that
+# Plasma needs. File existence/ldd alone missed the phone failure.
+sudo tee "$ROOTFS/var/cache/vessel/vessel-qml-probe.qml" >/dev/null <<'QML'
+import QtQuick
+import org.kde.ksvg as KSvg
+import org.kde.plasma.core as PlasmaCore
+Item {
+    width: 8
+    height: 8
+    KSvg.SvgItem { width: 1; height: 1 }
+    Component.onCompleted: Qt.quit()
+}
+QML
+sudo chroot "$ROOTFS" /bin/bash -lc '
+  set -e
+  export QT_QPA_PLATFORM=offscreen
+  export QT_QUICK_BACKEND=software
+  export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml
+  export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml
+  /usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml     >/var/cache/vessel/plasma-qml-build-probe.log 2>&1
+'
+sudo touch "$ROOTFS/var/cache/vessel/plasma-qml-proroot-production-v17"
 
 sudo test -s "$ROOTFS/usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so"
 sudo test -s "$ROOTFS/usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so"
@@ -149,6 +171,7 @@ data={
     "usr/lib/vessel/direct-gpu/mesa.env",
     "usr/lib/vessel/desktop/session.env",
     "usr/lib/vessel/desktop/direct-kwin-build.txt",
+    "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/plasma/core/qmldir",
     "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/qmldir",
     "usr/lib/aarch64-linux-gnu/qt6/qml/org/kde/ksvg/libcorebindingsplugin.so",
     "usr/bin/qmlscene6",
