@@ -33,7 +33,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v17"
+        const val REVISION = "proroot-production-v18"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -952,6 +952,11 @@ class VesselProrootRuntimeBackend(
     }
 
     private fun ensurePlasmaQmlCore() {
+        // The v17 rootfs is built and tested as one coherent Plasma/KF6/Qt6
+        // filesystem image. Do not run qmlscene as a second synthetic gate on
+        // Android: under proroot/offscreen it can reject a module that the real
+        // Wayland Plasma session loads, which prevented KWin/Plasma from even
+        // starting on the phone.
         val verifiedMarker = File(
             layout.rootfsDir,
             "var/cache/vessel/plasma-qml-proroot-production-v17",
@@ -966,57 +971,14 @@ class VesselProrootRuntimeBackend(
             File(qt6Qml, "org/kde/plasma/core/libcorebindingsplugin.so"),
             File(qt6Qml, "org/kde/ksvg/qmldir"),
             File(qt6Qml, "org/kde/ksvg/libcorebindingsplugin.so"),
-            File(layout.rootfsDir, "usr/bin/qmlscene6"),
         )
-        check(required.all { it.isFile && it.length() > 0L }) {
-            "CI-verified Plasma QML payload is incomplete"
+        val missing = required.filter { !it.isFile || it.length() <= 0L }
+        check(missing.isEmpty()) {
+            "CI-verified Plasma QML payload is incomplete: " +
+                missing.joinToString { it.relativeTo(layout.rootfsDir).path }
         }
 
-        val probeFile = File(layout.rootfsDir, "var/cache/vessel/vessel-qml-probe.qml")
-        probeFile.writeText(
-            """
-            import QtQuick
-            import org.kde.ksvg as KSvg
-            import org.kde.plasma.core as PlasmaCore
-            Item {
-                width: 8
-                height: 8
-                KSvg.SvgItem { width: 1; height: 1 }
-                Component.onCompleted: console.log("VESSEL_QML_PROBE_OK")
-            }
-            """.trimIndent() + "\n",
-        )
-        Os.chmod(probeFile.absolutePath, 0x1A4)
-
-        val probe = VesselProrootProcessRunner.run(
-            shellLaunchPlan(
-                "export QT_QPA_PLATFORM=offscreen; " +
-                    "export QT_QUICK_BACKEND=software; " +
-                    "export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
-                    "export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
-                    "rc=0; timeout 5s /usr/bin/qmlscene6 " +
-                    "/var/cache/vessel/vessel-qml-probe.qml || rc=\$?; " +
-                    "printf 'VESSEL_QMLSCENE_RC=%s\\n' \"\$rc\"; exit 0",
-                diagnostics = true,
-                includeSharedStorage = false,
-            ),
-            timeoutSeconds = 15,
-            logFile = File(layout.diagnosticsDir, "plasma-qml-runtime-probe.log"),
-        )
-        val badQml =
-            probe.output.contains("is not installed", ignoreCase = true) ||
-                probe.output.contains("is not a type", ignoreCase = true) ||
-                probe.output.contains("plugin cannot be loaded", ignoreCase = true)
-        check(
-            probe.exitCode == 0 &&
-                probe.output.contains("VESSEL_QML_PROBE_OK") &&
-                !badQml
-        ) {
-            "CI-verified Plasma QML runtime failed on device; " +
-                "automatic package repair/fallback is intentionally disabled. " +
-                "See plasma-qml-runtime-probe.log"
-        }
-        startupJournal.mark("plasma.qml.verified", "ci-rootfs-v17")
+        startupJournal.mark("plasma.qml.payload.ok", "ci-rootfs-v17")
     }
 
     private fun prepareAudioBridge() {
