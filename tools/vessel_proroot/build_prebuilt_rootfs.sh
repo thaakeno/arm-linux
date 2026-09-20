@@ -12,7 +12,7 @@ PY
 )"
 MESA_VERSION="$(python3 - <<'PY'
 import json
-print(json.load(open("tools/vessel_proroot/direct_gpu_manifest.json", encoding="utf-8"))["mesaVersion"])
+print(json.load(open("tools/vessel_proroot/direct_gpu_manifest.json", encoding="utf-8"))["version"])
 PY
 )"
 
