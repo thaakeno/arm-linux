@@ -479,6 +479,15 @@ class VesselProrootBootstrapActivity : ComponentActivity() {
         val mesaVersion = json.getString("mesaVersion")
         val desktopRelease = json.getString("desktopRelease")
         val hardLinksFlattened = json.optBoolean("hardLinksFlattened", false)
+        val capabilityArray = json.optJSONArray("capabilities")
+        val capabilities = buildSet {
+            if (capabilityArray != null) {
+                for (i in 0 until capabilityArray.length()) {
+                    val capability = capabilityArray.optString(i).trim()
+                    if (capability.isNotEmpty()) add(capability)
+                }
+            }
+        }
 
         VesselRootfsReleaseContract.incompatibility(
             schema = schema,
@@ -490,6 +499,7 @@ class VesselProrootBootstrapActivity : ComponentActivity() {
             mesaVersion = mesaVersion,
             desktopRelease = desktopRelease,
             hardLinksFlattened = hardLinksFlattened,
+            capabilities = capabilities,
         )?.let { error(it) }
 
         val archiveBytes = json.getLong("archiveBytes")
