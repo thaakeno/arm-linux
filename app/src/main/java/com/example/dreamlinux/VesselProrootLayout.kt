@@ -167,7 +167,11 @@ class VesselProrootLayout(context: Context) {
         addExisting("/apex")
         addExisting("/proc/self/fd", "/dev/fd")
 
-        result += VesselProrootBind(guestTmpDir.absolutePath, "/tmp")
+        // Keep /tmp inside the writable app-owned rootfs itself. Binding
+        // Android app-data over /tmp looked harmless for shell mktemp, but apt's
+        // GetTempFile/mkstemp path fails through this proroot bind with ENOENT.
+        // The rootfs already owns a normal 01777 /tmp, which is the closest
+        // thing to a real Linux filesystem and works for apt, Qt and KDE.
         result += VesselProrootBind(guestRunDir.absolutePath, "/run")
         result += VesselProrootBind(guestShmDir.absolutePath, "/dev/shm")
 
