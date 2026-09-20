@@ -341,33 +341,35 @@ class VesselProrootRuntimeBackend(
             runCatching { Os.chmod(startKdeRc.absolutePath, 0x1A4) } // 0644
         }
 
-        // Wrap only the executable Plasma actually asks for. Do NOT prepend a
-        // KWin-only directory to PATH: execvp() probes every PATH candidate for
-        // commands such as dbus-daemon/startplasma-wayland. On coderredlab/proroot
-        // those failed candidate execs can crash the bridge itself.
-        val kwinWrapper = File(layout.rootfsDir, "usr/bin/kwin_wayland_wrapper")
-        val realKwinWrapper = File(
+        // Keep KDE's real kwin_wayland_wrapper intact. It creates the Wayland
+        // socket and supervises KWin. Intercept only /usr/bin/kwin_wayland so
+        // the compositor gets Vessel's Anland environment without poisoning PATH
+        // for unrelated commands such as dbus-daemon/startplasma-wayland.
+        val kwinBinary = File(layout.rootfsDir, "usr/bin/kwin_wayland")
+        val realKwinBinary = File(
             layout.rootfsDir,
-            "usr/lib/vessel/desktop/kwin_wayland_wrapper.real",
+            "usr/lib/vessel/desktop/kwin_wayland.real",
         )
-        check(kwinWrapper.isFile) { "KWin Wayland wrapper is missing" }
-        check(realKwinWrapper.parentFile?.isDirectory == true || realKwinWrapper.parentFile?.mkdirs() == true) {
+        check(kwinBinary.isFile) { "KWin Wayland binary is missing" }
+        check(realKwinBinary.parentFile?.isDirectory == true || realKwinBinary.parentFile?.mkdirs() == true) {
             "Could not create Vessel desktop runtime directory"
         }
-        val wrapperMarker = "# VESSEL_KWIN_WRAPPER_V16"
-        val currentPrefix = runCatching {
-            kwinWrapper.inputStream().buffered().use { input ->
-                String(input.readNBytes(256), Charsets.UTF_8)
+        val wrapperMarker = "# VESSEL_KWIN_BINARY_V16"
+        val prefix = runCatching {
+            kwinBinary.inputStream().buffered().use { input ->
+                val buffer = ByteArray(256)
+                val count = input.read(buffer).coerceAtLeast(0)
+                String(buffer, 0, count, Charsets.UTF_8)
             }
         }.getOrDefault("")
-        if (!currentPrefix.contains(wrapperMarker)) {
-            kwinWrapper.inputStream().use { input ->
-                realKwinWrapper.outputStream().use { output -> input.copyTo(output) }
+        if (!prefix.contains(wrapperMarker)) {
+            kwinBinary.inputStream().use { input ->
+                realKwinBinary.outputStream().use { output -> input.copyTo(output) }
             }
-            Os.chmod(realKwinWrapper.absolutePath, 0x1ED) // 0755
+            Os.chmod(realKwinBinary.absolutePath, 0x1ED) // 0755
         }
-        check(realKwinWrapper.isFile && realKwinWrapper.length() > 0L) {
-            "Original KWin Wayland wrapper could not be preserved"
+        check(realKwinBinary.isFile && realKwinBinary.length() > 0L) {
+            "Original KWin Wayland binary could not be preserved"
         }
         val wrapper = listOf(
             "#!/bin/bash",
@@ -385,14 +387,16 @@ class VesselProrootRuntimeBackend(
             "  fi",
             "  args+=(\"\$arg\")",
             "done",
-            "exec /usr/lib/vessel/desktop/kwin_wayland_wrapper.real \"${args[@]}\"",
+            "exec /usr/lib/vessel/desktop/kwin_wayland.real \"${args[@]}\"",
         ).joinToString("\n", postfix = "\n")
-        if (!kwinWrapper.isFile || kwinWrapper.readText() != wrapper) {
-            if (Files.isSymbolicLink(kwinWrapper.toPath())) {
-                check(kwinWrapper.delete()) { "Could not replace KWin wrapper symlink" }
+        val needsWrite = !prefix.contains(wrapperMarker) ||
+            runCatching { kwinBinary.readText() != wrapper }.getOrDefault(true)
+        if (needsWrite) {
+            if (Files.isSymbolicLink(kwinBinary.toPath())) {
+                check(kwinBinary.delete()) { "Could not replace KWin binary symlink" }
             }
-            kwinWrapper.writeText(wrapper)
-            Os.chmod(kwinWrapper.absolutePath, 0x1ED) // 0755
+            kwinBinary.writeText(wrapper)
+            Os.chmod(kwinBinary.absolutePath, 0x1ED) // 0755
         }
 
         // The device logs proved KWin still executed /usr/bin/Xwayland, so the
