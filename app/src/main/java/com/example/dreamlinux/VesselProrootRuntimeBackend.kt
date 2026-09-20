@@ -375,19 +375,19 @@ class VesselProrootRuntimeBackend(
             "#!/bin/bash",
             wrapperMarker,
             "set -euo pipefail",
-            ": \"${VESSEL_DISPLAY_SOCKET:?VESSEL_DISPLAY_SOCKET is required}\"",
+            ": \"\${VESSEL_DISPLAY_SOCKET:?VESSEL_DISPLAY_SOCKET is required}\"",
             "export ANLAND=1",
             "export ANLAND_SOCKET=\"\$VESSEL_DISPLAY_SOCKET\"",
             "export ANLAND_NO_DRM_DEVICE=1",
             "export EGL_PLATFORM=surfaceless",
             "args=()",
             "for arg in \"\$@\"; do",
-            "  if [[ \"${VESSEL_DISABLE_XWAYLAND:-0}\" == \"1\" && \"\$arg\" == \"--xwayland\" ]]; then",
+            "  if [[ \"\${VESSEL_DISABLE_XWAYLAND:-0}\" == \"1\" && \"\$arg\" == \"--xwayland\" ]]; then",
             "    continue",
             "  fi",
             "  args+=(\"\$arg\")",
             "done",
-            "exec /usr/lib/vessel/desktop/kwin_wayland.real \"${args[@]}\"",
+            "exec /usr/lib/vessel/desktop/kwin_wayland.real \"\${args[@]}\"",
         ).joinToString("\n", postfix = "\n")
         val needsWrite = !prefix.contains(wrapperMarker) ||
             runCatching { kwinBinary.readText() != wrapper }.getOrDefault(true)
