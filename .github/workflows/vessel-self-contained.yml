@@ -283,7 +283,8 @@ jobs:
           bash -n tools/vessel_proroot/fetch_official_proroot.sh
           bash -n tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F 'debootstrap' tools/vessel_proroot/build_prebuilt_rootfs.sh
-          grep -F 'proroot-production-v1' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'usr/lib/vessel/rootfs/runtime.env' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          ! grep -Eq 'proroot-production-v[0-9]+' tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F 'install_direct_gpu_mesa.sh "$ROOTFS"' tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F 'install_desktop_runtime.sh "$ROOTFS"' tools/vessel_proroot/build_prebuilt_rootfs.sh
 
