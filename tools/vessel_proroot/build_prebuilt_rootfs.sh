@@ -94,8 +94,8 @@ PORTALS
 chown vessel:vessel /home/vessel/.config/xdg-desktop-portal/portals.conf
 chmod 0600 /home/vessel/.config/xdg-desktop-portal/portals.conf
 
-dpkg-query -W -f='\${db:Status-Status}\n' plasma-desktoptheme | grep -Fxq installed
-dpkg-query -W -f='\${db:Status-Status}\n' qml6-module-org-kde-ksvg | grep -Fxq installed
+dpkg-query -W -f='${db:Status-Status}\n' plasma-desktoptheme | grep -Fxq installed
+dpkg-query -W -f='${db:Status-Status}\n' qml6-module-org-kde-ksvg | grep -Fxq installed
 
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /tmp/* /var/tmp/*
