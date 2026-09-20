@@ -388,6 +388,9 @@ class VesselProrootRuntimeBackend(
             "exec /usr/lib/vessel/desktop/kwin_wayland_wrapper.real \"${args[@]}\"",
         ).joinToString("\n", postfix = "\n")
         if (!kwinWrapper.isFile || kwinWrapper.readText() != wrapper) {
+            if (Files.isSymbolicLink(kwinWrapper.toPath())) {
+                check(kwinWrapper.delete()) { "Could not replace KWin wrapper symlink" }
+            }
             kwinWrapper.writeText(wrapper)
             Os.chmod(kwinWrapper.absolutePath, 0x1ED) // 0755
         }
@@ -976,7 +979,6 @@ class VesselProrootRuntimeBackend(
                 shellLaunchPlan(
                     "export QT_QPA_PLATFORM=offscreen; " +
                         "export QT_QUICK_BACKEND=software; " +
-                        "export QSG_RHI_BACKEND=software; " +
                         "export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
                         "export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml; " +
                         "/usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml",
@@ -1027,7 +1029,10 @@ class VesselProrootRuntimeBackend(
         startupJournal.mark("plasma.qml.repair.begin")
         val repair = VesselProrootProcessRunner.run(
             shellLaunchPlan(
-                "export DEBIAN_FRONTEND=noninteractive; " +
+                "export DEBIAN_FRONTEND=noninteractive SYSTEMD_OFFLINE=1; " +
+                    "printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d; " +
+                    "chmod 0755 /usr/sbin/policy-rc.d; " +
+                    "trap 'rm -f /usr/sbin/policy-rc.d' EXIT; " +
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 -o Acquire::Retries=3 update && " +
                     "apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --reinstall " +
                     "plasma-workspace plasma-desktop plasma-desktoptheme " +
