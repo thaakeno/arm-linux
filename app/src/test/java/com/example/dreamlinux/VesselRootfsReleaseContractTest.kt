@@ -18,6 +18,7 @@ class VesselRootfsReleaseContractTest {
                 mesaVersion = VesselDirectGpuProfile.MESA_VERSION,
                 desktopRelease = VesselProrootDesktopProfile.RELEASE,
                 hardLinksFlattened = true,
+                capabilities = VesselRootfsReleaseContract.REQUIRED_CAPABILITIES,
             ),
         )
     }
@@ -35,6 +36,7 @@ class VesselRootfsReleaseContractTest {
                 mesaVersion = "wrong",
                 desktopRelease = VesselProrootDesktopProfile.RELEASE,
                 hardLinksFlattened = true,
+                capabilities = VesselRootfsReleaseContract.REQUIRED_CAPABILITIES,
             ),
         )
         assertNotNull(
@@ -48,6 +50,21 @@ class VesselRootfsReleaseContractTest {
                 mesaVersion = VesselDirectGpuProfile.MESA_VERSION,
                 desktopRelease = VesselProrootDesktopProfile.RELEASE,
                 hardLinksFlattened = false,
+                capabilities = VesselRootfsReleaseContract.REQUIRED_CAPABILITIES,
+            ),
+        )
+        assertNotNull(
+            VesselRootfsReleaseContract.incompatibility(
+                schema = 2,
+                runtime = "proroot",
+                debian = "trixie",
+                arch = "arm64",
+                compression = "zstd",
+                transport = "github-release-chunks-v1",
+                mesaVersion = VesselDirectGpuProfile.MESA_VERSION,
+                desktopRelease = VesselProrootDesktopProfile.RELEASE,
+                hardLinksFlattened = true,
+                capabilities = VesselRootfsReleaseContract.REQUIRED_CAPABILITIES - "plasma-qml-core",
             ),
         )
     }

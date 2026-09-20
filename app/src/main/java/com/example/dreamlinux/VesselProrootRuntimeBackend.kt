@@ -33,7 +33,6 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v20"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -54,11 +53,12 @@ class VesselProrootRuntimeBackend(
     @Volatile private var displayHeight = 720
     @Volatile private var displayDpi = 120
     @Volatile private var displayRefresh = 120f
+    @Volatile private var qmlImportRootsCache: List<String>? = null
 
     override val kind = VesselRuntimeKind.PROROOT
     override val id = "proroot"
     override val displayName = "proroot · shared Android kernel"
-    override val revision = REVISION
+    override val revision = "proroot@" + BuildConfig.GIT_COMMIT.removeSuffix("-dirty")
     override val displayTransport = DISPLAY_TRANSPORT
     override val machineDir: File get() = layout.baseDir
 
@@ -101,17 +101,11 @@ class VesselProrootRuntimeBackend(
         if (!layout.rootfsReady()) {
             return VesselDesktopReadiness(false, "proroot directory rootfs is not installed yet")
         }
-        if (!File(layout.rootfsDir, "var/cache/vessel/proroot-production-v1").isFile) {
-            return VesselDesktopReadiness(false, "Phase-6 production rootfs marker is missing")
-        }
-        if (!File(
-                layout.rootfsDir,
-                "var/cache/vessel/plasma-qml-proroot-production-v17",
-            ).isFile
-        ) {
+        val qmlRoots = discoverPlasmaQmlImportRoots()
+        if (qmlRoots.isEmpty()) {
             return VesselDesktopReadiness(
                 false,
-                "Installed rootfs predates the CI-verified Plasma QML runtime v17",
+                "Plasma QML runtime is incomplete: org.kde.plasma.core / org.kde.ksvg not found",
             )
         }
 
@@ -351,12 +345,9 @@ class VesselProrootRuntimeBackend(
             runCatching { Os.chmod(startKdeRc.absolutePath, 0x1A4) } // 0644
         }
 
-        // Restore the exact launch shape that already reached real native KWin
-        // frames in proroot-production-v13. The v16-v18 regression moved the
-        // kwin_wayland ELF out of /usr/bin and replaced it with a shell wrapper;
-        // KWin's private QPA plugin was then discovered but failed to initialize.
-        // Keep the KWin ELF at its packaged path and wrap only the supervisor
-        // executable that startplasma-wayland invokes.
+        // Keep the packaged KWin ELF at /usr/bin/kwin_wayland. If an older
+        // Vessel build replaced it with a script, recover the preserved ELF by
+        // inspecting file type/content rather than matching a historical version.
         val kwinBinary = File(layout.rootfsDir, "usr/bin/kwin_wayland")
         val savedKwinBinary = File(
             layout.rootfsDir,
@@ -364,16 +355,21 @@ class VesselProrootRuntimeBackend(
         )
         check(kwinBinary.exists()) { "KWin Wayland binary is missing" }
 
-        val kwinPrefix = runCatching {
-            kwinBinary.inputStream().buffered().use { input ->
-                val buffer = ByteArray(256)
-                val count = input.read(buffer).coerceAtLeast(0)
-                String(buffer, 0, count, Charsets.UTF_8)
+        fun isElf(file: File): Boolean = runCatching {
+            if (!file.isFile || file.length() < 4L) return@runCatching false
+            file.inputStream().use { input ->
+                val magic = ByteArray(4)
+                input.read(magic) == 4 &&
+                    magic[0] == 0x7f.toByte() &&
+                    magic[1] == 'E'.code.toByte() &&
+                    magic[2] == 'L'.code.toByte() &&
+                    magic[3] == 'F'.code.toByte()
             }
-        }.getOrDefault("")
-        if (kwinPrefix.contains("# VESSEL_KWIN_BINARY_V16")) {
-            check(savedKwinBinary.isFile && savedKwinBinary.length() > 0L) {
-                "Cannot restore KWin ELF from the v16-v18 launcher migration"
+        }.getOrDefault(false)
+
+        if (!isElf(kwinBinary)) {
+            check(isElf(savedKwinBinary)) {
+                "KWin executable is not an ELF and no preserved packaged ELF is available"
             }
             val restoreStage = File(kwinBinary.parentFile, ".kwin_wayland.vessel-restore")
             savedKwinBinary.inputStream().use { input ->
@@ -381,27 +377,13 @@ class VesselProrootRuntimeBackend(
             }
             Os.chmod(restoreStage.absolutePath, 0x1ED) // 0755
             if (kwinBinary.exists()) check(kwinBinary.delete()) {
-                "Could not remove migrated KWin wrapper"
+                "Could not remove non-ELF KWin launcher"
             }
             check(restoreStage.renameTo(kwinBinary)) {
                 "Could not restore packaged KWin ELF"
             }
         }
-
-        val restoredPrefix = runCatching {
-            kwinBinary.inputStream().buffered().use { input ->
-                val buffer = ByteArray(4)
-                val count = input.read(buffer).coerceAtLeast(0)
-                buffer.copyOf(count)
-            }
-        }.getOrDefault(byteArrayOf())
-        check(restoredPrefix.size >= 4 &&
-            restoredPrefix[0] == 0x7f.toByte() &&
-            restoredPrefix[1] == 'E'.code.toByte() &&
-            restoredPrefix[2] == 'L'.code.toByte() &&
-            restoredPrefix[3] == 'F'.code.toByte()) {
-            "KWin executable is not the packaged ELF"
-        }
+        check(isElf(kwinBinary)) { "KWin executable is not the packaged ELF" }
 
         val kwinSupervisor = File(layout.rootfsDir, "usr/bin/kwin_wayland_wrapper")
         val savedSupervisor = File(
@@ -412,7 +394,7 @@ class VesselProrootRuntimeBackend(
         check(savedSupervisor.parentFile?.isDirectory == true || savedSupervisor.parentFile?.mkdirs() == true) {
             "Could not create Vessel desktop runtime directory"
         }
-        val supervisorMarker = "# VESSEL_KWIN_SUPERVISOR_V19"
+        val supervisorMarker = "# VESSEL_KWIN_SUPERVISOR"
         val supervisorPrefix = runCatching {
             kwinSupervisor.inputStream().buffered().use { input ->
                 val buffer = ByteArray(256)
@@ -642,6 +624,23 @@ class VesselProrootRuntimeBackend(
             ),
         )
 
+        val qmlRoots = discoverPlasmaQmlImportRoots()
+        check(qmlRoots.isNotEmpty()) {
+            "Plasma QML import roots are unavailable"
+        }
+        val qmlPath = qmlRoots.joinToString(":")
+        environment["QML_IMPORT_PATH"] = qmlPath
+        environment["QML2_IMPORT_PATH"] = qmlPath
+
+        val pluginPaths = qmlRoots.mapNotNull { guestRoot ->
+            val hostRoot = File(layout.rootfsDir, guestRoot.removePrefix("/"))
+            val pluginDir = hostRoot.parentFile?.let { File(it, "plugins") }
+            pluginDir?.takeIf { it.isDirectory }?.let(::guestPath)
+        }.distinct()
+        if (pluginPaths.isNotEmpty()) {
+            environment["QT_PLUGIN_PATH"] = pluginPaths.joinToString(":")
+        }
+
         return VesselProrootContract.build(
             launcherPath = File(layout.nativeLibraryDir, "libproroot.so").absolutePath,
             runtimeLibraryDir = layout.nativeLibraryDir.absolutePath,
@@ -737,7 +736,9 @@ class VesselProrootRuntimeBackend(
             .put("desktopRuntimeReason", desktop.reason)
             .put(
                 "productionRootfs",
-                File(layout.rootfsDir, "var/cache/vessel/proroot-production-v1").isFile,
+                layout.rootfsReady() &&
+                    VesselProrootDesktopProfile.baseReadiness(layout.rootfsDir).ready &&
+                    discoverPlasmaQmlImportRoots().isNotEmpty(),
             )
             .put("displayBridge", bridge)
             .put("presenter", bridge)
@@ -768,6 +769,7 @@ class VesselProrootRuntimeBackend(
             lastError = ""
         }
 
+        resetSessionDiagnostics()
         startupJournal.begin()
         try {
             startupJournal.mark("readiness.begin")
@@ -873,9 +875,9 @@ class VesselProrootRuntimeBackend(
             }
             startupJournal.mark("compat.probe.ok")
 
-            // The on-device log showed org.kde.plasma.core missing. Debian
-            // provides it in plasma-desktoptheme; repair stale production
-            // rootfs installs in-place instead of forcing a 1.4 GiB redownload.
+            // Resolve the actual QML tree present in this rootfs and publish it
+            // to the real KWin/Plasma session. No generation marker or distro
+            // multiarch path is trusted here.
             progress("proroot_plasma_qml", 82, "Validating Plasma 6 QML runtime")
             ensurePlasmaQmlCore()
 
@@ -1019,33 +1021,95 @@ class VesselProrootRuntimeBackend(
     }
 
     private fun ensurePlasmaQmlCore() {
-        // The v17 rootfs is built and tested as one coherent Plasma/KF6/Qt6
-        // filesystem image. Do not run qmlscene as a second synthetic gate on
-        // Android: under proroot/offscreen it can reject a module that the real
-        // Wayland Plasma session loads, which prevented KWin/Plasma from even
-        // starting on the phone.
-        val verifiedMarker = File(
-            layout.rootfsDir,
-            "var/cache/vessel/plasma-qml-proroot-production-v17",
-        )
-        check(verifiedMarker.isFile) {
-            "Installed rootfs is not the CI-verified Plasma QML v17 image"
+        val roots = discoverPlasmaQmlImportRoots()
+        check(roots.isNotEmpty()) {
+            "Plasma QML payload is incomplete: org.kde.plasma.core / org.kde.ksvg not found"
         }
 
-        val qt6Qml = File(layout.rootfsDir, "usr/lib/aarch64-linux-gnu/qt6/qml")
-        val required = listOf(
-            File(qt6Qml, "org/kde/plasma/core/qmldir"),
-            File(qt6Qml, "org/kde/plasma/core/libcorebindingsplugin.so"),
-            File(qt6Qml, "org/kde/ksvg/qmldir"),
-            File(qt6Qml, "org/kde/ksvg/libcorebindingsplugin.so"),
-        )
-        val missing = required.filter { !it.isFile || it.length() <= 0L }
-        check(missing.isEmpty()) {
-            "CI-verified Plasma QML payload is incomplete: " +
-                missing.joinToString { it.relativeTo(layout.rootfsDir).path }
+        val cache = File(layout.rootfsDir, "var/cache/vessel/qml-import-path")
+        check(cache.parentFile?.isDirectory == true || cache.parentFile?.mkdirs() == true) {
+            "Could not create Vessel QML runtime cache"
+        }
+        val value = roots.joinToString(":") + "\n"
+        if (!cache.isFile || cache.readText() != value) {
+            cache.writeText(value)
+            Os.chmod(cache.absolutePath, 0x1A4) // 0644
         }
 
-        startupJournal.mark("plasma.qml.payload.ok", "ci-rootfs-v17")
+        startupJournal.mark("plasma.qml.payload.ok", roots.joinToString(":"))
+    }
+
+    private fun discoverPlasmaQmlImportRoots(): List<String> {
+        qmlImportRootsCache
+            ?.takeIf { cached -> cached.isNotEmpty() && cached.all(::qmlGuestRootReady) }
+            ?.let { return it }
+
+        val found = LinkedHashSet<String>()
+        fun consider(root: File) {
+            if (!root.isDirectory) return
+            val guest = guestPath(root)
+            if (qmlGuestRootReady(guest)) found += guest
+        }
+
+        listOf(
+            File(layout.rootfsDir, "usr/lib"),
+            File(layout.rootfsDir, "usr/local/lib"),
+        ).forEach { libDir ->
+            if (!libDir.isDirectory) return@forEach
+            consider(File(libDir, "qt6/qml"))
+            libDir.listFiles()
+                ?.asSequence()
+                ?.filter { it.isDirectory }
+                ?.forEach { child -> consider(File(child, "qt6/qml")) }
+        }
+
+        if (found.isEmpty()) {
+            listOf(
+                File(layout.rootfsDir, "usr/lib"),
+                File(layout.rootfsDir, "usr/local/lib"),
+            ).forEach { libDir ->
+                if (!libDir.isDirectory || found.isNotEmpty()) return@forEach
+                libDir.walkTopDown()
+                    .maxDepth(6)
+                    .filter { file ->
+                        file.isFile &&
+                            file.name == "qmldir" &&
+                            file.invariantSeparatorsPath.endsWith("/org/kde/plasma/core/qmldir")
+                    }
+                    .forEach { qmldir ->
+                        val qmlRoot = qmldir.parentFile
+                            ?.parentFile
+                            ?.parentFile
+                            ?.parentFile
+                            ?.parentFile
+                        if (qmlRoot != null) consider(qmlRoot)
+                    }
+            }
+        }
+
+        return found.toList().also { qmlImportRootsCache = it }
+    }
+
+    private fun qmlGuestRootReady(guestRoot: String): Boolean {
+        val root = File(layout.rootfsDir, guestRoot.removePrefix("/"))
+        return listOf(
+            "org/kde/plasma/core/qmldir",
+            "org/kde/plasma/core/libcorebindingsplugin.so",
+            "org/kde/ksvg/qmldir",
+            "org/kde/ksvg/libcorebindingsplugin.so",
+        ).all { relative ->
+            val file = File(root, relative)
+            file.isFile && file.length() > 0L
+        }
+    }
+
+    private fun guestPath(file: File): String =
+        "/" + file.relativeTo(layout.rootfsDir).invariantSeparatorsPath.removePrefix("/")
+
+    private fun resetSessionDiagnostics() {
+        layout.diagnosticsDir.listFiles()
+            ?.filter { it.isFile }
+            ?.forEach { file -> runCatching { file.delete() } }
     }
 
     private fun prepareAudioBridge() {

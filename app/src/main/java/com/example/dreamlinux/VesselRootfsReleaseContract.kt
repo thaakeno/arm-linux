@@ -14,6 +14,14 @@ object VesselRootfsReleaseContract {
     const val ARCH = "arm64"
     const val COMPRESSION = "zstd"
     const val TRANSPORT = "github-release-chunks-v1"
+    val REQUIRED_CAPABILITIES = setOf(
+        "rootless-proroot",
+        "plasma-wayland",
+        "plasma-qml-core",
+        "ksvg-qml",
+        "direct-kgsl",
+        "native-surfacecontrol",
+    )
 
     fun incompatibility(
         schema: Int,
@@ -25,6 +33,7 @@ object VesselRootfsReleaseContract {
         mesaVersion: String,
         desktopRelease: String,
         hardLinksFlattened: Boolean,
+        capabilities: Set<String>,
     ): String? = when {
         schema != MANIFEST_SCHEMA ->
             "Unsupported rootfs manifest schema " + schema
@@ -46,6 +55,9 @@ object VesselRootfsReleaseContract {
                 " does not match APK pin " + VesselProrootDesktopProfile.RELEASE
         !hardLinksFlattened ->
             "Rootfs still contains Android-incompatible hard links"
+        !capabilities.containsAll(REQUIRED_CAPABILITIES) ->
+            "Rootfs is missing required capabilities: " +
+                (REQUIRED_CAPABILITIES - capabilities).sorted().joinToString(", ")
         else -> null
     }
 }
