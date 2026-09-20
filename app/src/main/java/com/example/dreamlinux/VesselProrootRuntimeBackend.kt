@@ -33,7 +33,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v16"
+        const val REVISION = "proroot-production-v17"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -952,7 +952,7 @@ class VesselProrootRuntimeBackend(
         )
         val repairedMarker = File(
             layout.rootfsDir,
-            "var/cache/vessel/plasma-qml-proroot-production-v16",
+            "var/cache/vessel/plasma-qml-proroot-production-v17",
         )
         val probeFile = File(layout.rootfsDir, "var/cache/vessel/vessel-qml-probe.qml")
 
@@ -1017,7 +1017,12 @@ class VesselProrootRuntimeBackend(
                 "install -d -m 1777 /tmp /var/tmp; " +
                     "install -d -m 0755 /var/lib/apt/lists/partial /var/cache/apt/archives/partial; " +
                     "test -d /tmp && test -w /tmp && " +
-                    "f=\$(mktemp /tmp/vessel-apt.XXXXXX) && rm -f \"\$f\"",
+                    "f=\$(mktemp /tmp/vessel-apt.XXXXXX) && rm -f \"\$f\" && " +
+                    "/usr/bin/python3 - <<'PY'\n" +
+                    "import os,tempfile\n" +
+                    "fd,p=tempfile.mkstemp(prefix='vessel-python-',dir='/tmp')\n" +
+                    "os.close(fd); os.unlink(p)\n" +
+                    "PY",
                 diagnostics = true,
                 includeSharedStorage = false,
             ),
