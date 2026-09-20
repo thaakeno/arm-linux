@@ -219,7 +219,8 @@ jobs:
           grep -F 'readAllDiagnosticLogs()' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'Copy all' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'resetSessionDiagnostics()' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
-          grep -F 'plasma-qml-runtime-probe.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          ! grep -Fq 'plasma-qml-runtime-probe.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
+          grep -F 'plasma.qml.payload.ok' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           ! grep -Fq 'VesselProrootBind(guestTmpDir.absolutePath, "/tmp")' app/src/main/java/com/example/dreamlinux/VesselProrootLayout.kt
           grep -F 'qmlscene6 /var/cache/vessel/vessel-qml-probe.qml' tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F 'usr/lib/vessel/rootfs/runtime.env' tools/vessel_proroot/build_prebuilt_rootfs.sh
