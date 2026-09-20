@@ -33,7 +33,7 @@ class VesselProrootRuntimeBackend(
     VesselDesktopRuntimeProvider {
 
     companion object {
-        const val REVISION = "proroot-production-v19"
+        const val REVISION = "proroot-production-v20"
         const val DISPLAY_TRANSPORT = "proroot-kgsl-surfacecontrol-ahb-fence-v2"
     }
 
@@ -486,6 +486,13 @@ class VesselProrootRuntimeBackend(
             // /run/user/$UID/doc. Android's app sandbox denies /dev/fuse, so
             // activating it can only fail and delays the session.
             "usr/share/dbus-1/services/org.freedesktop.portal.Documents.service",
+            // In classic Plasma boot startplasma-wayland calls org.kde.KSplash
+            // synchronously before plasma_session is launched. On Vessel the
+            // QML splash cannot become ready and Debian's activation helper
+            // waits roughly a minute, which is exactly the observed 99% stall.
+            // The splash is cosmetic, so rootless sessions disable activation
+            // and let the call fail immediately instead of blocking startup.
+            "usr/share/dbus-1/services/org.kde.KSplash.service",
         ).forEach { relative ->
             val service = File(layout.rootfsDir, relative)
             if (service.isFile) {
@@ -517,6 +524,22 @@ class VesselProrootRuntimeBackend(
         if (!portalConfig.isFile || portalConfig.readText() != portalPolicy) {
             portalConfig.writeText(portalPolicy)
             Os.chmod(portalConfig.absolutePath, 0x1A4) // 0644
+        }
+
+        val ksplashConfig = File(
+            layout.rootfsDir,
+            "home/vessel/.config/ksplashrc",
+        )
+        check(ksplashConfig.parentFile?.isDirectory == true || ksplashConfig.parentFile?.mkdirs() == true) {
+            "Could not create KDE config directory"
+        }
+        val ksplashPolicy = """
+            [KSplash]
+            Engine=None
+        """.trimIndent() + "\n"
+        if (!ksplashConfig.isFile || ksplashConfig.readText() != ksplashPolicy) {
+            ksplashConfig.writeText(ksplashPolicy)
+            Os.chmod(ksplashConfig.absolutePath, 0x1A4) // 0644
         }
 
         true

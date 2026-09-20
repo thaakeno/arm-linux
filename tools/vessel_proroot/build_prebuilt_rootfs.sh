@@ -64,10 +64,19 @@ STARTKDE
 # Do not leave D-Bus activation entries that can only spawn doomed services.
 for service in \
   /usr/share/dbus-1/services/org.freedesktop.systemd1.service \
-  /usr/share/dbus-1/services/org.freedesktop.portal.Documents.service
+  /usr/share/dbus-1/services/org.freedesktop.portal.Documents.service \
+  /usr/share/dbus-1/services/org.kde.KSplash.service
 do
   if [ -f "$service" ]; then mv "$service" "$service.vessel-disabled"; fi
 done
+
+install -d -m0700 -o vessel -g vessel /home/vessel/.config
+cat >/home/vessel/.config/ksplashrc <<'KSPLASH'
+[KSplash]
+Engine=None
+KSPLASH
+chown vessel:vessel /home/vessel/.config/ksplashrc
+chmod 0600 /home/vessel/.config/ksplashrc
 
 install -d -m0700 -o vessel -g vessel /home/vessel/.config/xdg-desktop-portal
 cat >/home/vessel/.config/xdg-desktop-portal/portals.conf <<'PORTALS'

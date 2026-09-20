@@ -177,7 +177,11 @@ jobs:
           grep -F 'fun rootfsReadiness(rootfs: File)' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
           grep -F 'fun baseReadiness(rootfs: File)' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibility.kt
 
-          grep -F 'const val REVISION = "proroot-production-v19"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'const val REVISION = "proroot-production-v20"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'org.kde.KSplash.service' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'Engine=None' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'org.kde.KSplash.service' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'Engine=None' tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
@@ -471,7 +475,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.2.13"' app/build.gradle.kts
+          grep -F 'versionName = "2.2.14"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
           grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
@@ -554,7 +558,7 @@ jobs:
           grep -Fq 'assets/vessel/kwin-direct-overlay.tar.zst' /tmp/release-apk-files.txt
           grep -Fq 'assets/vessel/vessel-start-plasma' /tmp/apk-files.txt
           grep -Fq 'assets/vessel/vessel-start-plasma' /tmp/release-apk-files.txt
-          grep -Fq 'proroot-production-v19' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -Fq 'proroot-production-v20' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
