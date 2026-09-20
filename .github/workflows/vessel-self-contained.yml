@@ -177,12 +177,13 @@ jobs:
           grep -F 'fun rootfsReadiness(rootfs: File)' app/src/main/java/com/example/dreamlinux/VesselDirectGpu.kt
           grep -F 'fun baseReadiness(rootfs: File)' app/src/main/java/com/example/dreamlinux/VesselProrootCompatibility.kt
 
-          grep -F 'const val REVISION = "proroot-production-v20"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'override val revision = "proroot@" + BuildConfig.GIT_COMMIT.removeSuffix("-dirty")' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          ! grep -Eq 'proroot-production-v[0-9]+' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'org.kde.KSplash.service' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'Engine=None' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'org.kde.KSplash.service' tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F 'Engine=None' tools/vessel_proroot/build_prebuilt_rootfs.sh
-          grep -F 'proroot-production-v1' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'discoverPlasmaQmlImportRoots()' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'ConnectivityManager' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'getLinkProperties' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'direct-proroot' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
@@ -217,22 +218,28 @@ jobs:
           grep -F 'selectedDiagnosticText' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'readAllDiagnosticLogs()' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'Copy all' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
+          grep -F 'resetSessionDiagnostics()' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'plasma-qml-runtime-probe.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
           ! grep -Fq 'VesselProrootBind(guestTmpDir.absolutePath, "/tmp")' app/src/main/java/com/example/dreamlinux/VesselProrootLayout.kt
           grep -F 'qmlscene6 /var/cache/vessel/vessel-qml-probe.qml' tools/vessel_proroot/build_prebuilt_rootfs.sh
-          grep -F 'plasma-qml-proroot-production-v17' tools/vessel_proroot/build_prebuilt_rootfs.sh
-          grep -F 'VESSEL_KWIN_SUPERVISOR_V19' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'usr/lib/vessel/rootfs/runtime.env' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          ! grep -Eq 'plasma-qml-proroot-production-v[0-9]+' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F 'val supervisorMarker = "# VESSEL_KWIN_SUPERVISOR"' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'exec /usr/bin/kwin_wayland' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
-          grep -F 'Cannot restore KWin ELF from the v16-v18 launcher migration' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'KWin executable is not an ELF and no preserved packaged ELF is available' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'File(layout.rootfsDir, "usr/bin/Xwayland")' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           ! grep -Fq 'timeout 5s /usr/bin/qmlscene6' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           ! grep -Fq 'CI-verified Plasma QML runtime failed on device' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'plasma.qml.payload.ok' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
-          grep -F 'Installed rootfs predates the CI-verified Plasma QML runtime v17' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
-          grep -F 'QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml' app/src/main/assets/vessel/vessel-start-plasma
+          grep -F 'Plasma QML runtime is incomplete: org.kde.plasma.core / org.kde.ksvg not found' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'VESSEL_QML_IMPORT_PATH=' app/src/main/assets/vessel/vessel-start-plasma
+          grep -F 'find /usr/lib /usr/local/lib -type f' app/src/main/assets/vessel/vessel-start-plasma
+          ! grep -Fq '/usr/lib/aarch64-linux-gnu/qt6/qml' app/src/main/assets/vessel/vessel-start-plasma
           ! grep -Fq 'plasma.qml.repair.begin' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           ! grep -Fq 'apt-get -o Dpkg::Use-Pty=0 -o APT::Color=0 install -y --reinstall' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
-          grep -F '"var/cache/vessel/plasma-qml-proroot-production-v17",' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F '"qmlImportPaths":' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          grep -F '"capabilities":' tools/vessel_proroot/build_prebuilt_rootfs.sh
+          ! grep -Fq '/usr/lib/aarch64-linux-gnu/qt6/qml' tools/vessel_proroot/build_prebuilt_rootfs.sh
           grep -F 'stat -c' tools/vessel_proroot/build_prebuilt_rootfs.sh | grep -F '"$ROOTFS/tmp"'
           ! grep -Fq 'export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
           ! grep -Fq 'export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"' app/src/main/assets/vessel/vessel-start-plasma
@@ -475,7 +482,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          grep -F 'versionName = "2.2.14"' app/build.gradle.kts
+          grep -F 'versionName = "2.2.15"' app/build.gradle.kts
           test -s app/signing/vessel-ci-debug.keystore
           grep -F 'VesselBootstrapActivityV2' app/src/main/AndroidManifest.xml
           grep -F 'github-release-chunks-v1' app/src/main/java/com/example/dreamlinux/VesselBootstrapActivityV2.kt
@@ -558,7 +565,8 @@ jobs:
           grep -Fq 'assets/vessel/kwin-direct-overlay.tar.zst' /tmp/release-apk-files.txt
           grep -Fq 'assets/vessel/vessel-start-plasma' /tmp/apk-files.txt
           grep -Fq 'assets/vessel/vessel-start-plasma' /tmp/release-apk-files.txt
-          grep -Fq 'proroot-production-v20' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -Fq 'override val revision = "proroot@" + BuildConfig.GIT_COMMIT.removeSuffix("-dirty")' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          ! grep -Eq 'proroot-production-v[0-9]+' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/apk-files.txt
           ! grep -Eq 'debian-docker\.ext4|rootfs\.img' /tmp/release-apk-files.txt
           mkdir -p build/deliverables
