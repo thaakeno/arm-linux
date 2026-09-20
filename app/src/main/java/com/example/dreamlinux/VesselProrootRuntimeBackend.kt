@@ -875,9 +875,9 @@ class VesselProrootRuntimeBackend(
             }
             startupJournal.mark("compat.probe.ok")
 
-            // The on-device log showed org.kde.plasma.core missing. Debian
-            // provides it in plasma-desktoptheme; repair stale production
-            // rootfs installs in-place instead of forcing a 1.4 GiB redownload.
+            // Resolve the actual QML tree present in this rootfs and publish it
+            // to the real KWin/Plasma session. No generation marker or distro
+            // multiarch path is trusted here.
             progress("proroot_plasma_qml", 82, "Validating Plasma 6 QML runtime")
             ensurePlasmaQmlCore()
 
