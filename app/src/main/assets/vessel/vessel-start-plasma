@@ -36,7 +36,7 @@ vessel_add_qml_root() {
   [[ -s "$root/org/kde/ksvg/qmldir" ]] || return 0
   [[ -s "$root/org/kde/ksvg/libcorebindingsplugin.so" ]] || return 0
   local existing
-  for existing in "${vessel_qml_roots[@]:-}"; do
+  for existing in "${vessel_qml_roots[@]}"; do
     [[ "$existing" == "$root" ]] && return 0
   done
   vessel_qml_roots+=("$root")
