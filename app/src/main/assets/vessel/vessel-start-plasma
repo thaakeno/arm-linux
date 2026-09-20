@@ -22,8 +22,66 @@ export XDG_CURRENT_DESKTOP=KDE
 export XDG_SESSION_DESKTOP=KDE
 export DESKTOP_SESSION=plasma
 export QT_QPA_PLATFORM=wayland
-export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml
-export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml
+
+# Resolve Qt/QML from the installed filesystem instead of assuming a Debian
+# multiarch directory. The APK also supplies a discovered path, but the launcher
+# independently validates it so rootfs upgrades and distro layout changes cannot
+# strand Plasma behind a stale hardcoded path.
+declare -a vessel_qml_roots=()
+vessel_add_qml_root() {
+  local root="${1%/}"
+  [[ -n "$root" ]] || return 0
+  [[ -s "$root/org/kde/plasma/core/qmldir" ]] || return 0
+  [[ -s "$root/org/kde/plasma/core/libcorebindingsplugin.so" ]] || return 0
+  [[ -s "$root/org/kde/ksvg/qmldir" ]] || return 0
+  [[ -s "$root/org/kde/ksvg/libcorebindingsplugin.so" ]] || return 0
+  local existing
+  for existing in "${vessel_qml_roots[@]:-}"; do
+    [[ "$existing" == "$root" ]] && return 0
+  done
+  vessel_qml_roots+=("$root")
+}
+
+if [[ -n "${QML_IMPORT_PATH:-}" ]]; then
+  IFS=: read -r -a vessel_preseeded_qml <<<"$QML_IMPORT_PATH"
+  for root in "${vessel_preseeded_qml[@]}"; do vessel_add_qml_root "$root"; done
+fi
+
+if [[ -s /var/cache/vessel/qml-import-path ]]; then
+  IFS=: read -r -a vessel_cached_qml < /var/cache/vessel/qml-import-path || true
+  for root in "${vessel_cached_qml[@]}"; do vessel_add_qml_root "$root"; done
+fi
+
+if [[ "${#vessel_qml_roots[@]}" -eq 0 ]]; then
+  while IFS= read -r qmldir; do
+    vessel_add_qml_root "${qmldir%/org/kde/plasma/core/qmldir}"
+  done < <(
+    find /usr/lib /usr/local/lib -type f \
+      -path '*/qt6/qml/org/kde/plasma/core/qmldir' -print 2>/dev/null
+  )
+fi
+
+if [[ "${#vessel_qml_roots[@]}" -eq 0 ]]; then
+  echo "Vessel could not discover a complete Plasma 6 QML import root" >&2
+  exit 74
+fi
+
+QML_IMPORT_PATH="$(IFS=:; printf '%s' "${vessel_qml_roots[*]}")"
+export QML_IMPORT_PATH
+export QML2_IMPORT_PATH="$QML_IMPORT_PATH"
+
+declare -a vessel_plugin_roots=()
+for root in "${vessel_qml_roots[@]}"; do
+  plugin_root="${root%/qml}/plugins"
+  [[ -d "$plugin_root" ]] && vessel_plugin_roots+=("$plugin_root")
+done
+if [[ "${#vessel_plugin_roots[@]}" -gt 0 ]]; then
+  QT_PLUGIN_PATH="$(IFS=:; printf '%s' "${vessel_plugin_roots[*]}")"
+  export QT_PLUGIN_PATH
+fi
+printf 'VESSEL_QML_IMPORT_PATH=%s\n' "$QML_IMPORT_PATH" >&2
+printf 'VESSEL_QT_PLUGIN_PATH=%s\n' "${QT_PLUGIN_PATH:-}" >&2
+
 export GDK_BACKEND=wayland,x11
 export ANLAND_SOCKET="$VESSEL_DISPLAY_SOCKET"
 export ANLAND=1
