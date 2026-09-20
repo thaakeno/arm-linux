@@ -114,7 +114,7 @@ if ! sudo chroot "$ROOTFS" /bin/bash -lc '
   export QT_QUICK_BACKEND=software
   export QML_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml
   export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt6/qml
-  /usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml     >/var/cache/vessel/plasma-qml-build-probe.log 2>&1
+  timeout 20s /usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml     >/var/cache/vessel/plasma-qml-build-probe.log 2>&1
 '; then
   echo "post-overlay Plasma QML runtime probe failed" >&2
   sudo cat "$ROOTFS/var/cache/vessel/plasma-qml-build-probe.log" >&2 || true
