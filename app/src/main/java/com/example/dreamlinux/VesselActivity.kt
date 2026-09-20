@@ -665,6 +665,7 @@ class VesselActivity : ComponentActivity() {
         var selectedDiagnosticLog by remember { mutableStateOf("desktop.log") }
         var selectedDiagnosticText by remember { mutableStateOf("Loading desktop.log…") }
         var diagnosticRefresh by remember { mutableIntStateOf(0) }
+        val diagnosticScope = rememberCoroutineScope()
         LaunchedEffect(state.guestReady, state.running) { VmSessionService.active?.refreshSystemStats() }
         LaunchedEffect(selectedDiagnosticLog, diagnostics, diagnosticRefresh) {
             selectedDiagnosticText = withContext(Dispatchers.IO) {
@@ -904,15 +905,28 @@ class VesselActivity : ComponentActivity() {
                             Column(Modifier.weight(1f)) {
                                 Text("Full runtime logs", fontWeight = FontWeight.SemiBold)
                                 Text(
-                                    "Named proroot/Plasma logs · full selected file · no 6 KB / 18-line UI truncation",
+                                    "Inspect one named log or copy the complete proroot/Plasma bundle in one tap",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            OutlinedButton(
-                                onClick = { copyText(selectedDiagnosticLog, selectedDiagnosticText) },
-                                enabled = selectedDiagnosticText.isNotBlank(),
-                            ) { Text("Copy full") }
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                OutlinedButton(
+                                    onClick = { copyText(selectedDiagnosticLog, selectedDiagnosticText) },
+                                    enabled = selectedDiagnosticText.isNotBlank(),
+                                ) { Text("Copy selected") }
+                                Button(
+                                    onClick = {
+                                        diagnosticScope.launch {
+                                            val all = withContext(Dispatchers.IO) {
+                                                VmSessionService.active?.readAllDiagnosticLogs()
+                                                    ?: "[Vessel runtime service is not connected]"
+                                            }
+                                            copyText("Vessel complete runtime logs", all)
+                                        }
+                                    },
+                                ) { Text("Copy all") }
+                            }
                         }
                         Row(
                             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
