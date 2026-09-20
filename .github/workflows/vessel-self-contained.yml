@@ -214,7 +214,7 @@ jobs:
           grep -F 'readAllDiagnosticLogs()' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'Copy all' app/src/main/java/com/example/dreamlinux/VesselActivity.kt
           grep -F 'plasma-qml-runtime-probe.log' app/src/main/java/com/example/dreamlinux/VmSessionService.kt
-          grep -F 'VESSEL_KWIN_WRAPPER_V16' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
+          grep -F 'VESSEL_KWIN_BINARY_V16' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F 'File(layout.rootfsDir, "usr/bin/Xwayland")' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           grep -F '/usr/bin/qmlscene6 /var/cache/vessel/vessel-qml-probe.qml' app/src/main/java/com/example/dreamlinux/VesselProrootRuntimeBackend.kt
           ! grep -Fq 'export PATH="/usr/local/lib/vessel/kwin-wrapper:$PATH"' tools/vessel_proroot/rootfs/usr/local/libexec/vessel-start-plasma
